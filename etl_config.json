@@ -1,0 +1,263 @@
+{
+  "workload": {
+    "name": "customer_order_summary_etl",
+    "description": "Multi-table join ETL: customers + orders + products → customer_order_summary with insert overwrite",
+    "data_volume": "high",
+    "complexity": "high",
+    "criticality": "high",
+    "time_sensitivity": "medium",
+    "estimated_runtime": "45min",
+    "data_sources": [
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "customers",
+        "query": "SELECT customer_id, name, email, region, signup_date FROM ecommerce_db.customers WHERE active = true",
+        "description": "Active customer data with demographics"
+      },
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "orders",
+        "query": "SELECT order_id, customer_id, product_id, order_date, quantity, total_amount, status FROM ecommerce_db.orders WHERE order_date >= '2023-01-01' AND status = 'completed'",
+        "description": "Completed orders from 2023 onwards"
+      },
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "products",
+        "query": "SELECT product_id, product_name, category, price, cost, supplier_id FROM ecommerce_db.products WHERE active = true",
+        "description": "Active product catalog with pricing"
+      }
+    ],
+    "target": {
+      "type": "glue",
+      "database": "analytics_db",
+      "table": "customer_order_summary",
+      "mode": "insert_overwrite",
+      "schema": {
+        "customer_id": "string",
+        "customer_name": "string",
+        "region": "string",
+        "total_orders": "integer",
+        "total_quantity": "integer",
+        "total_revenue": "decimal(10,2)",
+        "avg_order_value": "decimal(10,2)",
+        "last_order_date": "date",
+        "top_category": "string",
+        "customer_lifetime_value": "decimal(10,2)",
+        "processed_at": "timestamp"
+      },
+      "description": "Aggregated customer analytics table"
+    }
+  },
+  "platform": {
+    "preferred": "glue",
+    "fallback": ["emr", "lambda"],
+    "resource_allocation": {
+      "cpu": "8",
+      "memory": "32GB",
+      "workers": 20,
+      "worker_type": "G.2X",
+      "timeout": "2h"
+    }
+  },
+  "scripts": {
+    "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py",
+    "python": "s3://strands-etl-scripts/customer_order_summary_lambda.py"
+  },
+  "transformations": [
+    {
+      "name": "join_customers_orders",
+      "type": "join",
+      "left_table": "customers",
+      "right_table": "orders",
+      "join_type": "inner",
+      "on": "customer_id",
+      "result_table": "customer_orders",
+      "description": "Join customers with their orders"
+    },
+    {
+      "name": "join_with_products",
+      "type": "join",
+      "left_table": "customer_orders",
+      "right_table": "products",
+      "join_type": "left",
+      "on": "product_id",
+      "result_table": "full_customer_orders",
+      "description": "Add product details to orders"
+    },
+    {
+      "name": "calculate_profit_margin",
+      "type": "derived_column",
+      "expression": "(price - cost) / price * 100",
+      "column_name": "profit_margin_pct",
+      "description": "Calculate profit margin percentage"
+    },
+    {
+      "name": "aggregate_customer_summary",
+      "type": "group_by",
+      "table": "full_customer_orders",
+      "columns": ["customer_id", "name", "region"],
+      "aggregations": [
+        {"column": "order_id", "function": "count", "alias": "total_orders"},
+        {"column": "quantity", "function": "sum", "alias": "total_quantity"},
+        {"column": "total_amount", "function": "sum", "alias": "total_revenue"},
+        {"column": "total_amount", "function": "avg", "alias": "avg_order_value"},
+        {"column": "order_date", "function": "max", "alias": "last_order_date"},
+        {"column": "profit_margin_pct", "function": "avg", "alias": "avg_profit_margin"}
+      ],
+      "description": "Aggregate data by customer"
+    },
+    {
+      "name": "calculate_customer_lifetime_value",
+      "type": "derived_column",
+      "expression": "total_revenue * (1 + avg_profit_margin / 100)",
+      "column_name": "customer_lifetime_value",
+      "description": "Calculate CLV including profit margin"
+    },
+    {
+      "name": "find_top_category",
+      "type": "window_function",
+      "partition_by": ["customer_id"],
+      "order_by": ["category_count DESC"],
+      "function": "first(category)",
+      "column_name": "top_category",
+      "description": "Find customer's most purchased category"
+    }
+  ],
+  "checks": {
+    "data_quality": [
+      {
+        "name": "customer_completeness",
+        "table": "customers",
+        "column": "customer_id",
+        "rule": "not_null",
+        "threshold": 0.99,
+        "description": "Ensure all customers have IDs"
+      },
+      {
+        "name": "order_amount_validation",
+        "table": "orders",
+        "column": "total_amount",
+        "rule": "between",
+        "min": 0,
+        "max": 10000,
+        "threshold": 0.95,
+        "description": "Validate order amounts are reasonable"
+      },
+      {
+        "name": "product_price_validation",
+        "table": "products",
+        "column": "price",
+        "rule": "greater_than",
+        "value": 0,
+        "threshold": 1.0,
+        "description": "Ensure all products have positive prices"
+      },
+      {
+        "name": "join_completeness",
+        "table": "customer_orders",
+        "column": "customer_id",
+        "rule": "not_null",
+        "threshold": 0.95,
+        "description": "Ensure joins didn't drop too many records"
+      }
+    ],
+    "business_logic": [
+      {
+        "name": "order_date_consistency",
+        "rule": "order_date <= current_date",
+        "threshold": 1.0,
+        "description": "Orders shouldn't be in the future"
+      },
+      {
+        "name": "positive_quantity",
+        "rule": "quantity > 0",
+        "threshold": 1.0,
+        "description": "All orders should have positive quantities"
+      },
+      {
+        "name": "revenue_calculation",
+        "rule": "total_revenue = quantity * price",
+        "threshold": 0.99,
+        "description": "Revenue should match quantity × price"
+      },
+      {
+        "name": "customer_regions",
+        "rule": "region IN ('North America', 'Europe', 'Asia')",
+        "threshold": 0.95,
+        "description": "Customers should be in valid regions"
+      }
+    ],
+    "compliance": [
+      {
+        "name": "pii_masking",
+        "columns": ["email", "name"],
+        "method": "hash",
+        "description": "Mask PII data for compliance"
+      },
+      {
+        "name": "data_retention",
+        "rule": "delete_after_7_years",
+        "description": "Implement data retention policy"
+      }
+    ]
+  },
+  "housekeeping": {
+    "cleanup_rules": [
+      {
+        "action": "delete",
+        "path": "s3://strands-etl-temp/*",
+        "after_hours": 24,
+        "description": "Clean up temporary files after 24 hours"
+      }
+    ],
+    "archiving": {
+      "enabled": true,
+      "archive_path": "s3://strands-etl-archive/",
+      "retention_days": 2555,
+      "description": "Long-term archiving"
+    }
+  },
+  "audit": {
+    "enabled": true,
+    "log_level": "INFO",
+    "log_destination": "s3://strands-etl-audit/logs/",
+    "track_changes": true,
+    "description": "Comprehensive audit logging"
+  },
+  "monitoring": {
+    "metrics": ["execution_time", "records_processed", "data_quality_score", "join_efficiency", "cost_per_gb", "error_rate"],
+    "alerts": [
+      {
+        "metric": "error_rate",
+        "threshold": 0.05,
+        "action": "notify_team",
+        "description": "Alert when error rate exceeds 5%"
+      },
+      {
+        "metric": "execution_time",
+        "threshold": 3600,
+        "action": "notify_team",
+        "description": "Alert when job takes longer than 1 hour"
+      },
+      {
+        "metric": "data_quality_score",
+        "threshold": 0.9,
+        "action": "notify_team",
+        "description": "Alert when data quality drops below 90%"
+      }
+    ]
+  },
+  "ai_optimization": {
+    "enabled": true,
+    "learning_mode": true,
+    "performance_targets": {
+      "max_execution_time": "60min",
+      "min_data_quality_score": 0.95,
+      "max_cost_per_gb": 0.05,
+      "min_join_efficiency": 0.85
+    }
+  }
+}
