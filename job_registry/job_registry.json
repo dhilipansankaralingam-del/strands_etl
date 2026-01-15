@@ -1,0 +1,32 @@
+{
+  "customer_etl": {
+    "config_path": "config.json",
+    "description": "Customer data ETL pipeline with quality checks and compliance masking",
+    "active": true,
+    "tags": ["customer", "quality", "compliance"]
+  },
+  "basic_etl": {
+    "config_path": "basic_config.json",
+    "description": "Basic ETL pipeline with no transformations - just extract and load",
+    "active": true,
+    "tags": ["basic", "passthrough"]
+  },
+  "sales_etl": {
+    "config_path": "sales_config.json",
+    "description": "Sales data ETL pipeline with aggregation and reporting",
+    "active": true,
+    "tags": ["sales", "aggregation", "reporting"]
+  },
+  "inventory_etl": {
+    "config_path": "inventory_config.json",
+    "description": "Inventory management ETL pipeline",
+    "active": false,
+    "tags": ["inventory", "management"]
+  },
+  "customer_order_summary_etl": {
+    "config_path": "customer_order_summary_etl/configs/etl_config.json",
+    "description": "Multi-table join ETL: customers + orders + products → customer analytics",
+    "active": true,
+    "tags": ["multi-table", "join", "aggregation", "demo", "glue"]
+  }
+}
