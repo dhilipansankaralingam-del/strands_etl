@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Strands ETL - AWS Bedrock Agents Multi-Agent System with Dashboard'
+Description: 'Strands ETL - AWS Bedrock Agents Multi-Agent System with Dashboard (S3-Only Cost-Optimized Version)'
 
 Parameters:
   Environment:
@@ -122,10 +122,6 @@ Resources:
                 Resource:
                   - !Sub '${SchemaBucket.Arn}'
                   - !Sub '${SchemaBucket.Arn}/*'
-              - Effect: Allow
-                Action:
-                  - aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -171,10 +167,6 @@ Resources:
                 Resource: '*'
               - Effect: Allow
                 Action:
-                  - aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
-              - Effect: Allow
-                Action:
                   - bedrock:InvokeModel
                 Resource: '*'
       Tags:
@@ -210,52 +202,6 @@ Resources:
           Value: !Ref Environment
 
   # ==========================================
-  # OpenSearch Serverless for Knowledge Base
-  # ==========================================
-
-  OpenSearchCollection:
-    Type: AWS::OpenSearchServerless::Collection
-    Properties:
-      Name: strands-learning-vectors
-      Type: VECTORSEARCH
-      Description: Vector database for Strands learning patterns
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-
-  OpenSearchAccessPolicy:
-    Type: AWS::OpenSearchServerless::AccessPolicy
-    Properties:
-      Name: strands-learning-access
-      Type: data
-      Policy: !Sub |
-        [{
-          "Rules": [{
-            "Resource": ["collection/strands-learning-vectors"],
-            "Permission": [
-              "aoss:CreateCollectionItems",
-              "aoss:UpdateCollectionItems",
-              "aoss:DescribeCollectionItems"
-            ],
-            "ResourceType": "collection"
-          }, {
-            "Resource": ["index/strands-learning-vectors/*"],
-            "Permission": [
-              "aoss:CreateIndex",
-              "aoss:UpdateIndex",
-              "aoss:DescribeIndex",
-              "aoss:ReadDocument",
-              "aoss:WriteDocument"
-            ],
-            "ResourceType": "index"
-          }],
-          "Principal": [
-            "${BedrockAgentRole.Arn}",
-            "${LambdaExecutionRole.Arn}"
-          ]
-        }]
-
-  # ==========================================
   # Lambda Functions
   # ==========================================
 
@@ -271,7 +217,6 @@ Resources:
       Environment:
         Variables:
           LEARNING_BUCKET: !Ref LearningBucketName
-          OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
           AWS_REGION: !Ref AWS::Region
       Code:
         ZipFile: |
@@ -340,7 +285,6 @@ Resources:
       Environment:
         Variables:
           LEARNING_BUCKET: !Ref LearningBucketName
-          OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
       Code:
         ZipFile: |
           def lambda_handler(event, context):
@@ -467,12 +411,6 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-SchemaBucket'
 
-  OpenSearchCollectionEndpoint:
-    Description: OpenSearch Serverless collection endpoint
-    Value: !GetAtt OpenSearchCollection.CollectionEndpoint
-    Export:
-      Name: !Sub '${AWS::StackName}-OpenSearchEndpoint'
-
   BedrockAgentRoleArn:
     Description: IAM role for Bedrock Agents
     Value: !GetAtt BedrockAgentRole.Arn
@@ -512,10 +450,11 @@ Outputs:
   NextSteps:
     Description: Next steps after stack creation
     Value: |
+      S3-Only Cost-Optimized Version - No OpenSearch Required
       1. Deploy Lambda function code from lambda_functions/ directory
       2. Upload API schemas to S3 schema bucket
       3. Create Bedrock Agents using configs in bedrock_agents/configs/
-      4. Create Knowledge Base and link to OpenSearch collection
-      5. Configure supervisor agent with agent collaboration
-      6. Deploy Streamlit dashboard
-      7. Test end-to-end pipeline execution
+      4. Configure supervisor agent with agent collaboration
+      5. Deploy Streamlit dashboard
+      6. Test end-to-end pipeline execution
+      Note: This version uses S3 for vector storage, saving $350-700/month vs OpenSearch

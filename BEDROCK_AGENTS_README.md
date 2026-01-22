@@ -1,16 +1,17 @@
 # Strands ETL - AWS Bedrock Agents Implementation
 
-## 🌟 What's New
+## 🌟 What's New - S3-Only Cost-Optimized Version
 
 This implementation transforms the Strands ETL framework to use **AWS Bedrock Agents** for true multi-agent orchestration with:
 
 - ✅ **Managed Agent Infrastructure**: AWS handles agent lifecycle, routing, and coordination
 - ✅ **Production Dashboard**: Real-time Streamlit dashboard for monitoring all jobs and agents
-- ✅ **Vector-Based Learning**: OpenSearch Serverless for intelligent pattern matching
+- ✅ **S3-Based Learning**: Cosine similarity search on S3 vectors (no OpenSearch required)
 - ✅ **Natural Language Quality**: Parse quality check requests in plain English
 - ✅ **80% Less Code**: ~500 lines vs ~3,000 lines for custom implementation
 - ✅ **Auto-Scaling**: AWS manages capacity and performance
 - ✅ **Built-in Monitoring**: CloudWatch integration out of the box
+- ✅ **Cost Optimized**: Save $350-700/month vs OpenSearch version
 
 ---
 
@@ -55,12 +56,13 @@ Each agent has a Lambda function that implements custom logic:
 - **Learning Lambda**: Vector creation, storage
 - **Execution Lambda**: Glue/EMR/Lambda job submission
 
-### 3. **OpenSearch Serverless**
+### 3. **S3 Learning Storage**
 
-Vector database for:
-- Learning pattern similarity search
+S3-based vector storage for:
+- Learning pattern cosine similarity search
 - Historical workload matching
-- ML-based platform selection
+- Cost-effective ML-based platform selection
+- No managed database overhead
 
 ### 4. **Streamlit Dashboard**
 
@@ -72,12 +74,6 @@ Real-time monitoring dashboard showing:
 - 💡 **Optimization Insights**: Recent recommendations
 - 🤖 **Agent Console**: Interactive interface to invoke supervisor agent
 
-### 5. **Knowledge Base**
-
-AWS Bedrock Knowledge Base linked to:
-- S3 learning vectors
-- OpenSearch collection
-- Automatic RAG for agents
 
 ---
 
@@ -359,7 +355,7 @@ aws bedrock-agent prepare-agent --agent-id <id>
 - `AWS/Bedrock/Invocations` - Model invocation count
 - `AWS/Lambda/Duration` - Lambda execution time
 - `AWS/Lambda/Errors` - Lambda error count
-- `AOSS/IndexingOCU` - OpenSearch OCU usage
+- `AWS/S3/NumberOfObjects` - Learning vectors count
 
 ### CloudWatch Logs
 
@@ -376,7 +372,7 @@ Configured alarms:
 - Agent error rate > 5%
 - Lambda timeout > 10% of invocations
 - Quality score < 0.70 for 3 consecutive executions
-- OpenSearch OCU > 80% utilization
+- S3 bucket size > 100GB (learning vector cleanup needed)
 
 ---
 
@@ -384,20 +380,23 @@ Configured alarms:
 
 ### Current vs Projected Costs
 
-| Component | Custom Implementation | Bedrock Agents | Savings |
-|-----------|---------------------|----------------|---------|
-| Compute (EC2/ECS for agents) | $200-400/month | $0 (Lambda only) | $200-400 |
-| Message Bus | DIY on EC2 | AWS managed | $100-200 |
-| Development Time | 4 weeks | 1 week | $15,000 labor |
-| Maintenance | Ongoing | Minimal | $5,000/year |
+| Component | Custom Implementation | Bedrock + OpenSearch | S3-Only Version | Extra Savings |
+|-----------|---------------------|---------------------|-----------------|---------------|
+| Compute (EC2/ECS for agents) | $200-400/month | $0 (Lambda only) | $0 (Lambda only) | - |
+| Message Bus | DIY on EC2 | AWS managed | AWS managed | - |
+| Vector Database | Custom | OpenSearch $350-700 | S3 $50 | **$300-650** |
+| Development Time | 4 weeks | 1 week | 1 week | - |
+| Maintenance | Ongoing | Minimal | Minimal | - |
+
+**Total Monthly Savings**: $550-1,200 (vs custom) + $300-650 (vs OpenSearch version)
 
 ### Tips to Reduce Costs
 
 1. **Use Lambda reserved concurrency** if usage is predictable
 2. **Enable S3 Intelligent-Tiering** for learning vectors
-3. **Adjust OpenSearch OCUs** based on actual load
-4. **Set aggressive lifecycle policies** (delete old vectors)
-5. **Use spot instances** for dashboard EC2 (if applicable)
+3. **Monitor and optimize Bedrock token usage**
+4. **Set aggressive lifecycle policies** (delete old vectors - 90 days enabled)
+5. **Limit S3 scan operations** (MaxKeys=100 in Lambda code)
 
 ---
 
@@ -406,12 +405,12 @@ Configured alarms:
 ### Data Protection
 - ✅ S3 encryption at rest (AES-256)
 - ✅ TLS 1.2+ for all data in transit
-- ✅ OpenSearch encryption enabled
+- ✅ Lambda environment encryption
 - ✅ No hardcoded credentials (IAM roles)
 
 ### Access Control
 - ✅ Least privilege IAM policies
-- ✅ Resource-based policies on S3/OpenSearch
+- ✅ Resource-based policies on S3 buckets
 - ✅ VPC endpoints for private communication
 - ✅ MFA for admin operations
 
@@ -496,8 +495,8 @@ aws lambda update-function-code \
 
 ### AWS Documentation
 - [AWS Bedrock Agents](https://docs.aws.amazon.com/bedrock/latest/userguide/agents.html)
-- [Bedrock Knowledge Bases](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base.html)
-- [OpenSearch Serverless](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless.html)
+- [AWS S3 Best Practices](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html)
+- [Lambda with S3](https://docs.aws.amazon.com/lambda/latest/dg/with-s3.html)
 
 ### Training
 - [Bedrock Agents Workshop](https://catalog.workshops.aws/bedrock-agents)

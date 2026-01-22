@@ -1,10 +1,12 @@
-# Strands ETL - AWS Bedrock Agents Implementation Plan
+# Strands ETL - AWS Bedrock Agents Implementation Plan (S3-Only Version)
 
 ## 📋 Overview
 
 This document provides detailed, step-by-step instructions for implementing the Strands ETL system using AWS Bedrock Agents after AWS resources have been provisioned.
 
 **Prerequisites**: AWS resources provisioned via CloudFormation stack (see `AWS_PROVISIONING_GUIDE.md`)
+
+**Version**: S3-Only Cost-Optimized (eliminates OpenSearch Serverless for $350-700/month savings)
 
 ---
 
@@ -13,11 +15,10 @@ This document provides detailed, step-by-step instructions for implementing the 
 ### Phase 1: Infrastructure Validation (Day 1)
 ### Phase 2: Lambda Deployment (Days 2-3)
 ### Phase 3: Bedrock Agent Creation (Days 4-6)
-### Phase 4: Knowledge Base Setup (Day 7)
-### Phase 5: Agent Collaboration (Days 8-9)
-### Phase 6: Dashboard Deployment (Day 10)
-### Phase 7: Testing & Validation (Days 11-12)
-### Phase 8: Production Cutover (Days 13-14)
+### Phase 4: Agent Collaboration (Days 7-8)
+### Phase 5: Dashboard Deployment (Day 9)
+### Phase 6: Testing & Validation (Days 10-11)
+### Phase 7: Production Cutover (Days 12-13)
 
 ---
 
@@ -43,9 +44,8 @@ aws cloudformation describe-stacks \
 **Expected Outputs**:
 - LearningBucketName: strands-etl-learning
 - SchemaBucketName: strands-etl-schemas
-- OpenSearchCollectionEndpoint: xxxxx.us-east-1.aoss.amazonaws.com
 - BedrockAgentRoleArn: arn:aws:iam::...
-- 5 Lambda ARNs
+- 5 Lambda ARNs (Decision, Quality, Optimization, Learning, Execution)
 
 ### ✅ Step 1.2: Verify S3 Buckets
 
@@ -60,21 +60,14 @@ aws s3 ls | grep strands
 # Verify lifecycle policies
 aws s3api get-bucket-lifecycle-configuration \
   --bucket strands-etl-learning
+
+# Create initial directory structure in learning bucket
+aws s3api put-object \
+  --bucket strands-etl-learning \
+  --key learning/vectors/.keep
 ```
 
-### ✅ Step 1.3: Verify OpenSearch Collection
-
-```bash
-# List collections
-aws opensearchserverless list-collections \
-  --query 'collectionSummaries[?name==`strands-learning-vectors`]'
-
-# Get collection details
-aws opensearchserverless batch-get-collection \
-  --names strands-learning-vectors
-```
-
-### ✅ Step 1.4: Verify IAM Roles
+### ✅ Step 1.3: Verify IAM Roles
 
 ```bash
 # Check Bedrock Agent Role
@@ -297,140 +290,9 @@ echo "Supervisor Agent ID: $SUPERVISOR_AGENT_ID"
 
 ---
 
-## Phase 4: Knowledge Base Setup
+## Phase 4: Agent Collaboration Setup
 
-### ✅ Step 4.1: Create Knowledge Base
-
-```bash
-# Create Knowledge Base
-aws bedrock-agent create-knowledge-base \
-  --name strands-learning-vectors \
-  --description "Historical ETL execution patterns and learning vectors" \
-  --role-arn $BEDROCK_ROLE_ARN \
-  --knowledge-base-configuration '{
-    "type": "VECTOR",
-    "vectorKnowledgeBaseConfiguration": {
-      "embeddingModelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1"
-    }
-  }' \
-  --storage-configuration '{
-    "type": "OPENSEARCH_SERVERLESS",
-    "opensearchServerlessConfiguration": {
-      "collectionArn": "'$(aws opensearchserverless batch-get-collection --names strands-learning-vectors --query 'collectionDetails[0].arn' --output text)'",
-      "vectorIndexName": "learning-vectors",
-      "fieldMapping": {
-        "vectorField": "embedding",
-        "textField": "text",
-        "metadataField": "metadata"
-      }
-    }
-  }'
-
-# Save Knowledge Base ID
-KB_ID=$(aws bedrock-agent list-knowledge-bases --query 'knowledgeBaseSummaries[?name==`strands-learning-vectors`].knowledgeBaseId' --output text)
-
-echo "Knowledge Base ID: $KB_ID"
-```
-
-### ✅ Step 4.2: Create Data Source (S3)
-
-```bash
-# Create S3 Data Source
-aws bedrock-agent create-data-source \
-  --knowledge-base-id $KB_ID \
-  --name s3-learning-vectors \
-  --description "S3 bucket containing learning vectors" \
-  --data-source-configuration '{
-    "type": "S3",
-    "s3Configuration": {
-      "bucketArn": "arn:aws:s3:::strands-etl-learning",
-      "inclusionPrefixes": ["learning/vectors/"]
-    }
-  }'
-```
-
-### ✅ Step 4.3: Create OpenSearch Index
-
-```bash
-# Get OpenSearch endpoint
-OPENSEARCH_ENDPOINT=$(aws opensearchserverless batch-get-collection \
-  --names strands-learning-vectors \
-  --query 'collectionDetails[0].collectionEndpoint' \
-  --output text | sed 's/https:\/\///')
-
-# Create index (using Python script)
-python3 <<EOF
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
-import boto3
-
-credentials = boto3.Session().get_credentials()
-awsauth = AWS4Auth(
-    credentials.access_key,
-    credentials.secret_key,
-    'us-east-1',
-    'aoss',
-    session_token=credentials.token
-)
-
-client = OpenSearch(
-    hosts=[{'host': '$OPENSEARCH_ENDPOINT', 'port': 443}],
-    http_auth=awsauth,
-    use_ssl=True,
-    verify_certs=True,
-    connection_class=RequestsHttpConnection
-)
-
-# Create index with vector mapping
-index_body = {
-    "settings": {
-        "index.knn": True
-    },
-    "mappings": {
-        "properties": {
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": 4
-            },
-            "text": {
-                "type": "text"
-            },
-            "metadata": {
-                "type": "object"
-            }
-        }
-    }
-}
-
-response = client.indices.create('learning-vectors', body=index_body)
-print(response)
-EOF
-```
-
-### ✅ Step 4.4: Associate Knowledge Base with Agents
-
-```bash
-# Associate with Decision Agent
-aws bedrock-agent associate-agent-knowledge-base \
-  --agent-id $DECISION_AGENT_ID \
-  --agent-version DRAFT \
-  --knowledge-base-id $KB_ID \
-  --description "Historical execution patterns for platform selection"
-
-# Prepare Decision Agent
-aws bedrock-agent prepare-agent \
-  --agent-id $DECISION_AGENT_ID
-
-# Repeat for Quality, Optimization, and Learning agents
-```
-
-**✓ Knowledge Base Setup Complete**: Vector database ready for learning
-
----
-
-## Phase 5: Agent Collaboration Setup
-
-### ✅ Step 5.1: Create Agent Aliases
+### ✅ Step 4.1: Create Agent Aliases
 
 ```bash
 # Create alias for each agent
@@ -480,7 +342,7 @@ aws bedrock-agent-runtime invoke-agent \
 
 ---
 
-## Phase 6: Dashboard Deployment
+## Phase 5: Dashboard Deployment
 
 ### ✅ Step 6.1: Install Dashboard Dependencies
 
@@ -561,7 +423,7 @@ CMD ["streamlit", "run", "strands_dashboard.py", "--server.port=8501", "--server
 
 ---
 
-## Phase 7: Testing & Validation
+## Phase 6: Testing & Validation
 
 ### ✅ Step 7.1: Test Individual Agents
 
@@ -648,7 +510,7 @@ aws bedrock-agent list-ingestion-jobs \
 
 ---
 
-## Phase 8: Production Cutover
+## Phase 7: Production Cutover
 
 ### ✅ Step 8.1: Update Existing Code
 
@@ -746,12 +608,12 @@ aws cloudwatch put-metric-alarm \
 2. Lambda logs for errors
 3. S3 bucket policy
 
-### Issue: Knowledge Base Not Finding Similar Workloads
+### Issue: S3-Based Learning Not Finding Similar Workloads
 
 **Check**:
-1. Ingestion job completed? `aws bedrock-agent list-ingestion-jobs`
-2. OpenSearch index exists? Use Python script from Phase 4
-3. Embedding dimension correct? (should be 4)
+1. Learning vectors exist in S3? `aws s3 ls s3://strands-etl-learning/learning/vectors/learning/`
+2. Lambda has S3 read permissions?
+3. Learning vectors have correct format (JSON with workload_characteristics and execution_metrics)?
 
 ### Issue: Dashboard Not Showing Data
 

@@ -1,6 +1,9 @@
 """
 Lambda Function Handler for Decision Agent
 Implements platform selection logic called by AWS Bedrock Agent
+
+S3-Only Version: Uses S3 for learning vector search instead of OpenSearch
+to reduce costs while maintaining functionality for non-critical vector search.
 """
 
 import json
@@ -9,58 +12,29 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
 import numpy as np
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # AWS Clients
 s3 = boto3.client('s3')
-opensearch_client = None  # Initialize in handler
 
 # Configuration
 LEARNING_BUCKET = 'strands-etl-learning'
-OPENSEARCH_ENDPOINT = None  # Set from environment
-
-
-def get_opensearch_client():
-    """Get OpenSearch client for Knowledge Base queries"""
-    global opensearch_client
-
-    if opensearch_client is None:
-        import os
-        endpoint = os.environ.get('OPENSEARCH_ENDPOINT')
-        region = os.environ.get('AWS_REGION', 'us-east-1')
-
-        credentials = boto3.Session().get_credentials()
-        awsauth = AWS4Auth(
-            credentials.access_key,
-            credentials.secret_key,
-            region,
-            'aoss',
-            session_token=credentials.token
-        )
-
-        opensearch_client = OpenSearch(
-            hosts=[{'host': endpoint, 'port': 443}],
-            http_auth=awsauth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection
-        )
-
-    return opensearch_client
 
 
 def search_learning_vectors(workload: Dict[str, Any], limit: int = 10) -> Dict[str, Any]:
     """
-    Search for similar historical workloads using vector similarity.
+    Search for similar historical workloads using S3-based vector similarity.
 
     This function:
     1. Converts workload characteristics to feature vector
-    2. Searches OpenSearch for similar vectors
+    2. Scans S3 learning vectors and calculates cosine similarity
     3. Returns top N most similar executions
+
+    Note: This S3-only approach is cost-optimized for scenarios where
+    vector search performance is not critical. For high-performance needs,
+    consider upgrading to OpenSearch Serverless.
     """
     try:
         logger.info(f"Searching for similar workloads: {workload}")
@@ -68,56 +42,8 @@ def search_learning_vectors(workload: Dict[str, Any], limit: int = 10) -> Dict[s
         # Extract features
         features = extract_workload_features(workload)
 
-        # Try OpenSearch first (Knowledge Base)
-        try:
-            client = get_opensearch_client()
-
-            # Construct k-NN query
-            query = {
-                "size": limit,
-                "query": {
-                    "knn": {
-                        "embedding": {
-                            "vector": features_to_embedding(features),
-                            "k": limit
-                        }
-                    }
-                },
-                "_source": [
-                    "workload_characteristics",
-                    "execution_metrics",
-                    "decision_context"
-                ]
-            }
-
-            response = client.search(
-                index="learning-vectors",
-                body=query
-            )
-
-            similar_workloads = []
-            for hit in response['hits']['hits']:
-                source = hit['_source']
-                similar_workloads.append({
-                    'similarity_score': hit['_score'],
-                    'platform_used': source.get('execution_metrics', {}).get('platform_used'),
-                    'execution_time_seconds': source.get('execution_metrics', {}).get('execution_time_seconds'),
-                    'success': source.get('execution_metrics', {}).get('success', False),
-                    'quality_score': source.get('execution_metrics', {}).get('data_quality_score'),
-                    'workload_characteristics': source.get('workload_characteristics', {})
-                })
-
-            return {
-                'similar_workloads': similar_workloads,
-                'total_found': response['hits']['total']['value'],
-                'source': 'opensearch'
-            }
-
-        except Exception as e:
-            logger.warning(f"OpenSearch query failed, falling back to S3: {e}")
-
-            # Fallback to S3 scan
-            return search_s3_learning_vectors(workload, features, limit)
+        # Use S3-based similarity search
+        return search_s3_learning_vectors(workload, features, limit)
 
     except Exception as e:
         logger.error(f"Error searching learning vectors: {e}")
@@ -197,17 +123,6 @@ def extract_workload_features(workload: Dict[str, Any]) -> Dict[str, float]:
         'criticality': criticality_map.get(workload.get('criticality', 'medium'), 2),
         'estimated_runtime': workload.get('estimated_runtime_minutes', 30) / 60.0
     }
-
-
-def features_to_embedding(features: Dict[str, float]) -> List[float]:
-    """Convert features to embedding vector for k-NN search"""
-    # Simple feature vector (in production, use proper embedding model)
-    return [
-        features.get('data_volume', 2),
-        features.get('complexity', 2),
-        features.get('criticality', 2),
-        features.get('estimated_runtime', 0.5)
-    ]
 
 
 def calculate_cosine_similarity(features1: Dict[str, float], features2: Dict[str, float]) -> float:

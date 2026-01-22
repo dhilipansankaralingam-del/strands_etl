@@ -8,17 +8,18 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 ## 🎯 Executive Summary
 
-### Project: Strands ETL Multi-Agent System with AWS Bedrock
+### Project: Strands ETL Multi-Agent System with AWS Bedrock (S3-Only Cost-Optimized Version)
 ### Purpose: Intelligent ETL orchestration with AI-powered decision making, quality assessment, and continuous learning
-### Architecture: Hybrid approach using AWS Bedrock Agents for coordination + Lambda for custom ETL logic
+### Architecture: Hybrid approach using AWS Bedrock Agents for coordination + Lambda for custom ETL logic + S3 for vector storage
 
-### Total Estimated Monthly Cost: **$800 - $1,500**
+### Total Estimated Monthly Cost: **$500 - $1,100** (Save $350-700/month vs OpenSearch version)
 - AWS Bedrock Agents: $300-600
 - Lambda: $100-200
-- OpenSearch Serverless: $200-400
 - S3: $50-100
 - CloudWatch: $50-100
 - Glue/EMR: Variable based on usage
+
+**Note**: This S3-only version eliminates OpenSearch Serverless ($350-700/month) by using S3 for learning vector storage with cosine similarity search. Ideal for scenarios where vector search performance is not critical.
 
 ---
 
@@ -92,7 +93,7 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 **Dependencies**:
 - Python 3.11 runtime
-- Lambda Layers for: boto3, numpy, pandas, opensearch-py
+- Lambda Layers for: boto3, numpy, pandas
 
 **Monthly Cost**: ~$100-200
 - 1,000 executions/month per function
@@ -191,65 +192,7 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 ---
 
-### ✅ 4. Amazon OpenSearch Serverless
-
-**Service**: Amazon OpenSearch Serverless (Vector Engine)
-
-**What We Need**:
-- Collection Name: `strands-learning-vectors`
-- Type: VECTORSEARCH
-- OCU (OpenSearch Compute Units): 2-4 OCUs
-- Purpose: Vector database for learning pattern similarity search
-
-**Configuration**:
-- Index Name: `learning-vectors`
-- Embedding Dimension: 4 (for workload features)
-- Vector Field: `embedding`
-- Metadata Fields: `workload_characteristics`, `execution_metrics`, `decision_context`
-
-**Monthly Cost**: ~$200-400
-- $0.24 per OCU hour
-- 2-4 OCUs = $350-700/month
-- Data transfer: Minimal
-
-**IAM Permissions Needed**:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "aoss:CreateCollection",
-        "aoss:CreateAccessPolicy",
-        "aoss:CreateSecurityPolicy",
-        "aoss:APIAccessAll"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-**Data Access Policy** (will be created by CloudFormation):
-```json
-[{
-  "Rules": [{
-    "Resource": ["collection/strands-learning-vectors"],
-    "Permission": ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems"],
-    "ResourceType": "collection"
-  }, {
-    "Resource": ["index/strands-learning-vectors/*"],
-    "Permission": ["aoss:CreateIndex", "aoss:ReadDocument", "aoss:WriteDocument"],
-    "ResourceType": "index"
-  }],
-  "Principal": ["arn:aws:iam::{account-id}:role/StrandsBedrockAgentRole"]
-}]
-```
-
----
-
-### ✅ 5. AWS Glue (Existing - Additional Permissions)
+### ✅ 4. AWS Glue (Existing - Additional Permissions)
 
 **Service**: AWS Glue
 
@@ -291,7 +234,7 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 ---
 
-### ✅ 6. Amazon CloudWatch
+### ✅ 5. Amazon CloudWatch
 
 **Service**: CloudWatch Logs and Metrics
 
@@ -334,7 +277,7 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 ---
 
-### ✅ 7. Amazon EMR (Optional - Existing)
+### ✅ 6. Amazon EMR (Optional - Existing)
 
 **Service**: Amazon EMR
 
@@ -351,12 +294,12 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 
 1. **StrandsBedrockAgentRole**
    - Used by: All 5 Bedrock Agents
-   - Permissions: Bedrock, Lambda invocation, S3 (schemas), OpenSearch
+   - Permissions: Bedrock, Lambda invocation, S3 (schemas)
    - Trust Policy: bedrock.amazonaws.com
 
 2. **StrandsLambdaExecutionRole**
    - Used by: All 5 Lambda functions
-   - Permissions: S3 (learning bucket), Glue, EMR, OpenSearch, Bedrock models, CloudWatch Logs
+   - Permissions: S3 (learning bucket), Glue, EMR, Bedrock models, CloudWatch Logs
    - Trust Policy: lambda.amazonaws.com
 
 3. **StrandsETLGlueRole** (enhanced existing)
@@ -378,7 +321,6 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 | Bedrock | Concurrent agent sessions | 50 | 10 | Request increase |
 | Lambda | Concurrent executions | 50 (total) | 1000 | No action |
 | S3 | Buckets | 2 | 100 | No action |
-| OpenSearch | OCUs | 4 | 10 | No action |
 | CloudWatch | Log groups | 10 | 20 | No action |
 
 ### Quota Increase Request:
@@ -394,8 +336,8 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 **Why us-east-1**:
 - AWS Bedrock Agents availability
 - Latest Claude models available
-- OpenSearch Serverless available
 - Lowest latency for Bedrock API calls
+- S3 high availability and durability
 
 **Fallback Region**: us-west-2 (if us-east-1 unavailable)
 
@@ -409,11 +351,12 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 |---------|----------------------|
 | AWS Bedrock (Agents + Models) | $300-600 |
 | Lambda (5 functions) | $100-200 |
-| OpenSearch Serverless | $200-400 |
 | S3 Storage | $50-100 |
 | CloudWatch Logs | $50-100 |
 | Glue/EMR (variable) | $50-200 |
-| **TOTAL** | **$750-1,600/month** |
+| **TOTAL** | **$550-1,200/month** |
+
+**Savings vs OpenSearch Version**: **$200-400/month** (eliminates $350-700 OpenSearch Serverless costs, with slight S3 increase for vector storage)
 
 ### One-Time Setup Costs:
 - CloudFormation stack creation: $0 (no charge)
@@ -423,8 +366,9 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 ### Cost Optimization Recommendations:
 1. Use reserved capacity for Lambda if usage is predictable
 2. Implement S3 lifecycle policies (already in CloudFormation)
-3. Use OpenSearch data plane scaling to adjust OCUs
-4. Monitor and optimize Bedrock token usage
+3. Monitor and optimize Bedrock token usage
+4. Consider S3 Intelligent-Tiering for learning vectors
+5. Regularly clean up old learning vectors (90-day lifecycle policy enabled)
 
 ---
 
@@ -433,8 +377,7 @@ This document provides detailed AWS resource requirements for the Strands ETL Be
 Use this checklist when submitting to admin:
 
 ### ☐ AWS Services to Enable:
-- [ ] AWS Bedrock (with Agents and Knowledge Bases)
-- [ ] Amazon OpenSearch Serverless
+- [ ] AWS Bedrock (with Agents)
 - [ ] AWS Lambda (Python 3.11 runtime)
 - [ ] Amazon S3 (2 new buckets)
 - [ ] Amazon CloudWatch Logs
@@ -449,7 +392,6 @@ Use this checklist when submitting to admin:
 - [ ] Bedrock full access to BedrockAgentRole
 - [ ] Lambda execution policy to LambdaExecutionRole
 - [ ] S3 access policies (learning + schema buckets)
-- [ ] OpenSearch access policy
 
 ### ☐ Quota Increases to Request:
 - [ ] Bedrock concurrent agent sessions: 50 (if default is 10)
@@ -457,11 +399,6 @@ Use this checklist when submitting to admin:
 ### ☐ S3 Buckets to Create:
 - [ ] strands-etl-learning (with lifecycle policy)
 - [ ] strands-etl-schemas
-
-### ☐ OpenSearch Collection:
-- [ ] Collection name: strands-learning-vectors
-- [ ] Type: VECTORSEARCH
-- [ ] OCUs: 2-4
 
 ### ☐ Lambda Functions:
 - [ ] strands-decision-agent-lambda (512MB, 60s)
@@ -496,11 +433,11 @@ aws cloudformation create-stack \
 
 **Provisions**:
 - All IAM roles
-- All S3 buckets
-- OpenSearch collection
+- All S3 buckets (learning + schemas)
 - All Lambda functions (with placeholder code)
 - CloudWatch log groups
 - Proper permissions and policies
+- S3 lifecycle policies for cost optimization
 
 **Time to Complete**: 15-20 minutes
 
@@ -513,13 +450,13 @@ Follow step-by-step instructions in `IMPLEMENTATION_PLAN.md`
 
 ### Data Encryption:
 - **S3**: AES-256 encryption at rest (enabled in CloudFormation)
-- **OpenSearch**: Encryption at rest and in transit
 - **Bedrock**: All data encrypted in transit (TLS 1.2+)
+- **Lambda**: All environment variables encrypted
 
 ### Network Security:
 - All Lambda functions run in AWS managed VPC
-- OpenSearch Serverless uses VPC endpoints
 - S3 buckets block public access
+- VPC endpoints available for S3 if needed
 
 ### Access Control:
 - IAM roles follow least privilege principle
@@ -618,8 +555,8 @@ Once admin completes provisioning:
 
 ---
 
-**Document Version**: 1.0
+**Document Version**: 2.0 (S3-Only Cost-Optimized)
 **Last Updated**: 2024-01-21
 **Prepared For**: AWS Admin - Work Order Submission
-**Estimated Budget**: $750-1,600/month
+**Estimated Budget**: $550-1,200/month (saves $200-400/month vs OpenSearch version)
 
