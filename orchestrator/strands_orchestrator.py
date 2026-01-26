@@ -305,9 +305,93 @@ class StrandsOrchestrator:
 
     def monitor_emr_job(self, execution_result: Dict[str, Any]) -> Dict[str, Any]:
         """Monitor EMR job execution until completion."""
-        # For now, return as-is since EMR monitoring is more complex
-        # Would need to monitor cluster and step status
-        logger.warning("EMR job monitoring not implemented yet")
+        cluster_id = execution_result.get('cluster_id')
+
+        if not cluster_id:
+            logger.error("Missing cluster_id in execution result")
+            return execution_result
+
+        logger.info(f"Monitoring EMR cluster {cluster_id}")
+
+        import time
+        max_wait_time = 7200  # 2 hours max wait (EMR jobs typically take longer)
+        poll_interval = 60  # Check every 60 seconds
+
+        start_time = time.time()
+
+        while time.time() - start_time < max_wait_time:
+            try:
+                # Get cluster status
+                cluster_response = self.emr.describe_cluster(ClusterId=cluster_id)
+                cluster = cluster_response['Cluster']
+                cluster_status = cluster['Status']['State']
+
+                logger.info(f"EMR cluster {cluster_id} status: {cluster_status}")
+
+                # Check if cluster has reached a terminal state
+                if cluster_status in ['TERMINATED', 'TERMINATED_WITH_ERRORS']:
+                    # Get step status to determine if job succeeded
+                    steps_response = self.emr.list_steps(ClusterId=cluster_id)
+                    steps = steps_response.get('Steps', [])
+
+                    step_status = 'UNKNOWN'
+                    step_details = {}
+                    if steps:
+                        # Get the most recent step (our ETL step)
+                        latest_step = steps[0]
+                        step_status = latest_step['Status']['State']
+                        step_details = latest_step
+
+                    execution_result.update({
+                        'final_status': cluster_status,
+                        'step_status': step_status,
+                        'completion_time': datetime.utcnow().isoformat(),
+                        'cluster_details': cluster,
+                        'step_details': step_details
+                    })
+
+                    if cluster_status == 'TERMINATED' and step_status == 'COMPLETED':
+                        execution_result['status'] = 'completed'
+                        logger.info(f"EMR cluster {cluster_id} completed successfully")
+                    else:
+                        execution_result['status'] = 'failed'
+                        error_msg = cluster.get('Status', {}).get('StateChangeReason', {}).get('Message', f'Cluster {cluster_status}')
+                        if step_status not in ['COMPLETED', 'UNKNOWN']:
+                            step_error = step_details.get('Status', {}).get('FailureDetails', {}).get('Message', '')
+                            if step_error:
+                                error_msg = f"{error_msg}; Step error: {step_error}"
+                        execution_result['error'] = error_msg
+                        logger.error(f"EMR cluster {cluster_id} failed: {error_msg}")
+
+                    return execution_result
+
+                # Check for other terminal states that indicate failure
+                if cluster_status in ['TERMINATED_WITH_ERRORS']:
+                    execution_result.update({
+                        'status': 'failed',
+                        'final_status': cluster_status,
+                        'completion_time': datetime.utcnow().isoformat(),
+                        'error': cluster.get('Status', {}).get('StateChangeReason', {}).get('Message', 'Cluster terminated with errors')
+                    })
+                    return execution_result
+
+                # Still running, wait and check again
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"Error monitoring EMR cluster: {e}")
+                execution_result.update({
+                    'status': 'failed',
+                    'error': f'Monitoring failed: {str(e)}'
+                })
+                return execution_result
+
+        # Timeout
+        logger.error(f"EMR cluster {cluster_id} monitoring timed out after {max_wait_time} seconds")
+        execution_result.update({
+            'status': 'failed',
+            'error': f'Monitoring timeout after {max_wait_time} seconds'
+        })
         return execution_result
 
     def quality_agent(self, context: Dict[str, Any]) -> Dict[str, Any]:
