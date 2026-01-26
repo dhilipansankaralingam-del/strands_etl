@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/user/strands_etl"
+      ],
+      "description": "Access ETL scripts, configurations, and documentation",
+      "capabilities": [
+        "read_files",
+        "list_directories",
+        "search_files",
+        "get_file_info"
+      ],
+      "use_cases": [
+        "Read PySpark/Glue scripts for quality analysis",
+        "Access job configurations",
+        "Review historical code changes",
+        "Search for specific anti-patterns in codebase"
+      ]
+    }
+  }
+}

@@ -1,0 +1,207 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Strands Cost Tracking Agent API",
+    "description": "API for cost monitoring, analysis, and optimization",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/calculate_execution_cost": {
+      "post": {
+        "summary": "Calculate execution cost",
+        "description": "Computes detailed cost breakdown for an execution",
+        "operationId": "calculateExecutionCost",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": ["glue", "emr", "lambda"]
+                  },
+                  "duration_seconds": {
+                    "type": "number"
+                  },
+                  "dpu_hours": {
+                    "type": "number"
+                  },
+                  "data_processed_gb": {
+                    "type": "number"
+                  }
+                },
+                "required": ["execution_id", "platform"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost breakdown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total_cost_usd": {
+                      "type": "number"
+                    },
+                    "compute_cost_usd": {
+                      "type": "number"
+                    },
+                    "storage_cost_usd": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_cost_trends": {
+      "post": {
+        "summary": "Get cost trends",
+        "description": "Retrieves historical cost data and trends",
+        "operationId": "getCostTrends",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "job_name": {
+                    "type": "string"
+                  },
+                  "start_date": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "end_date": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "granularity": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly"],
+                    "default": "daily"
+                  }
+                },
+                "required": ["job_name", "start_date", "end_date"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost trend data"
+          }
+        }
+      }
+    },
+    "/identify_cost_anomalies": {
+      "post": {
+        "summary": "Identify cost anomalies",
+        "description": "Detects unusual cost spikes or patterns",
+        "operationId": "identifyCostAnomalies",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "current_cost": {
+                    "type": "number"
+                  },
+                  "job_name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["execution_id", "current_cost", "job_name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Anomaly detection results"
+          }
+        }
+      }
+    },
+    "/recommend_cost_optimizations": {
+      "post": {
+        "summary": "Recommend cost optimizations",
+        "description": "Provides cost-saving recommendations",
+        "operationId": "recommendCostOptimizations",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "job_metrics": {
+                    "type": "object"
+                  }
+                },
+                "required": ["execution_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost optimization recommendations"
+          }
+        }
+      }
+    },
+    "/forecast_costs": {
+      "post": {
+        "summary": "Forecast future costs",
+        "description": "Projects future costs based on historical trends",
+        "operationId": "forecastCosts",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "job_name": {
+                    "type": "string"
+                  },
+                  "forecast_period_days": {
+                    "type": "integer",
+                    "default": 30
+                  }
+                },
+                "required": ["job_name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost forecast"
+          }
+        }
+      }
+    }
+  }
+}
