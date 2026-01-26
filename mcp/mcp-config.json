@@ -1,0 +1,65 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/user/strands_etl"
+      ],
+      "description": "Access ETL scripts, configurations, and documentation",
+      "enabled": true
+    },
+    "aws": {
+      "command": "node",
+      "args": [
+        "/home/user/strands_etl/mcp/servers/aws-mcp-server.js"
+      ],
+      "description": "Direct AWS service interactions",
+      "enabled": true,
+      "env": {
+        "AWS_REGION": "us-east-1",
+        "DYNAMODB_TABLE_PREFIX": "Strands"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "description": "GitHub repository access for code analysis",
+      "enabled": true,
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "slack": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "description": "Slack notifications",
+      "enabled": false,
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "SLACK_CHANNEL": "#strands-etl-alerts"
+      }
+    }
+  },
+  "settings": {
+    "timeout": 30,
+    "retries": 3,
+    "log_level": "INFO"
+  },
+  "agent_mappings": {
+    "decision-agent": ["aws", "filesystem"],
+    "quality-agent": ["aws", "filesystem", "github"],
+    "optimization-agent": ["aws", "filesystem", "github"],
+    "learning-agent": ["aws", "filesystem"],
+    "compliance-agent": ["aws", "filesystem"],
+    "cost-tracking-agent": ["aws"],
+    "supervisor-agent": ["aws", "slack"]
+  }
+}

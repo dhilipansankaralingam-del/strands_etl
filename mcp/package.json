@@ -1,0 +1,30 @@
+{
+  "name": "strands-etl-mcp-servers",
+  "version": "1.0.0",
+  "description": "MCP servers for Strands ETL agentic framework",
+  "main": "servers/aws-mcp-server.js",
+  "scripts": {
+    "start:aws": "node servers/aws-mcp-server.js",
+    "start:all": "node servers/start-all-servers.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "strands",
+    "etl",
+    "aws",
+    "bedrock"
+  ],
+  "author": "Strands ETL Team",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "aws-sdk": "^2.1500.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
