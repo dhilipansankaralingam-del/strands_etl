@@ -1,0 +1,460 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Strands ETL - AWS Bedrock Agents Multi-Agent System with Dashboard (S3-Only Cost-Optimized Version)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Development
+      - Staging
+      - Production
+    Description: Environment name
+
+  LearningBucketName:
+    Type: String
+    Default: strands-etl-learning
+    Description: S3 bucket for learning vectors and reports
+
+  SchemaBucketName:
+    Type: String
+    Default: strands-etl-schemas
+    Description: S3 bucket for Bedrock Agent API schemas
+
+Resources:
+
+  # ==========================================
+  # S3 Buckets
+  # ==========================================
+
+  LearningBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref LearningBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLearningVectors
+            Status: Enabled
+            ExpirationInDays: 90
+            Prefix: learning/vectors/
+          - Id: DeleteTempData
+            Status: Enabled
+            ExpirationInDays: 1
+            Prefix: temp/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: LearningStorage
+
+  SchemaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SchemaBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: SchemaStorage
+
+  # ==========================================
+  # IAM Roles
+  # ==========================================
+
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: StrandsBedrockAgentRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: BedrockAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeAgent
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt DecisionLambdaFunction.Arn
+                  - !GetAtt QualityLambdaFunction.Arn
+                  - !GetAtt OptimizationLambdaFunction.Arn
+                  - !GetAtt LearningLambdaFunction.Arn
+                  - !GetAtt ExecutionLambdaFunction.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${SchemaBucket.Arn}'
+                  - !Sub '${SchemaBucket.Arn}/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: StrandsLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${LearningBucket.Arn}'
+                  - !Sub '${LearningBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:CreateJob
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - emr:RunJobFlow
+                  - emr:DescribeCluster
+                  - emr:ListClusters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: StrandsETLGlueRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub '${LearningBucket.Arn}'
+                  - !Sub '${LearningBucket.Arn}/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==========================================
+  # Lambda Functions
+  # ==========================================
+
+  DecisionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: strands-decision-agent-lambda
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          LEARNING_BUCKET: !Ref LearningBucketName
+          AWS_REGION: !Ref AWS::Region
+      Code:
+        ZipFile: |
+          # Placeholder - actual code will be deployed separately
+          def lambda_handler(event, context):
+              return {"message": "Deploy actual code from lambda_functions/decision/"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Agent
+          Value: DecisionAgent
+
+  QualityLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: strands-quality-agent-lambda
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Environment:
+        Variables:
+          LEARNING_BUCKET: !Ref LearningBucketName
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"message": "Deploy actual code from lambda_functions/quality/"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Agent
+          Value: QualityAgent
+
+  OptimizationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: strands-optimization-agent-lambda
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          LEARNING_BUCKET: !Ref LearningBucketName
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"message": "Deploy actual code from lambda_functions/optimization/"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Agent
+          Value: OptimizationAgent
+
+  LearningLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: strands-learning-agent-lambda
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          LEARNING_BUCKET: !Ref LearningBucketName
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"message": "Deploy actual code from lambda_functions/learning/"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Agent
+          Value: LearningAgent
+
+  ExecutionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: strands-execution-lambda
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          LEARNING_BUCKET: !Ref LearningBucketName
+          GLUE_ROLE_ARN: !GetAtt GlueServiceRole.Arn
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"message": "Deploy actual code from lambda_functions/execution/"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==========================================
+  # Lambda Permissions for Bedrock
+  # ==========================================
+
+  DecisionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DecisionLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  QualityLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref QualityLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  OptimizationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OptimizationLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  LearningLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LearningLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  ExecutionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ExecutionLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  # ==========================================
+  # CloudWatch Log Groups
+  # ==========================================
+
+  DecisionLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DecisionLambdaFunction}'
+      RetentionInDays: 30
+
+  QualityLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${QualityLambdaFunction}'
+      RetentionInDays: 30
+
+  OptimizationLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${OptimizationLambdaFunction}'
+      RetentionInDays: 30
+
+  LearningLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LearningLambdaFunction}'
+      RetentionInDays: 30
+
+  ExecutionLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ExecutionLambdaFunction}'
+      RetentionInDays: 30
+
+# ==========================================
+# Outputs
+# ==========================================
+
+Outputs:
+  LearningBucketName:
+    Description: S3 bucket for learning vectors
+    Value: !Ref LearningBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LearningBucket'
+
+  SchemaBucketName:
+    Description: S3 bucket for API schemas
+    Value: !Ref SchemaBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SchemaBucket'
+
+  BedrockAgentRoleArn:
+    Description: IAM role for Bedrock Agents
+    Value: !GetAtt BedrockAgentRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockAgentRole'
+
+  DecisionLambdaArn:
+    Description: Decision Agent Lambda ARN
+    Value: !GetAtt DecisionLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DecisionLambda'
+
+  QualityLambdaArn:
+    Description: Quality Agent Lambda ARN
+    Value: !GetAtt QualityLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-QualityLambda'
+
+  OptimizationLambdaArn:
+    Description: Optimization Agent Lambda ARN
+    Value: !GetAtt OptimizationLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OptimizationLambda'
+
+  LearningLambdaArn:
+    Description: Learning Agent Lambda ARN
+    Value: !GetAtt LearningLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LearningLambda'
+
+  ExecutionLambdaArn:
+    Description: Execution Lambda ARN
+    Value: !GetAtt ExecutionLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ExecutionLambda'
+
+  NextSteps:
+    Description: Next steps after stack creation
+    Value: |
+      S3-Only Cost-Optimized Version - No OpenSearch Required
+      1. Deploy Lambda function code from lambda_functions/ directory
+      2. Upload API schemas to S3 schema bucket
+      3. Create Bedrock Agents using configs in bedrock_agents/configs/
+      4. Configure supervisor agent with agent collaboration
+      5. Deploy Streamlit dashboard
+      6. Test end-to-end pipeline execution
+      Note: This version uses S3 for vector storage, saving $350-700/month vs OpenSearch

@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "slack": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "description": "Send notifications to Slack channels",
+      "capabilities": [
+        "send_message",
+        "post_to_channel",
+        "send_alert",
+        "create_thread"
+      ],
+      "use_cases": [
+        "Alert team on job failures",
+        "Post cost optimization recommendations",
+        "Share quality score improvements",
+        "Notify on compliance violations"
+      ],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "SLACK_CHANNEL": "#strands-etl-alerts"
+      }
+    }
+  }
+}
