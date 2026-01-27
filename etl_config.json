@@ -1,80 +1,189 @@
 {
+  "config_version": "2.0",
+  "config_metadata": {
+    "description": "Strands ETL Framework - Config-Driven Multi-Agent Orchestration",
+    "created_by": "Strands Framework",
+    "last_updated": "2026-01-27"
+  },
+
+  "templates": {
+    "default_platform": {
+      "allow_agent_override": true,
+      "glue_version": "3.0",
+      "python_version": "3",
+      "enable_spark_ui": true,
+      "enable_continuous_logging": true
+    },
+    "default_quality_checks": {
+      "enabled": true,
+      "fail_on_error": true
+    },
+    "default_compliance": {
+      "data_classification": "confidential",
+      "retention_days": 2555
+    }
+  },
+
+  "variables": {
+    "data_bucket": "my-data-bucket",
+    "raw_prefix": "raw",
+    "processed_prefix": "processed",
+    "dimensions_prefix": "dimensions",
+    "glue_database": "analytics_db",
+    "environment": "${ENV:production}"
+  },
+
   "jobs": [
     {
       "job_id": "customer_order_summary",
       "job_name": "Customer Order Summary ETL",
       "description": "Aggregates customer purchase data with product and customer dimensions",
       "enabled": true,
+      "extends": "default_platform",
 
       "execution": {
         "script_path": "./pyscript/customer_order_summary_glue.py",
         "script_type": "pyspark",
         "schedule": "0 2 * * *",
-        "timeout_minutes": 180
+        "timeout_minutes": 180,
+        "max_retries": 3,
+        "retry_delay_minutes": 10
       },
 
       "platform": {
-        "user_preference": null,
+        "user_preference": "glue",
         "allow_agent_override": true,
         "glue_job_name": "customer-order-summary-etl",
         "dpu_count": 10,
-        "glue_version": "3.0",
-        "python_version": "3"
+        "auto_adjust_dpu": true,
+        "min_dpu": 2,
+        "max_dpu": 20
       },
 
       "workload": {
-        "data_volume_gb": 400,
-        "estimated_file_count": 2000,
+        "data_volume_gb": null,
+        "auto_calculate_volume": true,
+        "estimated_file_count": null,
+        "auto_calculate_file_count": true,
         "complexity": "complex",
         "query_pattern": "batch",
         "incremental": false,
-        "partition_keys": ["transaction_date"]
+        "partition_keys": ["transaction_date"],
+        "expected_growth_rate_monthly": 0.15
       },
 
       "data_sources": [
         {
           "name": "transactions",
-          "type": "s3",
-          "path": "s3://my-data-bucket/raw/transactions/",
-          "format": "parquet",
-          "estimated_size_gb": 350,
-          "file_count": 1800
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "fact_transactions",
+          "alias": "txn",
+          "auto_detect_size": true,
+          "auto_detect_partitions": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "fact",
+          "joins_with": ["customers", "products"],
+          "join_keys": {
+            "customers": "customer_id",
+            "products": "product_id"
+          },
+          "filter_pushdown": true,
+          "partition_filter": "transaction_date >= date_sub(current_date(), 7)",
+          "broadcast_eligible": "auto",
+          "cache_recommended": false,
+          "read_options": {
+            "mergeSchema": false,
+            "recursiveFileLookup": true
+          }
         },
         {
           "name": "customers",
-          "type": "s3",
-          "path": "s3://my-data-bucket/dimensions/customers/",
-          "format": "parquet",
-          "estimated_size_gb": 0.05,
-          "file_count": 1,
-          "broadcast_eligible": true
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "dim_customers",
+          "alias": "cust",
+          "auto_detect_size": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "dimension",
+          "dimension_type": "scd_type_2",
+          "joins_with": ["transactions"],
+          "broadcast_eligible": "auto",
+          "cache_recommended": true,
+          "expected_size_hint": "small"
         },
         {
           "name": "products",
-          "type": "s3",
-          "path": "s3://my-data-bucket/dimensions/products/",
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "dim_products",
+          "alias": "prod",
+          "auto_detect_size": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "dimension",
+          "dimension_type": "scd_type_1",
+          "joins_with": ["transactions"],
+          "broadcast_eligible": "auto",
+          "cache_recommended": true,
+          "expected_size_hint": "small"
+        },
+        {
+          "name": "customer_segments",
+          "source_type": "s3",
+          "path": "s3://${variables.data_bucket}/${variables.dimensions_prefix}/customer_segments/",
           "format": "parquet",
-          "estimated_size_gb": 0.1,
-          "file_count": 1,
-          "broadcast_eligible": true
+          "auto_detect_size": true,
+          "role_in_flow": "dimension",
+          "joins_with": ["customers"],
+          "join_keys": {
+            "customers": "segment_id"
+          },
+          "broadcast_eligible": "auto",
+          "optional": true
         }
       ],
+
+      "data_flow": {
+        "analysis_enabled": true,
+        "auto_detect_joins": true,
+        "join_strategy": "auto",
+        "shuffle_optimization": "auto",
+        "flow_description": "Load fact_transactions, enrich with dim_customers and dim_products, aggregate by customer and product category"
+      },
 
       "data_quality": {
         "enabled": true,
         "fail_on_error": true,
+        "sample_size": 10000,
+        "parallel_validation": true,
         "completeness_checks": [
           {
             "field": "transaction_id",
             "required": true,
             "null_threshold_percent": 0,
-            "severity": "critical"
+            "severity": "critical",
+            "action": "fail_job"
           },
           {
             "field": "customer_id",
             "required": true,
             "null_threshold_percent": 0,
-            "severity": "critical"
+            "severity": "critical",
+            "action": "fail_job"
+          },
+          {
+            "field": "product_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "fail_job"
+          },
+          {
+            "field": "amount",
+            "required": true,
+            "null_threshold_percent": 5,
+            "severity": "high",
+            "action": "warn"
           }
         ],
         "accuracy_rules": [
@@ -82,34 +191,257 @@
             "field": "email",
             "rule_type": "regex",
             "pattern": "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}$",
-            "severity": "high"
+            "severity": "high",
+            "action": "quarantine"
           },
           {
             "field": "amount",
             "rule_type": "range",
             "min": 0,
             "max": 1000000,
-            "severity": "high"
+            "severity": "high",
+            "action": "quarantine"
+          },
+          {
+            "field": "transaction_date",
+            "rule_type": "date_range",
+            "min_date": "2020-01-01",
+            "max_date": "current_date + 1 day",
+            "severity": "critical",
+            "action": "fail_job"
           }
         ],
         "duplicate_check": {
           "enabled": true,
           "key_fields": ["transaction_id"],
           "threshold_percent": 1,
-          "action": "warn"
-        }
+          "action": "warn",
+          "dedup_strategy": "keep_first"
+        },
+        "referential_integrity": [
+          {
+            "child_table": "transactions",
+            "child_key": "customer_id",
+            "parent_table": "customers",
+            "parent_key": "customer_id",
+            "allow_orphans": false,
+            "severity": "critical"
+          },
+          {
+            "child_table": "transactions",
+            "child_key": "product_id",
+            "parent_table": "products",
+            "parent_key": "product_id",
+            "allow_orphans": false,
+            "severity": "critical"
+          }
+        ],
+        "custom_validations": [
+          {
+            "name": "check_transaction_amount_consistency",
+            "sql": "amount = quantity * unit_price",
+            "severity": "high",
+            "action": "warn"
+          }
+        ]
       },
 
       "compliance": {
-        "pii_fields": ["email", "phone"],
+        "pii_fields": ["email", "phone", "customer_name", "address"],
+        "auto_detect_pii": true,
         "gdpr_applicable": true,
+        "gdpr_config": {
+          "consent_required": true,
+          "right_to_deletion": true,
+          "right_to_export": true,
+          "data_minimization": true
+        },
+        "hipaa_applicable": false,
         "data_classification": "confidential",
-        "retention_days": 2555
+        "retention_days": 2555,
+        "encryption_at_rest": true,
+        "encryption_in_transit": true,
+        "audit_logging": true,
+        "data_lineage_tracking": true
       },
 
       "cost": {
         "budget_per_run_usd": 25.0,
-        "optimization_priority": "balanced"
+        "optimization_priority": "balanced",
+        "cost_alerts": {
+          "enabled": true,
+          "threshold_percent": 90,
+          "alert_channels": ["slack", "email"]
+        },
+        "spot_instances": {
+          "enabled": true,
+          "max_spot_percentage": 70
+        }
+      },
+
+      "sla": {
+        "max_duration_minutes": 180,
+        "alert_threshold_minutes": 150,
+        "failure_notification": ["pagerduty", "slack"]
+      },
+
+      "monitoring": {
+        "enabled": true,
+        "metrics": [
+          "execution_time",
+          "data_volume_processed",
+          "cost_per_run",
+          "quality_score",
+          "cpu_utilization",
+          "memory_utilization",
+          "shuffle_read_gb",
+          "shuffle_write_gb"
+        ],
+        "cloudwatch_dashboard": true,
+        "custom_metrics": true
+      }
+    },
+
+    {
+      "job_id": "real_time_clickstream",
+      "job_name": "Real-Time Clickstream Processing",
+      "description": "Processes clickstream data in near real-time using Kinesis and Lambda",
+      "enabled": true,
+
+      "execution": {
+        "script_path": "./lambda/clickstream_processor.py",
+        "script_type": "python",
+        "schedule": "streaming",
+        "timeout_minutes": 15
+      },
+
+      "platform": {
+        "user_preference": "lambda",
+        "allow_agent_override": true,
+        "lambda_function_name": "clickstream-processor",
+        "memory_mb": 1024,
+        "auto_adjust_memory": true,
+        "concurrent_executions": 100
+      },
+
+      "workload": {
+        "complexity": "simple",
+        "query_pattern": "streaming",
+        "incremental": true,
+        "avg_event_size_kb": 5,
+        "events_per_second": 1000
+      },
+
+      "data_sources": [
+        {
+          "name": "clickstream_events",
+          "source_type": "kinesis",
+          "stream_name": "clickstream-events-${variables.environment}",
+          "role_in_flow": "streaming_source",
+          "auto_detect_throughput": true,
+          "batch_size": 100,
+          "batch_window_seconds": 10
+        },
+        {
+          "name": "user_profiles",
+          "source_type": "dynamodb",
+          "table_name": "user-profiles-${variables.environment}",
+          "role_in_flow": "lookup",
+          "cache_recommended": true,
+          "cache_ttl_seconds": 300
+        }
+      ],
+
+      "data_quality": {
+        "enabled": true,
+        "fail_on_error": false,
+        "completeness_checks": [
+          {
+            "field": "user_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "dead_letter_queue"
+          }
+        ]
+      },
+
+      "cost": {
+        "budget_per_run_usd": 5.0,
+        "optimization_priority": "cost"
+      }
+    },
+
+    {
+      "job_id": "multi_table_join_example",
+      "job_name": "Multi-Table Join Example",
+      "description": "Example showing multiple table joins with auto-detection",
+      "enabled": false,
+
+      "execution": {
+        "script_path": "./pyscript/multi_table_join.py",
+        "script_type": "pyspark"
+      },
+
+      "platform": {
+        "user_preference": null,
+        "allow_agent_override": true,
+        "auto_select_platform": true
+      },
+
+      "data_sources": [
+        {
+          "name": "orders",
+          "source_type": "glue_catalog",
+          "database": "sales_db",
+          "table": "orders",
+          "auto_detect_size": true,
+          "role_in_flow": "fact",
+          "joins_with": ["customers", "products", "stores", "promotions"]
+        },
+        {
+          "name": "customers",
+          "source_type": "glue_catalog",
+          "database": "master_db",
+          "table": "customers",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "products",
+          "source_type": "redshift",
+          "cluster": "analytics-cluster",
+          "database": "master_db",
+          "schema": "public",
+          "table": "products",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "stores",
+          "source_type": "rds",
+          "instance": "operational-db",
+          "database": "retail",
+          "table": "stores",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "promotions",
+          "source_type": "s3",
+          "path": "s3://marketing-data/promotions/",
+          "format": "csv",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension",
+          "optional": true
+        }
+      ],
+
+      "data_flow": {
+        "analysis_enabled": true,
+        "auto_detect_joins": true,
+        "auto_detect_broadcast_candidates": true,
+        "auto_optimize_join_order": true
       }
     }
   ],
@@ -117,16 +449,81 @@
   "global_settings": {
     "aws_region": "us-east-1",
     "environment": "production",
+    "enable_agent_learning": true,
+    "learning_storage": {
+      "type": "s3",
+      "bucket": "strands-etl-learning",
+      "prefix": "execution-history/"
+    },
     "agents": {
       "decision_agent": {
         "enabled": true,
         "respect_user_preference": true,
-        "always_provide_recommendation": true
+        "always_provide_recommendation": true,
+        "auto_platform_selection": true,
+        "consider_cost": true,
+        "consider_performance": true,
+        "consider_reliability": true
       },
       "quality_agent": {
         "enabled": true,
-        "fail_job_on_critical_issues": true
+        "fail_job_on_critical_issues": true,
+        "auto_generate_validation_rules": true,
+        "profiling_enabled": true
+      },
+      "optimization_agent": {
+        "enabled": true,
+        "auto_tune_spark_config": true,
+        "auto_adjust_resources": true,
+        "learning_from_history": true
+      },
+      "learning_agent": {
+        "enabled": true,
+        "similarity_threshold": 0.85,
+        "min_history_samples": 5,
+        "vector_storage": "s3"
+      },
+      "compliance_agent": {
+        "enabled": true,
+        "auto_detect_pii": true,
+        "enforce_gdpr": true,
+        "enforce_hipaa": false,
+        "audit_all_access": true
+      },
+      "cost_tracking_agent": {
+        "enabled": true,
+        "track_all_costs": true,
+        "forecast_monthly_costs": true,
+        "alert_on_budget_overrun": true
       }
+    },
+    "notifications": {
+      "slack": {
+        "enabled": true,
+        "webhook_url": "${SECRET:slack_webhook}",
+        "channels": {
+          "success": "#etl-success",
+          "failure": "#etl-alerts",
+          "cost_alerts": "#etl-cost-alerts"
+        }
+      },
+      "email": {
+        "enabled": true,
+        "smtp_server": "smtp.company.com",
+        "recipients": ["data-team@company.com"]
+      },
+      "pagerduty": {
+        "enabled": true,
+        "api_key": "${SECRET:pagerduty_api_key}",
+        "escalation_policy": "data-platform-oncall"
+      }
+    },
+    "feature_flags": {
+      "enable_auto_size_detection": true,
+      "enable_data_flow_analysis": true,
+      "enable_auto_optimization": true,
+      "enable_cost_optimization": true,
+      "enable_predictive_scaling": true
     }
   }
 }
