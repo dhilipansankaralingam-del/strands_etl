@@ -814,4 +814,193 @@ python -c "from orchestrator.strands_orchestrator import StrandsOrchestrator; o=
 
 ---
 
-**Congratulations!** You have successfully set up the Strands ETL Framework.
+## Appendix A: New Features (V2.0)
+
+### A.1 Execution Modes
+
+The framework now supports two execution modes:
+
+| Mode | Config Flag | Behavior |
+|------|-------------|----------|
+| **Run Existing Job** (default) | `create_job: false` | Runs existing Glue job, EMR cluster, or Lambda function |
+| **Create New Job** (rare) | `create_job: true` | Creates new Glue job/EMR cluster on-the-fly |
+
+### A.2 Agent Modes
+
+| Mode | Config Value | Behavior |
+|------|--------------|----------|
+| **Recommend** (default) | `agent_mode: "recommend"` | Agent provides platform recommendations, you decide |
+| **Decide** | `agent_mode: "decide"` | Agent autonomously selects the best platform |
+
+---
+
+## Appendix B: Use Case Examples
+
+### B.1 Simple Use Case: Run Existing Glue Job
+
+**Config file:** `config/simple_usecase.json`
+
+```python
+from orchestrator.strands_orchestrator import StrandsOrchestrator
+
+orchestrator = StrandsOrchestrator()
+
+# Run existing Glue job with recommendations
+result = orchestrator.orchestrate_pipeline(
+    user_request="Run daily sales ETL",
+    config_path="./config/simple_usecase.json",
+    agent_mode="recommend"
+)
+```
+
+**Key config settings:**
+```json
+{
+  "execution": {
+    "platform": "glue",
+    "glue_job_name": "my-existing-sales-etl-job",
+    "create_job": false
+  }
+}
+```
+
+### B.2 Complex Use Case: Agent Decides Platform
+
+**Config file:** `config/complex_usecase.json`
+
+```python
+from orchestrator.strands_orchestrator import StrandsOrchestrator
+
+orchestrator = StrandsOrchestrator()
+
+# Let the agent decide the best platform
+result = orchestrator.orchestrate_pipeline(
+    user_request="Process customer 360 analytics with ML features",
+    config_path="./config/complex_usecase.json",
+    agent_mode="decide"
+)
+
+print(f"Agent selected: {result.get('selected_platform')}")
+```
+
+**Key config settings:**
+```json
+{
+  "execution": {
+    "available_platforms": ["glue", "emr", "lambda"],
+    "glue_job_name": "customer-360-etl",
+    "emr_cluster_id": "j-XXXXXXXXXXXXX",
+    "lambda_function_name": "customer-360-lambda",
+    "create_job": false
+  },
+  "agent_settings": {
+    "agent_mode": "decide"
+  }
+}
+```
+
+### B.3 Rare Use Case: Create New Glue Job
+
+**Config file:** `config/create_new_job_usecase.json`
+
+```python
+from orchestrator.strands_orchestrator import StrandsOrchestrator
+
+orchestrator = StrandsOrchestrator()
+
+# Create a new Glue job for adhoc migration
+result = orchestrator.orchestrate_pipeline(
+    user_request="Create and run adhoc data migration job",
+    config_path="./config/create_new_job_usecase.json"
+)
+```
+
+**Key config settings:**
+```json
+{
+  "execution": {
+    "create_job": true,
+    "new_job_name": "adhoc-migration-2024",
+    "iam_role": "arn:aws:iam::123456789012:role/GlueServiceRole"
+  },
+  "scripts": {
+    "pyspark": "s3://my-etl-scripts/adhoc_migration.py"
+  }
+}
+```
+
+---
+
+## Appendix C: Command Line Interface
+
+The orchestrator can be run from command line:
+
+```bash
+# Get platform recommendation only (no execution)
+python orchestrator/strands_orchestrator.py \
+    --config ./config/complex_usecase.json \
+    --recommend-only
+
+# Dry run (analyze but don't execute)
+python orchestrator/strands_orchestrator.py \
+    --config ./config/simple_usecase.json \
+    --dry-run
+
+# Run with agent deciding platform
+python orchestrator/strands_orchestrator.py \
+    --config ./config/complex_usecase.json \
+    --mode decide \
+    --request "Process customer analytics"
+
+# Run with recommendations (default)
+python orchestrator/strands_orchestrator.py \
+    --config ./config/simple_usecase.json \
+    --mode recommend
+```
+
+---
+
+## Appendix D: Config Reference
+
+### D.1 Execution Config
+
+```json
+{
+  "execution": {
+    "platform": "glue|emr|lambda",
+    "available_platforms": ["glue", "emr", "lambda"],
+    "create_job": false,
+
+    "glue_job_name": "existing-job-name",
+    "emr_cluster_id": "j-XXXXXXXXXXXXX",
+    "lambda_function_name": "my-function",
+
+    "new_job_name": "name-for-new-job",
+    "iam_role": "role-name-or-arn",
+
+    "worker_type": "G.1X|G.2X|G.4X",
+    "number_of_workers": 10,
+    "timeout": 60,
+
+    "job_arguments": {
+      "--arg1": "value1"
+    }
+  }
+}
+```
+
+### D.2 Agent Settings
+
+```json
+{
+  "agent_settings": {
+    "agent_mode": "recommend|decide",
+    "allow_platform_conversion": true,
+    "cost_optimization_priority": "low|medium|high"
+  }
+}
+```
+
+---
+
+**Congratulations!** You have successfully set up the Strands ETL Framework V2.0 with enhanced features for running existing jobs and agent-driven platform decisions.
