@@ -1,0 +1,41 @@
+{
+  "description": "RARE USE CASE: Create a new Glue job on-the-fly (adhoc requirement)",
+
+  "workload": {
+    "name": "adhoc_data_migration",
+    "description": "One-time data migration from legacy system",
+    "data_volume": "high",
+    "complexity": "medium",
+    "criticality": "medium",
+    "time_sensitivity": "low"
+  },
+
+  "execution": {
+    "platform": "glue",
+    "create_job": true,
+    "new_job_name": "adhoc-migration-2024",
+
+    "iam_role": "arn:aws:iam::123456789012:role/GlueServiceRole",
+    "glue_version": "4.0",
+    "worker_type": "G.2X",
+    "number_of_workers": 15,
+    "timeout": 240,
+
+    "temp_dir": "s3://my-etl-temp/adhoc/",
+
+    "job_arguments": {
+      "--source_path": "s3://legacy-data/exports/",
+      "--target_database": "new_analytics_db",
+      "--target_table": "migrated_data",
+      "--migration_date": "2024-01-15"
+    }
+  },
+
+  "scripts": {
+    "pyspark": "s3://my-etl-scripts/adhoc_migration.py"
+  },
+
+  "agent_settings": {
+    "agent_mode": "recommend"
+  }
+}

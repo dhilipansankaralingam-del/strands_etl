@@ -1,0 +1,23 @@
+{
+  "workload": {
+    "name": "customer_order_summary_etl",
+    "description": "Multi-table join ETL: customers + orders + products to customer_order_summary",
+    "data_volume": "high",
+    "complexity": "high",
+    "criticality": "high",
+    "time_sensitivity": "medium"
+  },
+  "platform": {
+    "preferred": "glue",
+    "fallback": ["emr", "lambda"],
+    "iam_role": "arn:aws:iam::123456789012:role/StrandsETLRole",
+    "resource_allocation": {
+      "workers": 10,
+      "worker_type": "G.1X",
+      "timeout": "60"
+    }
+  },
+  "scripts": {
+    "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py"
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "jobs": [
+    {
+      "name": "customer_order_summary_etl",
+      "description": "Multi-table join ETL: customers + orders + products to customer_order_summary",
+      "enabled": true,
+      "schedule": "0 2 * * *",
+      "workload": {
+        "data_volume": "high",
+        "complexity": "high",
+        "criticality": "high",
+        "time_sensitivity": "medium"
+      },
+      "platform": {
+        "preferred": "glue",
+        "fallback": ["emr", "lambda"],
+        "resource_allocation": {
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout": 3600
+        }
+      },
+      "data_sources": [
+        {
+          "name": "customers",
+          "type": "glue",
+          "database": "ecommerce_db",
+          "table": "customers"
+        },
+        {
+          "name": "orders",
+          "type": "glue",
+          "database": "ecommerce_db",
+          "table": "orders"
+        },
+        {
+          "name": "products",
+          "type": "glue",
+          "database": "ecommerce_db",
+          "table": "products"
+        }
+      ],
+      "target": {
+        "type": "glue",
+        "database": "analytics_db",
+        "table": "customer_order_summary",
+        "mode": "overwrite"
+      },
+      "scripts": {
+        "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py"
+      }
+    },
+    {
+      "name": "sales_analytics_etl",
+      "description": "Sales data aggregation and analytics pipeline",
+      "enabled": true,
+      "schedule": "0 3 * * *",
+      "workload": {
+        "data_volume": "medium",
+        "complexity": "medium",
+        "criticality": "high",
+        "time_sensitivity": "low"
+      },
+      "platform": {
+        "preferred": "glue",
+        "fallback": ["lambda"],
+        "resource_allocation": {
+          "workers": 5,
+          "worker_type": "G.1X",
+          "timeout": 1800
+        }
+      },
+      "data_sources": [
+        {
+          "name": "sales",
+          "type": "glue",
+          "database": "ecommerce_db",
+          "table": "sales"
+        }
+      ],
+      "target": {
+        "type": "glue",
+        "database": "analytics_db",
+        "table": "sales_summary",
+        "mode": "overwrite"
+      },
+      "scripts": {
+        "pyspark": "s3://strands-etl-scripts/sales_analytics_glue.py"
+      }
+    },
+    {
+      "name": "inventory_sync_etl",
+      "description": "Inventory synchronization pipeline (disabled)",
+      "enabled": false,
+      "schedule": "0 */4 * * *",
+      "workload": {
+        "data_volume": "low",
+        "complexity": "low",
+        "criticality": "medium",
+        "time_sensitivity": "high"
+      },
+      "platform": {
+        "preferred": "lambda",
+        "fallback": ["glue"],
+        "resource_allocation": {
+          "memory": 1024,
+          "timeout": 300
+        }
+      },
+      "data_sources": [
+        {
+          "name": "inventory",
+          "type": "glue",
+          "database": "operations_db",
+          "table": "inventory"
+        }
+      ],
+      "target": {
+        "type": "glue",
+        "database": "operations_db",
+        "table": "inventory_sync",
+        "mode": "append"
+      },
+      "scripts": {
+        "python": "s3://strands-etl-scripts/inventory_sync_lambda.py"
+      }
+    }
+  ]
+}

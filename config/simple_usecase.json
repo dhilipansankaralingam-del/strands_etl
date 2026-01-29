@@ -1,0 +1,36 @@
+{
+  "description": "SIMPLE USE CASE: Run an existing Glue job with agent recommendations",
+
+  "workload": {
+    "name": "daily_sales_etl",
+    "description": "Daily sales data processing",
+    "data_volume": "medium",
+    "complexity": "low",
+    "criticality": "medium",
+    "time_sensitivity": "low"
+  },
+
+  "execution": {
+    "platform": "glue",
+    "glue_job_name": "my-existing-sales-etl-job",
+    "create_job": false,
+
+    "job_arguments": {
+      "--source_database": "sales_db",
+      "--target_table": "daily_sales_summary"
+    },
+
+    "worker_type": "G.1X",
+    "number_of_workers": 5,
+    "timeout": 60
+  },
+
+  "scripts": {
+    "pyspark": "s3://my-etl-scripts/sales_etl.py"
+  },
+
+  "agent_settings": {
+    "agent_mode": "recommend",
+    "get_recommendations": true
+  }
+}
