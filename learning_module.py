@@ -14,6 +14,7 @@ Features:
 import json
 import boto3
 import logging
+import os
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -22,6 +23,9 @@ import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Default local storage path
+DEFAULT_LOCAL_STORAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'learning_data')
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -42,26 +46,55 @@ class LearningModule:
     intelligent insights for future ETL runs.
     """
 
-    def __init__(self, bucket_name: str = 'strands-etl-learning', region: str = None):
+    def __init__(self, bucket_name: str = 'strands-etl-learning', region: str = None,
+                 storage_mode: str = 'local', local_path: str = None):
         """
         Initialize the Learning Module.
 
         Args:
-            bucket_name: S3 bucket for storing learning data
+            bucket_name: S3 bucket for storing learning data (used when storage_mode='s3')
             region: AWS region
+            storage_mode: 'local' (default) or 's3' - where to store learning data
+            local_path: Local directory path for storing data (default: ./learning_data)
         """
         self.bucket_name = bucket_name
         self.region = region
+        self.storage_mode = storage_mode
+        self.local_path = local_path or DEFAULT_LOCAL_STORAGE
+
+        # Initialize AWS clients
         client_kwargs = {'region_name': region} if region else {}
+        try:
+            self.s3 = boto3.client('s3', **client_kwargs)
+            self.bedrock = boto3.client('bedrock-runtime', **client_kwargs)
+        except Exception as e:
+            logger.warning(f"Could not initialize AWS clients: {e}")
+            self.s3 = None
+            self.bedrock = None
 
-        self.s3 = boto3.client('s3', **client_kwargs)
-        self.bedrock = boto3.client('bedrock-runtime', **client_kwargs)
-
-        # Prefixes for different data types
+        # Prefixes/subdirectories for different data types
         self.VECTORS_PREFIX = 'learning/vectors/'
         self.INSIGHTS_PREFIX = 'learning/insights/'
         self.TRAINED_MODELS_PREFIX = 'learning/trained/'
         self.METRICS_PREFIX = 'learning/metrics/'
+
+        # Create local directories if using local storage
+        if self.storage_mode == 'local':
+            self._ensure_local_dirs()
+            logger.info(f"Learning Module initialized with LOCAL storage at: {self.local_path}")
+        else:
+            logger.info(f"Learning Module initialized with S3 storage: s3://{self.bucket_name}")
+
+    def _ensure_local_dirs(self):
+        """Create local storage directories if they don't exist."""
+        dirs = [
+            os.path.join(self.local_path, 'learning', 'vectors'),
+            os.path.join(self.local_path, 'learning', 'insights'),
+            os.path.join(self.local_path, 'learning', 'trained'),
+            os.path.join(self.local_path, 'learning', 'metrics')
+        ]
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
 
     # =========================================================================
     # CAPTURE - Store execution data
@@ -186,45 +219,74 @@ class LearningModule:
         return None
 
     def _store_vector(self, vector: Dict[str, Any]) -> None:
-        """Store learning vector to S3."""
-        try:
-            key = f"{self.VECTORS_PREFIX}{vector['vector_id']}.json"
-            self.s3.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(vector, indent=2, cls=DateTimeEncoder),
-                ContentType='application/json'
-            )
-        except Exception as e:
-            logger.error(f"Failed to store learning vector: {e}")
+        """Store learning vector to local storage or S3."""
+        key = f"{self.VECTORS_PREFIX}{vector['vector_id']}.json"
+
+        if self.storage_mode == 'local':
+            try:
+                file_path = os.path.join(self.local_path, key)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'w') as f:
+                    json.dump(vector, f, indent=2, cls=DateTimeEncoder)
+                logger.info(f"Stored learning vector locally: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to store learning vector locally: {e}")
+        else:
+            try:
+                self.s3.put_object(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    Body=json.dumps(vector, indent=2, cls=DateTimeEncoder),
+                    ContentType='application/json'
+                )
+                logger.info(f"Stored learning vector to S3: s3://{self.bucket_name}/{key}")
+            except Exception as e:
+                logger.error(f"Failed to store learning vector to S3: {e}")
 
     # =========================================================================
     # RETRIEVE - Get historical data
     # =========================================================================
 
     def get_all_vectors(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieve all learning vectors."""
+        """Retrieve all learning vectors from local storage or S3."""
         vectors = []
-        try:
-            response = self.s3.list_objects_v2(
-                Bucket=self.bucket_name,
-                Prefix=self.VECTORS_PREFIX,
-                MaxKeys=limit
-            )
 
-            for obj in response.get('Contents', []):
-                try:
-                    data = self.s3.get_object(Bucket=self.bucket_name, Key=obj['Key'])
-                    vector = json.loads(data['Body'].read().decode('utf-8'))
-                    vectors.append(vector)
-                except Exception as e:
-                    logger.warning(f"Failed to load vector {obj['Key']}: {e}")
+        if self.storage_mode == 'local':
+            try:
+                vectors_dir = os.path.join(self.local_path, self.VECTORS_PREFIX)
+                if os.path.exists(vectors_dir):
+                    files = [f for f in os.listdir(vectors_dir) if f.endswith('.json')]
+                    for filename in files[:limit]:
+                        file_path = os.path.join(vectors_dir, filename)
+                        try:
+                            with open(file_path, 'r') as f:
+                                vector = json.load(f)
+                                vectors.append(vector)
+                        except Exception as e:
+                            logger.warning(f"Failed to load vector {filename}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to retrieve local vectors: {e}")
+        else:
+            try:
+                response = self.s3.list_objects_v2(
+                    Bucket=self.bucket_name,
+                    Prefix=self.VECTORS_PREFIX,
+                    MaxKeys=limit
+                )
 
-            # Sort by timestamp (most recent first)
-            vectors.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                for obj in response.get('Contents', []):
+                    try:
+                        data = self.s3.get_object(Bucket=self.bucket_name, Key=obj['Key'])
+                        vector = json.loads(data['Body'].read().decode('utf-8'))
+                        vectors.append(vector)
+                    except Exception as e:
+                        logger.warning(f"Failed to load vector {obj['Key']}: {e}")
 
-        except Exception as e:
-            logger.error(f"Failed to retrieve vectors: {e}")
+            except Exception as e:
+                logger.error(f"Failed to retrieve vectors from S3: {e}")
+
+        # Sort by timestamp (most recent first)
+        vectors.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
 
         return vectors
 
@@ -577,17 +639,28 @@ class LearningModule:
         return recommendations
 
     def _store_insight(self, insight_type: str, data: Dict[str, Any]) -> None:
-        """Store generated insight."""
-        try:
-            key = f"{self.INSIGHTS_PREFIX}{insight_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
-            self.s3.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(data, indent=2, cls=DateTimeEncoder),
-                ContentType='application/json'
-            )
-        except Exception as e:
-            logger.error(f"Failed to store insight: {e}")
+        """Store generated insight to local storage or S3."""
+        key = f"{self.INSIGHTS_PREFIX}{insight_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+
+        if self.storage_mode == 'local':
+            try:
+                file_path = os.path.join(self.local_path, key)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'w') as f:
+                    json.dump(data, f, indent=2, cls=DateTimeEncoder)
+                logger.info(f"Stored insight locally: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to store insight locally: {e}")
+        else:
+            try:
+                self.s3.put_object(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    Body=json.dumps(data, indent=2, cls=DateTimeEncoder),
+                    ContentType='application/json'
+                )
+            except Exception as e:
+                logger.error(f"Failed to store insight to S3: {e}")
 
     # =========================================================================
     # TRAIN - Build prediction models
@@ -655,26 +728,44 @@ class LearningModule:
         return trained_model
 
     def _store_trained_model(self, model: Dict[str, Any]) -> None:
-        """Store trained model to S3."""
-        try:
-            key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_{model['model_id']}.json"
-            self.s3.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(model, indent=2, cls=DateTimeEncoder),
-                ContentType='application/json'
-            )
+        """Store trained model to local storage or S3."""
+        key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_{model['model_id']}.json"
+        latest_key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_latest.json"
 
-            # Also store as "latest"
-            latest_key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_latest.json"
-            self.s3.put_object(
-                Bucket=self.bucket_name,
-                Key=latest_key,
-                Body=json.dumps(model, indent=2, cls=DateTimeEncoder),
-                ContentType='application/json'
-            )
-        except Exception as e:
-            logger.error(f"Failed to store trained model: {e}")
+        if self.storage_mode == 'local':
+            try:
+                # Store versioned model
+                file_path = os.path.join(self.local_path, key)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'w') as f:
+                    json.dump(model, f, indent=2, cls=DateTimeEncoder)
+
+                # Store as latest
+                latest_path = os.path.join(self.local_path, latest_key)
+                with open(latest_path, 'w') as f:
+                    json.dump(model, f, indent=2, cls=DateTimeEncoder)
+
+                logger.info(f"Stored trained model locally: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to store trained model locally: {e}")
+        else:
+            try:
+                self.s3.put_object(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    Body=json.dumps(model, indent=2, cls=DateTimeEncoder),
+                    ContentType='application/json'
+                )
+
+                # Also store as "latest"
+                self.s3.put_object(
+                    Bucket=self.bucket_name,
+                    Key=latest_key,
+                    Body=json.dumps(model, indent=2, cls=DateTimeEncoder),
+                    ContentType='application/json'
+                )
+            except Exception as e:
+                logger.error(f"Failed to store trained model to S3: {e}")
 
     def predict_platform(self, workload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -687,12 +778,25 @@ class LearningModule:
             Prediction with confidence score
         """
         # Load latest trained model
-        try:
-            key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_latest.json"
-            response = self.s3.get_object(Bucket=self.bucket_name, Key=key)
-            model = json.loads(response['Body'].read().decode('utf-8'))
-        except Exception as e:
-            logger.warning(f"No trained model found, using defaults: {e}")
+        key = f"{self.TRAINED_MODELS_PREFIX}platform_predictor_latest.json"
+        model = None
+
+        if self.storage_mode == 'local':
+            try:
+                file_path = os.path.join(self.local_path, key)
+                if os.path.exists(file_path):
+                    with open(file_path, 'r') as f:
+                        model = json.load(f)
+            except Exception as e:
+                logger.warning(f"No trained model found locally, using defaults: {e}")
+        else:
+            try:
+                response = self.s3.get_object(Bucket=self.bucket_name, Key=key)
+                model = json.loads(response['Body'].read().decode('utf-8'))
+            except Exception as e:
+                logger.warning(f"No trained model found in S3, using defaults: {e}")
+
+        if not model:
             return self._default_prediction(workload)
 
         rules = model.get('rules', {})
@@ -882,10 +986,18 @@ def main():
     parser.add_argument('--report-type', '-r', default='summary',
                         choices=['summary', 'detailed', 'cost', 'performance'])
     parser.add_argument('--bucket', '-b', default='strands-etl-learning', help='S3 bucket name')
+    parser.add_argument('--storage', '-s', default='local', choices=['local', 's3'],
+                        help='Storage mode: local (default) or s3')
+    parser.add_argument('--local-path', '-p', default=None,
+                        help='Local storage path (default: ./learning_data)')
 
     args = parser.parse_args()
 
-    learning = LearningModule(bucket_name=args.bucket)
+    learning = LearningModule(
+        bucket_name=args.bucket,
+        storage_mode=args.storage,
+        local_path=args.local_path
+    )
 
     if args.command == 'analyze':
         result = learning.analyze_patterns()

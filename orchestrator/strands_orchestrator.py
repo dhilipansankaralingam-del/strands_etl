@@ -13,10 +13,14 @@ Key Features:
 import json
 import boto3
 import logging
+import os
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import uuid
 from decimal import Decimal
+
+# Default local storage path for learning data
+DEFAULT_LOCAL_STORAGE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'learning_data')
 
 class DateTimeEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles datetime and Decimal objects."""
@@ -44,14 +48,18 @@ class StrandsOrchestrator:
     - Set create_job: true to create new resources on-the-fly
     """
 
-    def __init__(self, region: str = None):
+    def __init__(self, region: str = None, storage_mode: str = 'local', local_storage_path: str = None):
         """
         Initialize the orchestrator.
 
         Args:
             region: AWS region (uses AWS_DEFAULT_REGION if not specified)
+            storage_mode: 'local' (default) or 's3' - where to store learning data
+            local_storage_path: Path for local storage (default: ./learning_data)
         """
         self.region = region
+        self.storage_mode = storage_mode
+        self.local_storage_path = local_storage_path or DEFAULT_LOCAL_STORAGE
         client_kwargs = {'region_name': region} if region else {}
 
         self.bedrock = boto3.client('bedrock-runtime', **client_kwargs)
@@ -59,6 +67,13 @@ class StrandsOrchestrator:
         self.emr = boto3.client('emr', **client_kwargs)
         self.lambda_client = boto3.client('lambda', **client_kwargs)
         self.s3 = boto3.client('s3', **client_kwargs)
+
+        # Create local storage directories if using local mode
+        if self.storage_mode == 'local':
+            self._ensure_local_dirs()
+            logger.info(f"Orchestrator using LOCAL storage at: {self.local_storage_path}")
+        else:
+            logger.info("Orchestrator using S3 storage")
 
         # Agent definitions
         self.agents = {
@@ -70,6 +85,16 @@ class StrandsOrchestrator:
             'learning': self.learning_agent,
             'platform_advisor': self.platform_advisor_agent
         }
+
+    def _ensure_local_dirs(self):
+        """Create local storage directories if they don't exist."""
+        dirs = [
+            os.path.join(self.local_storage_path, 'learning', 'vectors'),
+            os.path.join(self.local_storage_path, 'quality', 'reports'),
+            os.path.join(self.local_storage_path, 'optimization', 'recommendations')
+        ]
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
 
     # =========================================================================
     # PLATFORM ADVISOR AGENT - New agent for platform recommendations
@@ -831,33 +856,90 @@ class StrandsOrchestrator:
         learning_vector = {
             'vector_id': str(uuid.uuid4()),
             'timestamp': datetime.utcnow().isoformat(),
-            'workload_characteristics': context.get('config', {}).get('workload', {}),
-            'execution_metrics': {
-                'platform_used': execution_result.get('platform'),
+            'pipeline_id': context.get('pipeline_id'),
+            'workload': context.get('config', {}).get('workload', {}),
+            'execution': {
+                'platform': execution_result.get('platform'),
                 'execution_type': execution_result.get('execution_type'),
-                'status': execution_result.get('status')
+                'job_name': execution_result.get('job_name'),
+                'status': execution_result.get('status'),
+                'final_status': execution_result.get('final_status'),
+                'error': execution_result.get('error')
             },
-            'performance_indicators': {
+            'metrics': {
+                'execution_time_seconds': self._calculate_execution_time(context),
+                'estimated_cost_usd': self._estimate_cost_from_result(execution_result)
+            },
+            'quality': {
+                'overall_score': quality_report.get('overall_score', 0.95)
+            },
+            'optimization': {
                 'efficiency_score': optimization.get('efficiency_score', 0.8),
-                'cost_efficiency': optimization.get('cost_efficiency', 0.85),
-                'quality_score': quality_report.get('overall_score', 0.95)
+                'cost_efficiency': optimization.get('cost_efficiency', 0.85)
+            },
+            'agent_decisions': {
+                'mode': context.get('agent_mode'),
+                'selected_platform': context.get('selected_platform')
             }
         }
 
-        # Store learning vector
-        try:
-            learning_bucket = 'strands-etl-learning'
-            s3_key = f"learning/vectors/{learning_vector['vector_id']}.json"
-            self.s3.put_object(
-                Bucket=learning_bucket,
-                Key=s3_key,
-                Body=json.dumps(learning_vector, indent=2, cls=DateTimeEncoder)
-            )
-            logger.info(f"Learning vector stored: s3://{learning_bucket}/{s3_key}")
-        except Exception as e:
-            logger.warning(f"Failed to store learning vector: {e}")
+        # Store learning vector (local or S3)
+        self._store_learning_vector(learning_vector)
 
         return {'learning_vector': learning_vector}
+
+    def _calculate_execution_time(self, context: Dict[str, Any]) -> Optional[float]:
+        """Calculate execution time from context."""
+        try:
+            start_time = context.get('start_time')
+            end_time = context.get('end_time')
+            if start_time and end_time:
+                start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                return (end - start).total_seconds()
+        except:
+            pass
+        return None
+
+    def _estimate_cost_from_result(self, execution_result: Dict[str, Any]) -> Optional[float]:
+        """Estimate cost from execution result."""
+        job_run = execution_result.get('job_run_details', {})
+        dpu_seconds = job_run.get('DPUSeconds')
+        if dpu_seconds:
+            # Glue pricing: ~$0.44 per DPU-hour
+            dpu_hours = dpu_seconds / 3600
+            return round(dpu_hours * 0.44, 4)
+        return None
+
+    def _store_learning_vector(self, learning_vector: Dict[str, Any]) -> None:
+        """Store learning vector to local storage or S3."""
+        vector_id = learning_vector['vector_id']
+
+        if self.storage_mode == 'local':
+            try:
+                file_path = os.path.join(
+                    self.local_storage_path,
+                    'learning', 'vectors',
+                    f"{vector_id}.json"
+                )
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'w') as f:
+                    json.dump(learning_vector, f, indent=2, cls=DateTimeEncoder)
+                logger.info(f"Learning vector stored locally: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to store learning vector locally: {e}")
+        else:
+            try:
+                learning_bucket = 'strands-etl-learning'
+                s3_key = f"learning/vectors/{vector_id}.json"
+                self.s3.put_object(
+                    Bucket=learning_bucket,
+                    Key=s3_key,
+                    Body=json.dumps(learning_vector, indent=2, cls=DateTimeEncoder)
+                )
+                logger.info(f"Learning vector stored: s3://{learning_bucket}/{s3_key}")
+            except Exception as e:
+                logger.warning(f"Failed to store learning vector to S3: {e}")
 
     # =========================================================================
     # MAIN ORCHESTRATION METHOD
@@ -1059,61 +1141,121 @@ class StrandsOrchestrator:
             return {'response': response, 'parsed': False, 'timestamp': datetime.utcnow().isoformat()}
 
     def get_learning_vectors(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Retrieve recent learning vectors from S3."""
-        try:
-            response = self.s3.list_objects_v2(
-                Bucket='strands-etl-learning',
-                Prefix='learning/vectors/',
-                MaxKeys=limit
-            )
-            vectors = []
-            for obj in response.get('Contents', [])[:limit]:
-                try:
-                    data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
-                    vectors.append(json.loads(data['Body'].read().decode('utf-8')))
-                except:
-                    pass
-            return vectors
-        except:
-            return []
+        """Retrieve recent learning vectors from local storage or S3."""
+        vectors = []
+
+        if self.storage_mode == 'local':
+            try:
+                vectors_dir = os.path.join(self.local_storage_path, 'learning', 'vectors')
+                if os.path.exists(vectors_dir):
+                    files = sorted(
+                        [f for f in os.listdir(vectors_dir) if f.endswith('.json')],
+                        key=lambda x: os.path.getmtime(os.path.join(vectors_dir, x)),
+                        reverse=True
+                    )[:limit]
+                    for filename in files:
+                        try:
+                            with open(os.path.join(vectors_dir, filename), 'r') as f:
+                                vectors.append(json.load(f))
+                        except:
+                            pass
+            except:
+                pass
+        else:
+            try:
+                response = self.s3.list_objects_v2(
+                    Bucket='strands-etl-learning',
+                    Prefix='learning/vectors/',
+                    MaxKeys=limit
+                )
+                for obj in response.get('Contents', [])[:limit]:
+                    try:
+                        data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
+                        vectors.append(json.loads(data['Body'].read().decode('utf-8')))
+                    except:
+                        pass
+            except:
+                pass
+
+        return vectors
 
     def get_quality_reports(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Retrieve recent quality reports from S3."""
-        try:
-            response = self.s3.list_objects_v2(
-                Bucket='strands-etl-learning',
-                Prefix='quality/reports/',
-                MaxKeys=limit
-            )
-            reports = []
-            for obj in response.get('Contents', [])[:limit]:
-                try:
-                    data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
-                    reports.append(json.loads(data['Body'].read().decode('utf-8')))
-                except:
-                    pass
-            return reports
-        except:
-            return []
+        """Retrieve recent quality reports from local storage or S3."""
+        reports = []
+
+        if self.storage_mode == 'local':
+            try:
+                reports_dir = os.path.join(self.local_storage_path, 'quality', 'reports')
+                if os.path.exists(reports_dir):
+                    files = sorted(
+                        [f for f in os.listdir(reports_dir) if f.endswith('.json')],
+                        key=lambda x: os.path.getmtime(os.path.join(reports_dir, x)),
+                        reverse=True
+                    )[:limit]
+                    for filename in files:
+                        try:
+                            with open(os.path.join(reports_dir, filename), 'r') as f:
+                                reports.append(json.load(f))
+                        except:
+                            pass
+            except:
+                pass
+        else:
+            try:
+                response = self.s3.list_objects_v2(
+                    Bucket='strands-etl-learning',
+                    Prefix='quality/reports/',
+                    MaxKeys=limit
+                )
+                for obj in response.get('Contents', [])[:limit]:
+                    try:
+                        data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
+                        reports.append(json.loads(data['Body'].read().decode('utf-8')))
+                    except:
+                        pass
+            except:
+                pass
+
+        return reports
 
     def get_optimization_recommendations(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Retrieve recent optimization recommendations from S3."""
-        try:
-            response = self.s3.list_objects_v2(
-                Bucket='strands-etl-learning',
-                Prefix='optimization/recommendations/',
-                MaxKeys=limit
-            )
-            recs = []
-            for obj in response.get('Contents', [])[:limit]:
-                try:
-                    data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
-                    recs.append(json.loads(data['Body'].read().decode('utf-8')))
-                except:
-                    pass
-            return recs
-        except:
-            return []
+        """Retrieve recent optimization recommendations from local storage or S3."""
+        recs = []
+
+        if self.storage_mode == 'local':
+            try:
+                recs_dir = os.path.join(self.local_storage_path, 'optimization', 'recommendations')
+                if os.path.exists(recs_dir):
+                    files = sorted(
+                        [f for f in os.listdir(recs_dir) if f.endswith('.json')],
+                        key=lambda x: os.path.getmtime(os.path.join(recs_dir, x)),
+                        reverse=True
+                    )[:limit]
+                    for filename in files:
+                        try:
+                            with open(os.path.join(recs_dir, filename), 'r') as f:
+                                recs.append(json.load(f))
+                        except:
+                            pass
+            except:
+                pass
+        else:
+            try:
+                response = self.s3.list_objects_v2(
+                    Bucket='strands-etl-learning',
+                    Prefix='optimization/recommendations/',
+                    MaxKeys=limit
+                )
+                for obj in response.get('Contents', [])[:limit]:
+                    try:
+                        data = self.s3.get_object(Bucket='strands-etl-learning', Key=obj['Key'])
+                        recs.append(json.loads(data['Body'].read().decode('utf-8')))
+                    except:
+                        pass
+            except:
+                pass
+
+        return recs
 
 
 # =============================================================================
@@ -1130,10 +1272,16 @@ def main():
     parser.add_argument('--mode', '-m', choices=['recommend', 'decide'], default='recommend', help='Agent mode')
     parser.add_argument('--dry-run', action='store_true', help='Dry run without execution')
     parser.add_argument('--recommend-only', action='store_true', help='Get platform recommendation only')
+    parser.add_argument('--storage', '-s', choices=['local', 's3'], default='local',
+                        help='Storage mode for learning data: local (default) or s3')
+    parser.add_argument('--local-path', help='Local storage path (default: ./learning_data)')
 
     args = parser.parse_args()
 
-    orchestrator = StrandsOrchestrator()
+    orchestrator = StrandsOrchestrator(
+        storage_mode=args.storage,
+        local_storage_path=args.local_path
+    )
 
     if args.recommend_only:
         print("Getting platform recommendation...")
