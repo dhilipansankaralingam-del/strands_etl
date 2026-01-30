@@ -638,10 +638,28 @@ class StrandsOrchestrator:
                 logger.info(f"Job {job_name} status: {status}")
 
                 if status in ['SUCCEEDED', 'FAILED', 'STOPPED', 'TIMEOUT']:
+                    # Extract key metrics from job_run
+                    job_run_details = {
+                        'JobRunState': job_run.get('JobRunState'),
+                        'ExecutionTime': job_run.get('ExecutionTime'),
+                        'DPUSeconds': job_run.get('DPUSeconds'),
+                        'NumberOfWorkers': job_run.get('NumberOfWorkers'),
+                        'WorkerType': job_run.get('WorkerType'),
+                        'AllocatedCapacity': job_run.get('AllocatedCapacity'),
+                        'MaxCapacity': job_run.get('MaxCapacity'),
+                        'StartedOn': job_run.get('StartedOn').isoformat() if job_run.get('StartedOn') else None,
+                        'CompletedOn': job_run.get('CompletedOn').isoformat() if job_run.get('CompletedOn') else None,
+                        'ErrorMessage': job_run.get('ErrorMessage')
+                    }
+
+                    logger.info(f"Job metrics - ExecutionTime: {job_run_details.get('ExecutionTime')}s, "
+                               f"DPUSeconds: {job_run_details.get('DPUSeconds')}, "
+                               f"Workers: {job_run_details.get('NumberOfWorkers')}")
+
                     execution_result.update({
                         'final_status': status,
                         'completion_time': datetime.utcnow().isoformat(),
-                        'job_run_details': job_run
+                        'job_run_details': job_run_details
                     })
 
                     if status == 'SUCCEEDED':
@@ -889,7 +907,29 @@ class StrandsOrchestrator:
         return {'learning_vector': learning_vector}
 
     def _calculate_execution_time(self, context: Dict[str, Any]) -> Optional[float]:
-        """Calculate execution time from context."""
+        """Calculate execution time from context or job run details."""
+        execution_result = context.get('execution_result', {})
+        job_run = execution_result.get('job_run_details', {})
+
+        # Try to get ExecutionTime from Glue job run (in seconds)
+        if job_run.get('ExecutionTime'):
+            return float(job_run['ExecutionTime'])
+
+        # Try to calculate from Glue job StartedOn/CompletedOn
+        if job_run.get('StartedOn') and job_run.get('CompletedOn'):
+            try:
+                started = job_run['StartedOn']
+                completed = job_run['CompletedOn']
+                # Handle both datetime objects and strings
+                if isinstance(started, str):
+                    started = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                if isinstance(completed, str):
+                    completed = datetime.fromisoformat(completed.replace('Z', '+00:00'))
+                return (completed - started).total_seconds()
+            except:
+                pass
+
+        # Fallback to context start/end times
         try:
             start_time = context.get('start_time')
             end_time = context.get('end_time')
@@ -899,16 +939,38 @@ class StrandsOrchestrator:
                 return (end - start).total_seconds()
         except:
             pass
+
         return None
 
     def _estimate_cost_from_result(self, execution_result: Dict[str, Any]) -> Optional[float]:
         """Estimate cost from execution result."""
         job_run = execution_result.get('job_run_details', {})
+        platform = execution_result.get('platform', 'glue')
+
+        # Try DPUSeconds first (Glue)
         dpu_seconds = job_run.get('DPUSeconds')
         if dpu_seconds:
             # Glue pricing: ~$0.44 per DPU-hour
             dpu_hours = dpu_seconds / 3600
             return round(dpu_hours * 0.44, 4)
+
+        # Estimate from ExecutionTime and worker config (Glue)
+        exec_time = job_run.get('ExecutionTime')
+        num_workers = job_run.get('NumberOfWorkers') or job_run.get('AllocatedCapacity')
+        if exec_time and num_workers:
+            # Estimate: ExecutionTime * NumberOfWorkers * rate
+            dpu_hours = (exec_time * num_workers) / 3600
+            return round(dpu_hours * 0.44, 4)
+
+        # For Lambda, estimate from duration
+        if platform == 'lambda':
+            duration_ms = execution_result.get('result', {}).get('duration_ms', 0)
+            memory_mb = execution_result.get('result', {}).get('memory_mb', 128)
+            if duration_ms:
+                # Lambda pricing: ~$0.0000166667 per GB-second
+                gb_seconds = (duration_ms / 1000) * (memory_mb / 1024)
+                return round(gb_seconds * 0.0000166667, 6)
+
         return None
 
     def _store_learning_vector(self, learning_vector: Dict[str, Any]) -> None:
