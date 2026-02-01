@@ -1,0 +1,390 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Strands ETL Enterprise Configuration",
+  "description": "Enterprise-grade ETL configuration with auto-healing, compliance, and intelligent workload management",
+
+  "type": "object",
+  "required": ["pipeline_name", "workload", "execution"],
+
+  "properties": {
+    "pipeline_name": {
+      "type": "string",
+      "description": "Unique identifier for the pipeline"
+    },
+
+    "description": {
+      "type": "string"
+    },
+
+    "workload": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "data_volume": {"enum": ["low", "medium", "high", "auto"]},
+        "complexity": {"enum": ["low", "medium", "high", "auto"]},
+        "criticality": {"enum": ["low", "medium", "high", "critical"]},
+        "time_sensitivity": {"enum": ["low", "medium", "high", "urgent"]},
+        "schedule_type": {"enum": ["weekday", "weekend", "daily", "hourly", "adhoc"]},
+        "sla_minutes": {"type": "integer", "description": "SLA in minutes for job completion"}
+      }
+    },
+
+    "execution": {
+      "type": "object",
+      "properties": {
+        "platform": {"enum": ["glue", "emr", "lambda", "eks", "auto"]},
+        "glue_job_name": {"type": "string"},
+        "emr_cluster_id": {"type": "string"},
+        "lambda_function_name": {"type": "string"},
+        "eks_cluster_name": {"type": "string"},
+        "create_job": {"type": "boolean", "default": false},
+
+        "platform_fallback": {
+          "type": "object",
+          "description": "Platform fallback configuration",
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "fallback_order": {
+              "type": "array",
+              "items": {"enum": ["glue", "emr", "lambda", "eks"]},
+              "default": ["glue", "emr", "lambda"]
+            },
+            "max_retries_per_platform": {"type": "integer", "default": 2}
+          }
+        },
+
+        "auto_healing": {
+          "type": "object",
+          "description": "Auto-healing configuration for automatic error recovery",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "max_heal_attempts": {"type": "integer", "default": 3},
+            "healable_errors": {
+              "type": "array",
+              "items": {"enum": [
+                "out_of_memory",
+                "timeout",
+                "data_skew",
+                "shuffle_failure",
+                "executor_lost",
+                "disk_space",
+                "connection_error",
+                "schema_mismatch",
+                "null_constraint",
+                "partition_error"
+              ]},
+              "default": ["out_of_memory", "timeout", "data_skew", "executor_lost"]
+            },
+            "healing_strategies": {
+              "type": "object",
+              "properties": {
+                "out_of_memory": {"enum": ["increase_memory", "add_workers", "reduce_partitions", "enable_disk_spill"]},
+                "timeout": {"enum": ["extend_timeout", "optimize_query", "add_workers"]},
+                "data_skew": {"enum": ["salt_keys", "broadcast_join", "repartition"]},
+                "executor_lost": {"enum": ["retry", "reduce_parallelism", "checkpoint"]}
+              }
+            },
+            "code_modification_allowed": {"type": "boolean", "default": false},
+            "notify_on_heal": {"type": "boolean", "default": true}
+          }
+        },
+
+        "resource_config": {
+          "type": "object",
+          "properties": {
+            "worker_type": {"type": "string"},
+            "number_of_workers": {"type": "integer"},
+            "timeout_minutes": {"type": "integer"},
+            "flex_mode": {"type": "boolean", "default": false},
+            "auto_scaling": {"type": "boolean", "default": false},
+            "min_workers": {"type": "integer"},
+            "max_workers": {"type": "integer"}
+          }
+        }
+      }
+    },
+
+    "data_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"enum": ["glue_catalog", "s3", "jdbc", "dynamodb", "redshift", "kinesis"]},
+          "database": {"type": "string"},
+          "table": {"type": "string"},
+          "path": {"type": "string"},
+          "partition_keys": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+
+    "target": {
+      "type": "object",
+      "properties": {
+        "type": {"enum": ["glue_catalog", "s3", "jdbc", "redshift", "dynamodb"]},
+        "database": {"type": "string"},
+        "table": {"type": "string"},
+        "path": {"type": "string"},
+        "mode": {"enum": ["overwrite", "append", "merge", "upsert"]},
+        "partition_by": {"type": "array", "items": {"type": "string"}},
+        "format": {"enum": ["parquet", "delta", "iceberg", "orc", "json", "csv"]}
+      }
+    },
+
+    "compliance": {
+      "type": "object",
+      "description": "Data compliance and governance settings",
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "frameworks": {
+          "type": "array",
+          "items": {"enum": ["gdpr", "hipaa", "pci_dss", "sox", "ccpa", "custom"]},
+          "default": []
+        },
+        "pii_detection": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "scan_columns": {"type": "array", "items": {"type": "string"}},
+            "pii_types": {
+              "type": "array",
+              "items": {"enum": ["email", "phone", "ssn", "credit_card", "address", "name", "dob", "ip_address"]},
+              "default": ["email", "phone", "ssn", "credit_card"]
+            },
+            "action": {"enum": ["log", "mask", "hash", "encrypt", "fail"], "default": "log"}
+          }
+        },
+        "data_retention": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "retention_days": {"type": "integer"},
+            "archive_before_delete": {"type": "boolean", "default": true}
+          }
+        },
+        "audit_logging": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "log_level": {"enum": ["basic", "detailed", "full"]},
+            "include_data_samples": {"type": "boolean", "default": false}
+          }
+        },
+        "lineage_tracking": {"type": "boolean", "default": true}
+      }
+    },
+
+    "data_quality": {
+      "type": "object",
+      "description": "Data quality rules and validations",
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "fail_on_quality_issues": {"type": "boolean", "default": false},
+        "quality_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.95},
+
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"enum": ["sql", "natural_language", "builtin"]},
+              "target": {"type": "string", "description": "Table or column to check"},
+              "rule": {"type": "string", "description": "SQL expression or natural language description"},
+              "severity": {"enum": ["info", "warning", "error", "critical"]},
+              "threshold": {"type": "number"}
+            }
+          }
+        },
+
+        "builtin_checks": {
+          "type": "object",
+          "properties": {
+            "null_check": {"type": "boolean", "default": true},
+            "duplicate_check": {"type": "boolean", "default": true},
+            "schema_validation": {"type": "boolean", "default": true},
+            "referential_integrity": {"type": "boolean", "default": false},
+            "value_range_check": {"type": "boolean", "default": false},
+            "freshness_check": {"type": "boolean", "default": false}
+          }
+        }
+      }
+    },
+
+    "code_analysis": {
+      "type": "object",
+      "description": "Code analysis and optimization recommendations",
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "analyze_categories": {
+          "type": "array",
+          "items": {"enum": [
+            "performance",
+            "memory_optimization",
+            "shuffle_reduction",
+            "join_optimization",
+            "partition_strategy",
+            "caching_opportunities",
+            "broadcast_opportunities",
+            "delta_operations",
+            "data_skew",
+            "serialization",
+            "aws_service_recommendations"
+          ]},
+          "default": ["performance", "memory_optimization", "join_optimization"]
+        },
+        "auto_apply_recommendations": {"type": "boolean", "default": false},
+        "generate_optimized_code": {"type": "boolean", "default": false}
+      }
+    },
+
+    "metrics_collection": {
+      "type": "object",
+      "description": "Detailed metrics collection settings",
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "collect": {
+          "type": "array",
+          "items": {"enum": [
+            "execution_time",
+            "data_volume",
+            "s3_bytes_read",
+            "s3_bytes_written",
+            "shuffle_bytes",
+            "cpu_utilization",
+            "memory_utilization",
+            "disk_utilization",
+            "executor_metrics",
+            "driver_metrics",
+            "data_skewness",
+            "partition_metrics",
+            "join_metrics",
+            "stage_metrics"
+          ]},
+          "default": ["execution_time", "data_volume", "s3_bytes_read", "s3_bytes_written"]
+        },
+        "historical_analysis": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "retention_days": {"type": "integer", "default": 90},
+            "trend_analysis": {"type": "boolean", "default": true},
+            "anomaly_detection": {"type": "boolean", "default": false}
+          }
+        }
+      }
+    },
+
+    "notifications": {
+      "type": "object",
+      "description": "Notification and alerting configuration",
+      "properties": {
+        "email": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "recipients": {"type": "array", "items": {"type": "string"}},
+            "send_on": {"type": "array", "items": {"enum": ["success", "failure", "warning", "all"]}},
+            "include_report": {"type": "boolean", "default": true},
+            "html_format": {"type": "boolean", "default": true}
+          }
+        },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "webhook_url": {"type": "string"},
+            "channel": {"type": "string"},
+            "send_on": {"type": "array", "items": {"enum": ["success", "failure", "warning", "all"]}},
+            "mention_on_failure": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "sns": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "topic_arn": {"type": "string"}
+          }
+        }
+      }
+    },
+
+    "dashboard": {
+      "type": "object",
+      "description": "Dashboard and reporting configuration",
+      "properties": {
+        "cloudwatch": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "dashboard_name": {"type": "string"},
+            "log_group": {"type": "string"},
+            "custom_metrics": {"type": "boolean", "default": true}
+          }
+        },
+        "quicksight": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "dashboard_id": {"type": "string"}
+          }
+        }
+      }
+    },
+
+    "integrations": {
+      "type": "object",
+      "description": "External integrations",
+      "properties": {
+        "slack_bot": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "bot_token": {"type": "string"},
+            "allow_trigger": {"type": "boolean", "default": false},
+            "voice_commands": {"type": "boolean", "default": false},
+            "allowed_users": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "streamlit": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "port": {"type": "integer", "default": 8501}
+          }
+        },
+        "karpenter": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "provisioner_name": {"type": "string"},
+            "node_pool": {"type": "string"}
+          }
+        }
+      }
+    },
+
+    "scripts": {
+      "type": "object",
+      "properties": {
+        "pyspark": {"type": "string"},
+        "script_path": {"type": "string"}
+      }
+    },
+
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "owner": {"type": "string"},
+        "team": {"type": "string"},
+        "project": {"type": "string"},
+        "tags": {"type": "object"},
+        "created_at": {"type": "string"},
+        "last_modified": {"type": "string"},
+        "version": {"type": "string"}
+      }
+    }
+  }
+}
