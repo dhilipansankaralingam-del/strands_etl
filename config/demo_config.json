@@ -1,0 +1,59 @@
+{
+  "workload": {
+    "name": "customer_order_summary_etl",
+    "description": "Multi-table join ETL: customers + orders + products to customer_order_summary with insert overwrite",
+    "data_volume": "high",
+    "complexity": "high",
+    "criticality": "high",
+    "time_sensitivity": "medium",
+    "estimated_runtime": "45min",
+    "data_sources": [
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "customers",
+        "query": "SELECT customer_id, name, email, region, signup_date FROM ecommerce_db.customers WHERE active = true",
+        "description": "Active customer data with demographics"
+      },
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "orders",
+        "query": "SELECT order_id, customer_id, product_id, order_date, quantity, total_amount, status FROM ecommerce_db.orders WHERE order_date >= '2023-01-01' AND status = 'completed'",
+        "description": "Completed orders from 2023 onwards"
+      },
+      {
+        "type": "glue",
+        "database": "ecommerce_db",
+        "table": "products",
+        "query": "SELECT product_id, product_name, category, price, cost, supplier_id FROM ecommerce_db.products WHERE active = true",
+        "description": "Active product catalog with pricing"
+      }
+    ],
+    "target": {
+      "type": "glue",
+      "database": "analytics_db",
+      "table": "customer_order_summary",
+      "mode": "insert_overwrite",
+      "description": "Aggregated customer analytics table"
+    }
+  },
+  "platform": {
+    "preferred": "glue",
+    "fallback": ["emr", "lambda"],
+    "iam_role": "arn:aws:iam::YOUR_ACCOUNT_ID:role/StrandsETLDemoRole",
+    "resource_allocation": {
+      "cpu": "8",
+      "memory": "32GB",
+      "workers": 10,
+      "worker_type": "G.1X",
+      "timeout": "1h"
+    }
+  },
+  "scripts": {
+    "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py",
+    "python": "s3://strands-etl-scripts/customer_order_summary_lambda.py"
+  },
+  "lambda_function_name": "strands-etl-lambda",
+  "config_s3_path": "s3://strands-etl-config/demo_config.json"
+}

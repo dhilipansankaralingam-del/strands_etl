@@ -1,0 +1,64 @@
+{
+  "description": "COMPLEX USE CASE: Agent decides platform, can create new job if needed",
+
+  "workload": {
+    "name": "customer_360_analytics",
+    "description": "Complex multi-source customer analytics with ML features",
+    "data_volume": "high",
+    "complexity": "high",
+    "criticality": "high",
+    "time_sensitivity": "medium",
+    "estimated_runtime": "2h",
+    "data_sources": [
+      {"name": "customers", "database": "crm_db", "table": "customers"},
+      {"name": "transactions", "database": "sales_db", "table": "transactions"},
+      {"name": "clickstream", "database": "analytics_db", "table": "clickstream"},
+      {"name": "support_tickets", "database": "support_db", "table": "tickets"}
+    ],
+    "target": {
+      "database": "analytics_db",
+      "table": "customer_360",
+      "mode": "overwrite"
+    }
+  },
+
+  "execution": {
+    "platform": "glue",
+    "available_platforms": ["glue", "emr", "lambda"],
+
+    "glue_job_name": "customer-360-etl",
+    "emr_cluster_id": "j-XXXXXXXXXXXXX",
+    "lambda_function_name": "customer-360-lambda",
+
+    "create_job": false,
+
+    "worker_type": "G.2X",
+    "number_of_workers": 20,
+    "timeout": 180,
+
+    "job_arguments": {
+      "--enable-glue-datacatalog": "true",
+      "--enable-spark-ui": "true",
+      "--spark-event-logs-path": "s3://my-spark-logs/",
+      "--TempDir": "s3://my-etl-temp/"
+    },
+
+    "spark_conf": {
+      "spark.sql.shuffle.partitions": "200",
+      "spark.dynamicAllocation.enabled": "true"
+    }
+  },
+
+  "scripts": {
+    "pyspark": "s3://my-etl-scripts/customer_360_etl.py",
+    "script_path": "s3://my-etl-scripts/customer_360_etl.py"
+  },
+
+  "agent_settings": {
+    "agent_mode": "decide",
+    "allow_platform_conversion": true,
+    "cost_optimization_priority": "high"
+  },
+
+  "config_s3_path": "s3://my-config-bucket/customer_360_config.json"
+}
