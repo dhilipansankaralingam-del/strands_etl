@@ -124,6 +124,28 @@ class EKSOptimizer:
 
     # Cost per hour by instance type (us-east-1 prices)
     INSTANCE_COSTS = {
+        # T-series Burstable (good for variable ETL workloads)
+        # Graviton t4g
+        "t4g.medium_spot": 0.010,
+        "t4g.large_spot": 0.020,
+        "t4g.xlarge_spot": 0.040,
+        "t4g.2xlarge_spot": 0.080,
+        "t4g.medium_ondemand": 0.0336,
+        "t4g.large_ondemand": 0.0672,
+        "t4g.xlarge_ondemand": 0.1344,
+        "t4g.2xlarge_ondemand": 0.2688,
+
+        # Intel t3
+        "t3.medium_spot": 0.012,
+        "t3.large_spot": 0.024,
+        "t3.xlarge_spot": 0.050,
+        "t3.2xlarge_spot": 0.100,
+        "t3.medium_ondemand": 0.0416,
+        "t3.large_ondemand": 0.0832,
+        "t3.xlarge_ondemand": 0.1664,
+        "t3.2xlarge_ondemand": 0.3328,
+
+        # Memory-optimized r-series (for heavy ETL)
         # Graviton SPOT (best value)
         "r6g.xlarge_spot": 0.045,
         "r6g.2xlarge_spot": 0.090,
@@ -558,6 +580,126 @@ fi
             "recommendations": self._generate_cost_recommendations(
                 data_size_gb, complexity, use_graviton, spot_percentage
             )
+        }
+
+    def estimate_t_series_migration(self,
+                                      current_instance: str = "t3.large",
+                                      current_capacity: str = "on-demand",
+                                      hours_per_day: float = 24,
+                                      instance_count: int = 1) -> Dict[str, Any]:
+        """
+        Estimate savings for migrating t-series instances to SPOT/Graviton.
+
+        Args:
+            current_instance: Current instance type (e.g., t3.large)
+            current_capacity: 'on-demand' or 'spot'
+            hours_per_day: Average hours running per day
+            instance_count: Number of instances
+
+        Returns:
+            Migration cost analysis
+        """
+        # Parse instance info
+        parts = current_instance.split('.')
+        family = parts[0]  # t3, t4g, etc.
+        size = parts[1]    # large, xlarge, etc.
+
+        # Get current cost
+        current_key = f"{current_instance}_{current_capacity.replace('-', '')}"
+        current_cost = self.INSTANCE_COSTS.get(current_key, 0.08)
+
+        # Calculate monthly cost
+        monthly_hours = hours_per_day * 30
+        current_monthly = current_cost * monthly_hours * instance_count
+
+        # Migration options
+        options = []
+
+        # Option 1: Same instance, switch to SPOT
+        if current_capacity == "on-demand":
+            spot_key = f"{current_instance}_spot"
+            spot_cost = self.INSTANCE_COSTS.get(spot_key, current_cost * 0.3)
+            spot_monthly = spot_cost * monthly_hours * instance_count
+            options.append({
+                "name": f"{current_instance} SPOT",
+                "instance": current_instance,
+                "capacity": "spot",
+                "hourly_cost": spot_cost,
+                "monthly_cost": round(spot_monthly, 2),
+                "savings_vs_current": round((current_monthly - spot_monthly) / current_monthly * 100, 1),
+                "change": "Switch to SPOT only"
+            })
+
+        # Option 2: Graviton equivalent
+        if family.startswith('t3'):
+            graviton_family = 't4g'
+        elif family.startswith('t2'):
+            graviton_family = 't4g'
+        elif family.startswith('m5'):
+            graviton_family = 'm6g'
+        elif family.startswith('r5'):
+            graviton_family = 'r6g'
+        elif family.startswith('c5'):
+            graviton_family = 'c6g'
+        else:
+            graviton_family = family.replace('5', '6g').replace('3', '4g')
+
+        graviton_instance = f"{graviton_family}.{size}"
+
+        # Graviton On-Demand
+        graviton_od_key = f"{graviton_instance}_ondemand"
+        graviton_od_cost = self.INSTANCE_COSTS.get(graviton_od_key, current_cost * 0.8)
+        graviton_od_monthly = graviton_od_cost * monthly_hours * instance_count
+        options.append({
+            "name": f"{graviton_instance} On-Demand",
+            "instance": graviton_instance,
+            "capacity": "on-demand",
+            "hourly_cost": graviton_od_cost,
+            "monthly_cost": round(graviton_od_monthly, 2),
+            "savings_vs_current": round((current_monthly - graviton_od_monthly) / current_monthly * 100, 1),
+            "change": "Switch to Graviton (ARM64)"
+        })
+
+        # Option 3: Graviton SPOT (best value)
+        graviton_spot_key = f"{graviton_instance}_spot"
+        graviton_spot_cost = self.INSTANCE_COSTS.get(graviton_spot_key, current_cost * 0.25)
+        graviton_spot_monthly = graviton_spot_cost * monthly_hours * instance_count
+        options.append({
+            "name": f"{graviton_instance} SPOT (BEST)",
+            "instance": graviton_instance,
+            "capacity": "spot",
+            "hourly_cost": graviton_spot_cost,
+            "monthly_cost": round(graviton_spot_monthly, 2),
+            "savings_vs_current": round((current_monthly - graviton_spot_monthly) / current_monthly * 100, 1),
+            "change": "Switch to Graviton + SPOT"
+        })
+
+        # Sort by savings
+        options.sort(key=lambda x: x['monthly_cost'])
+
+        return {
+            "current": {
+                "instance": current_instance,
+                "capacity": current_capacity,
+                "hourly_cost": current_cost,
+                "monthly_cost": round(current_monthly, 2),
+                "hours_per_day": hours_per_day,
+                "instance_count": instance_count
+            },
+            "options": options,
+            "best_option": options[0],
+            "max_savings": {
+                "monthly": round(current_monthly - options[0]['monthly_cost'], 2),
+                "yearly": round((current_monthly - options[0]['monthly_cost']) * 12, 2),
+                "percentage": options[0]['savings_vs_current']
+            },
+            "recommendations": [
+                f"Best option: {options[0]['name']} saves {options[0]['savings_vs_current']}%",
+                "Use Karpenter for automatic scaling and consolidation",
+                "Enable SPOT interruption handling in your application",
+                "Consider t4g.large for same specs with better price-performance" if 't3' in current_instance else "",
+                "Run ETL during off-peak hours for better SPOT availability"
+            ]
         }
 
     def _generate_cost_recommendations(self,
