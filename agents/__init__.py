@@ -10,6 +10,7 @@ from .code_analysis_agent import CodeAnalysisAgent
 from .workload_assessment_agent import WorkloadAssessmentAgent
 from .data_quality_agent import DataQualityAgent
 from .eks_optimizer import EKSOptimizer, EKSSparkConfig, SpotConfig, GravitonConfig, KarpenterConfig
+from .aws_recommendations_engine import AWSRecommendationsEngine, AWSService, ArchitectureRecommendation
 
 __all__ = [
     'AutoHealingAgent',
@@ -21,5 +22,8 @@ __all__ = [
     'EKSSparkConfig',
     'SpotConfig',
     'GravitonConfig',
-    'KarpenterConfig'
+    'KarpenterConfig',
+    'AWSRecommendationsEngine',
+    'AWSService',
+    'ArchitectureRecommendation'
 ]
