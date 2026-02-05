@@ -1,0 +1,18 @@
+{
+    "RoleName": "etl-emr-ec2-role",
+    "Description": "IAM role for EMR EC2 instances (cluster nodes) with S3 and logging access",
+    "TrustPolicy": "ec2_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role"
+    ],
+    "CustomPolicies": [
+        "s3_datalake_policy.json",
+        "dynamodb_etl_policy.json"
+    ],
+    "InstanceProfile": "etl-emr-ec2-instance-profile",
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

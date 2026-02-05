@@ -1,0 +1,49 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "SecretsManagerSlackWebhook",
+            "Effect": "Allow",
+            "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+            ],
+            "Resource": [
+                "arn:aws:secretsmanager:*:*:secret:etl/slack/*",
+                "arn:aws:secretsmanager:*:*:secret:etl/notifications/slack-*"
+            ]
+        },
+        {
+            "Sid": "KMSDecryptSecrets",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt",
+                "kms:DescribeKey"
+            ],
+            "Resource": "arn:aws:kms:*:*:key/*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": "secretsmanager.*.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "CloudWatchLogsForSlack",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/etl-slack-*"
+        },
+        {
+            "Sid": "LambdaInvokeSlackNotifier",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:InvokeFunction"
+            ],
+            "Resource": "arn:aws:lambda:*:*:function:etl-slack-notifier"
+        }
+    ]
+}

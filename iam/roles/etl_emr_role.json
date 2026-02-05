@@ -1,0 +1,20 @@
+{
+    "RoleName": "etl-emr-execution-role",
+    "Description": "IAM role for EMR cluster operations with S3, EC2, and CloudWatch access",
+    "TrustPolicy": "emr_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+    ],
+    "CustomPolicies": [
+        "emr_etl_policy.json",
+        "s3_datalake_policy.json",
+        "dynamodb_etl_policy.json",
+        "slack_integration_policy.json",
+        "teams_integration_policy.json"
+    ],
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

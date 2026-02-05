@@ -2,6 +2,22 @@
   "job_name": "simple_s3_copy",
   "description": "Simple S3 to S3 data copy - No notifications",
 
+  "etl_script": {
+    "path": "s3://etl-scripts-bucket/etl_scripts/simple/simple_s3_copy.py",
+    "local_path": "etl_scripts/simple/simple_s3_copy.py",
+    "type": "pyspark",
+    "args": {
+      "--source": "${source.path}",
+      "--destination": "${target.path}",
+      "--format": "${source.format}"
+    }
+  },
+
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role",
+    "emr_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-execution-role"
+  },
+
   "source": {
     "type": "s3",
     "path": "s3://source-bucket/raw/sales/",
@@ -17,7 +33,18 @@
 
   "platform": "auto",
 
+  "data_quality": {
+    "enabled": "N"
+  },
+
   "notifications": {
     "enabled": "N"
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamodb_tables": {
+      "run_audit": "etl_run_audit"
+    }
   }
 }

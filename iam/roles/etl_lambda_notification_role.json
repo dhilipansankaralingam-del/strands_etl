@@ -1,0 +1,18 @@
+{
+    "RoleName": "etl-lambda-notification-role",
+    "Description": "IAM role for Lambda functions handling Slack/Teams notifications",
+    "TrustPolicy": "lambda_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+    ],
+    "CustomPolicies": [
+        "slack_integration_policy.json",
+        "teams_integration_policy.json",
+        "dynamodb_etl_policy.json"
+    ],
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

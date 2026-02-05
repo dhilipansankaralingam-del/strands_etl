@@ -1,0 +1,20 @@
+{
+    "RoleName": "etl-ecs-task-execution-role",
+    "Description": "IAM role for ECS task execution with ECR, S3, and secrets access",
+    "TrustPolicy": "ecs_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+    ],
+    "CustomPolicies": [
+        "ecs_etl_policy.json",
+        "s3_datalake_policy.json",
+        "dynamodb_etl_policy.json",
+        "slack_integration_policy.json",
+        "teams_integration_policy.json"
+    ],
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

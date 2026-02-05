@@ -1,18 +1,370 @@
 # COMPLETE END-TO-END BABY STEPS GUIDE
 
-A comprehensive guide covering JSON creation, PySpark ETL scripts, Agent testing, and E2E validation.
+A comprehensive guide covering IAM setup, JSON creation, PySpark ETL scripts, Agent testing, Data Quality with Natural Language, and E2E validation.
 
 ---
 
 ## TABLE OF CONTENTS
 
+0. [PART 0: IAM POLICIES AND ROLES SETUP](#part-0-iam-policies-and-roles-setup)
 1. [PART 1: CREATE TEST JSON CONFIGURATIONS](#part-1-create-test-json-configurations)
 2. [PART 2: CREATE PYSPARK ETL SCRIPTS](#part-2-create-pyspark-etl-scripts)
 3. [PART 3: TEST EACH AGENT MANUALLY](#part-3-test-each-agent-manually)
-4. [PART 4: TEST INTEGRATIONS](#part-4-test-integrations)
-5. [PART 5: E2E TESTING - SIMPLE USE CASE](#part-5-e2e-testing---simple-use-case)
-6. [PART 6: E2E TESTING - COMPLEX USE CASE](#part-6-e2e-testing---complex-use-case)
-7. [PART 7: ASK FOR RECOMMENDATIONS](#part-7-ask-for-recommendations)
+4. [PART 3.5: DATA QUALITY WITH NATURAL LANGUAGE + SQL](#part-35-data-quality-with-natural-language--sql)
+5. [PART 4: TEST INTEGRATIONS](#part-4-test-integrations)
+6. [PART 5: E2E TESTING - SIMPLE USE CASE](#part-5-e2e-testing---simple-use-case)
+7. [PART 6: E2E TESTING - COMPLEX USE CASE](#part-6-e2e-testing---complex-use-case)
+8. [PART 7: ASK FOR RECOMMENDATIONS](#part-7-ask-for-recommendations)
+
+---
+
+# PART 0: IAM POLICIES AND ROLES SETUP
+
+Before running any ETL jobs, you must set up the required IAM policies and roles.
+
+## 0.1 Overview of Required IAM Resources
+
+| Resource Type | Name | Purpose |
+|---------------|------|---------|
+| Policy | etl-dynamodb-etl-policy | DynamoDB access for audit tables |
+| Policy | etl-slack-integration-policy | Secrets Manager for Slack webhooks |
+| Policy | etl-teams-integration-policy | Secrets Manager for Teams webhooks |
+| Policy | etl-emr-etl-policy | EMR cluster management |
+| Policy | etl-eks-etl-policy | EKS cluster management |
+| Policy | etl-ecs-etl-policy | ECS task management |
+| Policy | etl-glue-etl-policy | Glue job and catalog access |
+| Policy | etl-s3-datalake-policy | S3 data lake read/write |
+| Role | etl-glue-execution-role | Role for Glue ETL jobs |
+| Role | etl-emr-execution-role | Role for EMR cluster operations |
+| Role | etl-emr-ec2-role | Role for EMR EC2 instances |
+| Role | etl-eks-cluster-role | Role for EKS cluster |
+| Role | etl-eks-node-role | Role for EKS worker nodes |
+| Role | etl-ecs-task-execution-role | Role for ECS tasks |
+| Role | etl-lambda-notification-role | Role for notification Lambda functions |
+
+## 0.2 Create IAM Policies
+
+### Step 1: Create DynamoDB Policy
+
+```bash
+cd /home/user/strands_etl
+
+# View the policy
+cat iam/policies/dynamodb_etl_policy.json
+
+# Create the policy via AWS CLI
+aws iam create-policy \
+    --policy-name etl-dynamodb-etl-policy \
+    --policy-document file://iam/policies/dynamodb_etl_policy.json \
+    --description "ETL Framework DynamoDB access for audit tables" \
+    --tags Key=Project,Value=ETL-Framework
+```
+
+**Expected Output:**
+```json
+{
+    "Policy": {
+        "PolicyName": "etl-dynamodb-etl-policy",
+        "PolicyId": "ANPA...",
+        "Arn": "arn:aws:iam::123456789012:policy/etl-dynamodb-etl-policy",
+        "CreateDate": "2025-01-15T10:00:00Z"
+    }
+}
+```
+
+### Step 2: Create Slack Integration Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-slack-integration-policy \
+    --policy-document file://iam/policies/slack_integration_policy.json \
+    --description "ETL Framework Slack webhook access via Secrets Manager"
+```
+
+### Step 3: Create Teams Integration Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-teams-integration-policy \
+    --policy-document file://iam/policies/teams_integration_policy.json \
+    --description "ETL Framework Teams webhook access via Secrets Manager"
+```
+
+### Step 4: Create EMR Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-emr-etl-policy \
+    --policy-document file://iam/policies/emr_etl_policy.json \
+    --description "ETL Framework EMR cluster management"
+```
+
+### Step 5: Create EKS Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-eks-etl-policy \
+    --policy-document file://iam/policies/eks_etl_policy.json \
+    --description "ETL Framework EKS cluster management with Karpenter"
+```
+
+### Step 6: Create ECS Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-ecs-etl-policy \
+    --policy-document file://iam/policies/ecs_etl_policy.json \
+    --description "ETL Framework ECS task execution"
+```
+
+### Step 7: Create Glue Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-glue-etl-policy \
+    --policy-document file://iam/policies/glue_etl_policy.json \
+    --description "ETL Framework Glue job and catalog access"
+```
+
+### Step 8: Create S3 Data Lake Policy
+
+```bash
+aws iam create-policy \
+    --policy-name etl-s3-datalake-policy \
+    --policy-document file://iam/policies/s3_datalake_policy.json \
+    --description "ETL Framework S3 data lake access"
+```
+
+## 0.3 Create IAM Roles
+
+### Step 1: Create Glue Execution Role
+
+```bash
+# Create the role with trust policy
+aws iam create-role \
+    --role-name etl-glue-execution-role \
+    --assume-role-policy-document file://iam/trust_policies/glue_trust_policy.json \
+    --description "IAM role for AWS Glue ETL jobs"
+
+# Attach managed policy
+aws iam attach-role-policy \
+    --role-name etl-glue-execution-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+# Attach custom policies
+aws iam attach-role-policy \
+    --role-name etl-glue-execution-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-glue-etl-policy
+
+aws iam attach-role-policy \
+    --role-name etl-glue-execution-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-s3-datalake-policy
+
+aws iam attach-role-policy \
+    --role-name etl-glue-execution-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-dynamodb-etl-policy
+
+aws iam attach-role-policy \
+    --role-name etl-glue-execution-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-slack-integration-policy
+```
+
+### Step 2: Create EMR Execution Role
+
+```bash
+aws iam create-role \
+    --role-name etl-emr-execution-role \
+    --assume-role-policy-document file://iam/trust_policies/emr_trust_policy.json \
+    --description "IAM role for EMR cluster operations"
+
+aws iam attach-role-policy \
+    --role-name etl-emr-execution-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole
+
+aws iam attach-role-policy \
+    --role-name etl-emr-execution-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-emr-etl-policy
+```
+
+### Step 3: Create EMR EC2 Role (for cluster nodes)
+
+```bash
+aws iam create-role \
+    --role-name etl-emr-ec2-role \
+    --assume-role-policy-document file://iam/trust_policies/ec2_trust_policy.json \
+    --description "IAM role for EMR EC2 instances"
+
+aws iam attach-role-policy \
+    --role-name etl-emr-ec2-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role
+
+aws iam attach-role-policy \
+    --role-name etl-emr-ec2-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-s3-datalake-policy
+
+# Create instance profile
+aws iam create-instance-profile \
+    --instance-profile-name etl-emr-ec2-instance-profile
+
+aws iam add-role-to-instance-profile \
+    --instance-profile-name etl-emr-ec2-instance-profile \
+    --role-name etl-emr-ec2-role
+```
+
+### Step 4: Create EKS Cluster Role
+
+```bash
+aws iam create-role \
+    --role-name etl-eks-cluster-role \
+    --assume-role-policy-document file://iam/trust_policies/eks_trust_policy.json \
+    --description "IAM role for EKS cluster"
+
+aws iam attach-role-policy \
+    --role-name etl-eks-cluster-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+aws iam attach-role-policy \
+    --role-name etl-eks-cluster-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKSVPCResourceController
+```
+
+### Step 5: Create EKS Node Role
+
+```bash
+aws iam create-role \
+    --role-name etl-eks-node-role \
+    --assume-role-policy-document file://iam/trust_policies/ec2_trust_policy.json \
+    --description "IAM role for EKS worker nodes"
+
+aws iam attach-role-policy \
+    --role-name etl-eks-node-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+
+aws iam attach-role-policy \
+    --role-name etl-eks-node-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+aws iam attach-role-policy \
+    --role-name etl-eks-node-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+# Create instance profile
+aws iam create-instance-profile \
+    --instance-profile-name etl-eks-node-instance-profile
+
+aws iam add-role-to-instance-profile \
+    --instance-profile-name etl-eks-node-instance-profile \
+    --role-name etl-eks-node-role
+```
+
+### Step 6: Create Lambda Notification Role
+
+```bash
+aws iam create-role \
+    --role-name etl-lambda-notification-role \
+    --assume-role-policy-document file://iam/trust_policies/lambda_trust_policy.json \
+    --description "IAM role for notification Lambda functions"
+
+aws iam attach-role-policy \
+    --role-name etl-lambda-notification-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+aws iam attach-role-policy \
+    --role-name etl-lambda-notification-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-slack-integration-policy
+
+aws iam attach-role-policy \
+    --role-name etl-lambda-notification-role \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/etl-teams-integration-policy
+```
+
+## 0.4 Automated IAM Provisioning Script
+
+For convenience, use the automated provisioning script:
+
+```bash
+cd /home/user/strands_etl
+
+# Dry run (preview what will be created)
+python scripts/provisioning/provision_iam.py \
+    --region us-east-1 \
+    --account-id $(aws sts get-caller-identity --query Account --output text) \
+    --dry-run
+
+# Actually create the resources
+python scripts/provisioning/provision_iam.py \
+    --region us-east-1 \
+    --account-id $(aws sts get-caller-identity --query Account --output text)
+```
+
+**Expected Output (Dry Run):**
+```
+============================================================
+ETL Framework IAM Provisioning
+============================================================
+Region: us-east-1
+Account ID: 123456789012
+Dry Run: True
+============================================================
+
+Creating role: etl-glue-execution-role
+  [DRY RUN] Would create role: etl-glue-execution-role
+  [DRY RUN] Trust policy: glue_trust_policy.json
+  [DRY RUN] Managed policies: ['arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole']
+  [DRY RUN] Custom policies: ['glue_etl_policy.json', 's3_datalake_policy.json', ...]
+
+Creating role: etl-emr-execution-role
+  [DRY RUN] Would create role: etl-emr-execution-role
+  ...
+
+============================================================
+Provisioning Summary
+============================================================
+Policies created: 0
+Roles created: 0
+Instance profiles created: 0
+
+[DRY RUN] No resources were actually created.
+```
+
+## 0.5 Verify IAM Setup
+
+```bash
+# List all ETL-related policies
+aws iam list-policies --scope Local --query "Policies[?starts_with(PolicyName, 'etl-')].[PolicyName,Arn]" --output table
+
+# List all ETL-related roles
+aws iam list-roles --query "Roles[?starts_with(RoleName, 'etl-')].[RoleName,Arn]" --output table
+
+# Verify role policies
+aws iam list-attached-role-policies --role-name etl-glue-execution-role --output table
+```
+
+**Expected Output:**
+```
+----------------------------------------------------------------------------------
+|                               ListPolicies                                      |
++-----------------------------+--------------------------------------------------+
+|  etl-dynamodb-etl-policy    |  arn:aws:iam::123456789012:policy/etl-dynamodb-etl-policy |
+|  etl-emr-etl-policy         |  arn:aws:iam::123456789012:policy/etl-emr-etl-policy      |
+|  etl-eks-etl-policy         |  arn:aws:iam::123456789012:policy/etl-eks-etl-policy      |
+|  etl-glue-etl-policy        |  arn:aws:iam::123456789012:policy/etl-glue-etl-policy     |
+|  etl-s3-datalake-policy     |  arn:aws:iam::123456789012:policy/etl-s3-datalake-policy  |
+|  etl-slack-integration-policy | arn:aws:iam::123456789012:policy/etl-slack-integration-policy |
+|  etl-teams-integration-policy | arn:aws:iam::123456789012:policy/etl-teams-integration-policy |
++-----------------------------+--------------------------------------------------+
+```
+
+## 0.6 Cleanup IAM Resources
+
+To remove all IAM resources:
+
+```bash
+python scripts/provisioning/provision_iam.py \
+    --region us-east-1 \
+    --account-id $(aws sts get-caller-identity --query Account --output text) \
+    --delete
+```
 
 ---
 
@@ -451,6 +803,133 @@ print('DQ Rules:', len(config['data_quality']['rules']))
 print('Platform: Primary=', config['platform']['primary'], ', Fallback=', config['platform']['fallback'])
 "
 ```
+
+---
+
+## 1.6 Adding ETL Script and IAM Role References to JSON
+
+Every JSON config should reference the PySpark ETL script and IAM roles:
+
+### Add ETL Script Reference
+
+```json
+{
+  "job_name": "my_etl_job",
+
+  "etl_script": {
+    "path": "s3://etl-scripts-bucket/etl_scripts/complex/multi_source_analytics.py",
+    "local_path": "etl_scripts/complex/multi_source_analytics.py",
+    "type": "pyspark",
+    "entry_point": "main",
+    "dependencies": [
+      "etl_scripts/simple/customer_transform.py",
+      "agents/data_quality_nl_agent.py"
+    ],
+    "args": {
+      "--config": "s3://etl-configs/${job_name}.json"
+    }
+  }
+}
+```
+
+### Add IAM Role References
+
+```json
+{
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role",
+    "emr_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-execution-role",
+    "emr_ec2_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-ec2-role",
+    "eks_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-eks-cluster-role",
+    "lambda_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-lambda-notification-role"
+  }
+}
+```
+
+### Complete Example with All References
+
+```bash
+python -c "
+import json
+
+config = {
+    'job_name': 'my_complete_etl',
+    'description': 'Complete ETL job with script and IAM references',
+
+    # ETL Script Reference
+    'etl_script': {
+        'path': 's3://my-etl-scripts/etl_scripts/simple/simple_s3_copy.py',
+        'local_path': 'etl_scripts/simple/simple_s3_copy.py',
+        'type': 'pyspark',
+        'args': {
+            '--source': '\${source.path}',
+            '--destination': '\${target.path}',
+            '--format': '\${source.format}'
+        }
+    },
+
+    # IAM Roles
+    'iam': {
+        'glue_role': 'arn:aws:iam::\${AWS_ACCOUNT_ID}:role/etl-glue-execution-role',
+        'emr_role': 'arn:aws:iam::\${AWS_ACCOUNT_ID}:role/etl-emr-execution-role'
+    },
+
+    # Source/Target
+    'source': {
+        'type': 's3',
+        'path': 's3://source-bucket/raw/data/',
+        'format': 'parquet'
+    },
+
+    'target': {
+        'type': 's3',
+        'path': 's3://target-bucket/processed/data/',
+        'format': 'parquet',
+        'mode': 'overwrite'
+    },
+
+    'platform': 'glue',
+
+    # Audit to DynamoDB
+    'audit': {
+        'enabled': 'Y',
+        'dynamodb_tables': {
+            'run_audit': 'etl_run_audit',
+            'dq_audit': 'etl_dq_audit'
+        }
+    },
+
+    'notifications': {'enabled': 'N'}
+}
+
+with open('test_configs/my_complete_etl.json', 'w') as f:
+    json.dump(config, f, indent=2)
+
+print('Created: test_configs/my_complete_etl.json')
+print('ETL Script:', config['etl_script']['local_path'])
+print('IAM Glue Role:', config['iam']['glue_role'])
+"
+```
+
+### Available PySpark Scripts
+
+| Script | Location | Description |
+|--------|----------|-------------|
+| Simple S3 Copy | `etl_scripts/simple/simple_s3_copy.py` | Basic S3 to S3 copy with transforms |
+| Customer Transform | `etl_scripts/simple/customer_transform.py` | Customer 360 with RFM scoring |
+| Multi-Source Analytics | `etl_scripts/complex/multi_source_analytics.py` | Complex multi-join with DQ |
+
+### Available IAM Roles
+
+| Role | Purpose |
+|------|---------|
+| `etl-glue-execution-role` | AWS Glue ETL jobs |
+| `etl-emr-execution-role` | EMR cluster operations |
+| `etl-emr-ec2-role` | EMR EC2 instances |
+| `etl-eks-cluster-role` | EKS cluster management |
+| `etl-eks-node-role` | EKS worker nodes |
+| `etl-ecs-task-execution-role` | ECS task execution |
+| `etl-lambda-notification-role` | Notification Lambdas |
 
 ---
 
@@ -1605,6 +2084,394 @@ SPOT Instance Strategy:
   Checkpointing: Enable Spark checkpointing every 5 minutes
 
 [PASS] EKS Optimizer tests completed
+```
+
+---
+
+# PART 3.5: DATA QUALITY WITH NATURAL LANGUAGE + SQL
+
+The ETL framework includes a powerful Data Quality Agent that supports three ways to define rules:
+1. **Natural Language** - Write rules in plain English
+2. **SQL Expressions** - Write custom SQL validation logic
+3. **Templates** - Use pre-built rule templates
+
+## 3.5.1 Understanding the Data Quality NL Agent
+
+Location: `agents/data_quality_nl_agent.py`
+
+The agent can parse natural language rules and convert them to SQL:
+
+```bash
+cd /home/user/strands_etl
+python -c "
+from agents.data_quality_nl_agent import NaturalLanguageParser
+
+# See all supported patterns
+print('Supported Natural Language Patterns:')
+print('=' * 50)
+for pattern in NaturalLanguageParser.get_supported_patterns():
+    print(f'  - {pattern}')
+"
+```
+
+**Expected Output:**
+```
+Supported Natural Language Patterns:
+==================================================
+  - column_name should not be null
+  - column_name is required
+  - column_name must be between X and Y
+  - column_name should be greater than X
+  - column_name should be positive
+  - column_name should be unique
+  - no duplicates in column_name
+  - column_name should not be in the future
+  - column_name should be within N days
+  - column_name should match pattern 'regex'
+  - column_name should be a valid email
+  - column_name should be a valid phone
+  - column_name length should be N
+  - column_name should be one of [val1, val2, val3]
+  - column_name completeness should be at least N%
+```
+
+## 3.5.2 Test Natural Language Rule Parsing
+
+```bash
+python -c "
+from agents.data_quality_nl_agent import NaturalLanguageParser
+
+test_rules = [
+    'customer_id should not be null',
+    'transaction_amount must be between 0 and 1000000',
+    'email should be unique',
+    'created_date should not be in the future',
+    'customer_email should be a valid email',
+    'phone should be a valid phone',
+    'status should be one of [ACTIVE, INACTIVE, PENDING]',
+    'age should be positive'
+]
+
+print('Natural Language Rule Parsing Test')
+print('=' * 70)
+
+for rule in test_rules:
+    result = NaturalLanguageParser.parse(rule)
+    if result:
+        rule_type, column, sql_expr, params = result
+        print(f'\nInput: \"{rule}\"')
+        print(f'  Rule Type: {rule_type}')
+        print(f'  Column: {column}')
+        print(f'  SQL: {sql_expr}')
+    else:
+        print(f'\nInput: \"{rule}\"')
+        print(f'  ERROR: Could not parse')
+"
+```
+
+**Expected Output:**
+```
+Natural Language Rule Parsing Test
+======================================================================
+
+Input: "customer_id should not be null"
+  Rule Type: NOT_NULL
+  Column: customer_id
+  SQL: customer_id IS NOT NULL
+
+Input: "transaction_amount must be between 0 and 1000000"
+  Rule Type: RANGE
+  Column: transaction_amount
+  SQL: transaction_amount BETWEEN 0 AND 1000000
+
+Input: "email should be unique"
+  Rule Type: UNIQUE
+  Column: email
+  SQL: None
+
+Input: "created_date should not be in the future"
+  Rule Type: FRESHNESS
+  Column: created_date
+  SQL: created_date <= current_date()
+
+Input: "customer_email should be a valid email"
+  Rule Type: PATTERN
+  Column: customer_email
+  SQL: customer_email RLIKE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}$'
+```
+
+## 3.5.3 Run Data Quality Agent on Sample Data
+
+```bash
+python -c "
+from pyspark.sql import SparkSession
+from agents.data_quality_nl_agent import DataQualityNLAgent
+
+# Create Spark session
+spark = SparkSession.builder \
+    .appName('DQAgentTest') \
+    .master('local[*]') \
+    .getOrCreate()
+
+# Create sample data with some quality issues
+data = [
+    ('C001', 'john@email.com', 100.0, '2025-01-15', 'ACTIVE'),
+    ('C002', 'jane@email.com', 250.0, '2025-01-16', 'ACTIVE'),
+    ('C003', None, -50.0, '2025-01-17', 'ACTIVE'),           # NULL email, negative amount
+    ('C001', 'dup@test.com', 75.0, '2030-01-01', 'ACTIVE'),  # Duplicate ID, future date
+    ('C004', 'invalid-email', 500.0, '2025-01-18', 'UNKNOWN'), # Invalid email, bad status
+    ('C005', 'valid@test.com', 0, '2025-01-19', 'INACTIVE'),  # Zero amount
+]
+
+df = spark.createDataFrame(data, ['customer_id', 'email', 'amount', 'created_date', 'status'])
+
+print('Sample Data:')
+df.show(truncate=False)
+
+# Initialize Data Quality Agent
+agent = DataQualityNLAgent(spark)
+
+# Add rules using Natural Language
+print('\n--- Adding Natural Language Rules ---')
+agent.add_rule_nl('customer_id should not be null')
+agent.add_rule_nl('customer_id should be unique')
+agent.add_rule_nl('email should not be null')
+agent.add_rule_nl('amount must be between 0 and 10000')
+agent.add_rule_nl('created_date should not be in the future')
+
+# Add rule using SQL
+print('\n--- Adding SQL Rule ---')
+agent.add_rule_sql(
+    'valid_email_format',
+    \"email RLIKE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\\\.[A-Z|a-z]{2,}$'\",
+    description='Email must be in valid format'
+)
+
+# Add rule using template
+print('\n--- Adding Template Rule ---')
+agent.add_rule_template('allowed_values', column='status', values=['ACTIVE', 'INACTIVE', 'PENDING'])
+
+# Validate
+print('\n' + '=' * 70)
+results = agent.validate(df)
+
+# Show results as DataFrame
+print('\n--- Results DataFrame ---')
+results_df = agent.get_results_df()
+results_df.select('rule_name', 'pass_rate', 'passed', 'failed_records').show(truncate=False)
+
+spark.stop()
+"
+```
+
+**Expected Output:**
+```
+Sample Data:
++-----------+---------------+------+------------+--------+
+|customer_id|email          |amount|created_date|status  |
++-----------+---------------+------+------------+--------+
+|C001       |john@email.com |100.0 |2025-01-15  |ACTIVE  |
+|C002       |jane@email.com |250.0 |2025-01-16  |ACTIVE  |
+|C003       |null           |-50.0 |2025-01-17  |ACTIVE  |
+|C001       |dup@test.com   |75.0  |2030-01-01  |ACTIVE  |
+|C004       |invalid-email  |500.0 |2025-01-18  |UNKNOWN |
+|C005       |valid@test.com |0.0   |2025-01-19  |INACTIVE|
++-----------+---------------+------+------------+--------+
+
+--- Adding Natural Language Rules ---
+Added rule: nl_customer_id_not_null
+  Type: not_null
+  Column: customer_id
+  SQL: customer_id IS NOT NULL
+Added rule: nl_customer_id_unique
+  Type: unique
+  Column: customer_id
+  SQL: None
+...
+
+======================================================================
+Data Quality Validation
+======================================================================
+Total rules to validate: 7
+Total records: 6
+======================================================================
+
+Validating: nl_customer_id_not_null
+  Description: customer_id should not be null
+  Result: PASSED (100.00% pass rate)
+  Records: 6/6 passed
+
+Validating: nl_customer_id_unique
+  Description: customer_id should be unique
+  Result: FAILED (83.33% pass rate)
+  Records: 5/6 passed
+
+Validating: nl_email_not_null
+  Description: email should not be null
+  Result: FAILED (83.33% pass rate)
+  Records: 5/6 passed
+
+Validating: nl_amount_range
+  Description: amount must be between 0 and 10000
+  Result: FAILED (83.33% pass rate)
+  Records: 5/6 passed
+
+Validating: nl_created_date_freshness
+  Description: created_date should not be in the future
+  Result: FAILED (83.33% pass rate)
+  Records: 5/6 passed
+
+Validating: valid_email_format
+  Description: Email must be in valid format
+  Result: FAILED (66.67% pass rate)
+  Records: 4/6 passed
+
+Validating: template_status_allowed_values
+  Description: status must be one of ['ACTIVE', 'INACTIVE', 'PENDING']
+  Result: FAILED (83.33% pass rate)
+  Records: 5/6 passed
+
+======================================================================
+Validation Summary
+======================================================================
+Total Rules: 7
+Passed: 1
+Failed: 6
+
+Failed Rules:
+  - nl_customer_id_unique: 83.33% (error)
+  - nl_email_not_null: 83.33% (error)
+  - nl_amount_range: 83.33% (error)
+  - nl_created_date_freshness: 83.33% (error)
+  - valid_email_format: 66.67% (error)
+  - template_status_allowed_values: 83.33% (error)
+======================================================================
+
+--- Results DataFrame ---
++-------------------------------+---------+------+--------------+
+|rule_name                      |pass_rate|passed|failed_records|
++-------------------------------+---------+------+--------------+
+|nl_customer_id_not_null        |1.0      |true  |0             |
+|nl_customer_id_unique          |0.833    |false |1             |
+|nl_email_not_null              |0.833    |false |1             |
+|nl_amount_range                |0.833    |false |1             |
+|nl_created_date_freshness      |0.833    |false |1             |
+|valid_email_format             |0.667    |false |2             |
+|template_status_allowed_values |0.833    |false |1             |
++-------------------------------+---------+------+--------------+
+```
+
+## 3.5.4 Use Data Quality Rules in JSON Config
+
+In your ETL JSON configuration, you can define DQ rules in three ways:
+
+```json
+{
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "agent": "data_quality_nl_agent",
+    "quarantine_path": "s3://etl-quarantine-bucket/failed_records/",
+
+    "natural_language_rules": [
+      "transaction_id should not be null",
+      "customer_id should not be null",
+      "amount must be between 0 and 1000000",
+      "transaction_date should not be in the future",
+      "customer_email should be a valid email",
+      "transaction_id should be unique"
+    ],
+
+    "sql_rules": [
+      {
+        "name": "valid_region_code",
+        "expression": "region IS NULL OR region RLIKE '^[A-Z]{2,3}$'",
+        "description": "Region code must be 2-3 uppercase letters"
+      },
+      {
+        "name": "revenue_calculation",
+        "expression": "ABS(revenue - (quantity * unit_price * (1 - discount))) < 0.01",
+        "description": "Revenue must equal quantity * price * (1 - discount)"
+      }
+    ],
+
+    "template_rules": [
+      {
+        "template": "not_null",
+        "column": "product_id"
+      },
+      {
+        "template": "range",
+        "column": "quantity",
+        "min": 1,
+        "max": 10000
+      },
+      {
+        "template": "freshness",
+        "column": "updated_at",
+        "days": 30
+      },
+      {
+        "template": "allowed_values",
+        "column": "transaction_status",
+        "values": ["PENDING", "COMPLETED", "CANCELLED", "REFUNDED"]
+      }
+    ],
+
+    "thresholds": {
+      "overall_pass_rate": 0.95,
+      "critical_rules_must_pass": ["transaction_id should not be null", "valid_amount"]
+    }
+  }
+}
+```
+
+## 3.5.5 Available Template Rules
+
+| Template | Parameters | Description |
+|----------|------------|-------------|
+| `not_null` | column | Check column is not null |
+| `unique` | column | Check column values are unique |
+| `range` | column, min, max | Check value is within range |
+| `positive` | column | Check value > 0 |
+| `non_negative` | column | Check value >= 0 |
+| `pattern` | column, pattern | Match regex pattern |
+| `email` | column | Validate email format |
+| `freshness` | column, days | Check date within N days |
+| `not_future` | column | Check date not in future |
+| `allowed_values` | column, values | Check value in allowed list |
+
+## 3.5.6 Export DQ Results
+
+```bash
+python -c "
+from pyspark.sql import SparkSession
+from agents.data_quality_nl_agent import DataQualityNLAgent
+import json
+
+spark = SparkSession.builder.appName('DQExport').master('local[*]').getOrCreate()
+
+# Sample data
+data = [('C001', 100), ('C002', 200), (None, -50)]
+df = spark.createDataFrame(data, ['id', 'amount'])
+
+agent = DataQualityNLAgent(spark)
+agent.add_rule_nl('id should not be null')
+agent.add_rule_nl('amount should be positive')
+agent.validate(df)
+
+# Export as JSON
+results_json = agent.to_json()
+print('DQ Results JSON:')
+print(results_json)
+
+# Save to file
+with open('test_configs/dq_results.json', 'w') as f:
+    f.write(results_json)
+print('\nSaved to: test_configs/dq_results.json')
+
+spark.stop()
+"
 ```
 
 ---

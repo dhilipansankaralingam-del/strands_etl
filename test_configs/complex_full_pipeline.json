@@ -2,6 +2,25 @@
   "job_name": "enterprise_sales_pipeline",
   "description": "Complex multi-source sales pipeline with full notifications and DQ",
 
+  "etl_script": {
+    "path": "s3://etl-scripts-bucket/etl_scripts/complex/multi_source_analytics.py",
+    "local_path": "etl_scripts/complex/multi_source_analytics.py",
+    "type": "pyspark",
+    "entry_point": "main",
+    "dependencies": [
+      "etl_scripts/simple/customer_transform.py",
+      "agents/data_quality_nl_agent.py"
+    ]
+  },
+
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role",
+    "emr_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-execution-role",
+    "emr_ec2_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-ec2-role",
+    "eks_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-eks-cluster-role",
+    "lambda_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-lambda-notification-role"
+  },
+
   "source": {
     "type": "multi_source",
     "sources": [
@@ -84,38 +103,63 @@
   "data_quality": {
     "enabled": "Y",
     "fail_on_error": "N",
-    "rules": [
+    "agent": "data_quality_nl_agent",
+    "quarantine_path": "s3://etl-quarantine-bucket/failed_records/",
+
+    "natural_language_rules": [
+      "transaction_id should not be null",
+      "customer_id should not be null",
+      "amount must be between 0 and 1000000",
+      "transaction_date should not be in the future",
+      "customer_email should be a valid email",
+      "transaction_id should be unique"
+    ],
+
+    "sql_rules": [
       {
-        "name": "no_null_transaction_id",
-        "type": "not_null",
-        "column": "transaction_id"
+        "name": "valid_region_code",
+        "expression": "region IS NULL OR region RLIKE '^[A-Z]{2,3}$'",
+        "description": "Region code must be 2-3 uppercase letters"
       },
       {
-        "name": "valid_amount",
-        "type": "range",
-        "column": "amount",
-        "min": 0,
-        "max": 1000000
+        "name": "revenue_positive",
+        "expression": "revenue >= 0 OR revenue IS NULL",
+        "description": "Revenue cannot be negative"
       },
       {
-        "name": "valid_date",
-        "type": "date_range",
-        "column": "transaction_date",
-        "min": "2020-01-01",
-        "max": "2030-12-31"
-      },
-      {
-        "name": "referential_integrity",
-        "type": "sql",
-        "query": "SELECT COUNT(*) FROM _result WHERE customer_id IS NOT NULL AND customer_name IS NULL",
-        "expected": 0
-      },
-      {
-        "name": "completeness_check",
-        "type": "completeness",
-        "threshold": 0.95
+        "name": "customer_exists_for_transaction",
+        "expression": "customer_id IS NULL OR customer_name IS NOT NULL",
+        "description": "All customer IDs must have corresponding customer records"
       }
-    ]
+    ],
+
+    "template_rules": [
+      {
+        "template": "not_null",
+        "column": "product_id"
+      },
+      {
+        "template": "range",
+        "column": "quantity",
+        "min": 1,
+        "max": 10000
+      },
+      {
+        "template": "freshness",
+        "column": "updated_at",
+        "days": 30
+      },
+      {
+        "template": "allowed_values",
+        "column": "transaction_status",
+        "values": ["PENDING", "COMPLETED", "CANCELLED", "REFUNDED"]
+      }
+    ],
+
+    "thresholds": {
+      "overall_pass_rate": 0.95,
+      "critical_rules_must_pass": ["no_null_transaction_id", "valid_amount"]
+    }
   },
 
   "compliance": {
@@ -131,14 +175,14 @@
 
     "slack": {
       "enabled": "Y",
-      "webhook_url": "${SLACK_WEBHOOK_URL}",
+      "webhook_secret": "etl/notifications/slack-webhook",
       "channel": "#data-platform-alerts",
-      "bot_token": "xoxb-your-bot-token"
+      "bot_token_secret": "etl/notifications/slack-bot-token"
     },
 
     "teams": {
       "enabled": "Y",
-      "webhook_url": "https://outlook.office.com/webhook/xxx-xxx-xxx/IncomingWebhook/yyy/zzz",
+      "webhook_secret": "etl/notifications/teams-webhook",
       "channel": "Data Platform"
     },
 
@@ -204,6 +248,11 @@
 
   "audit": {
     "enabled": "Y",
+    "dynamodb_tables": {
+      "run_audit": "etl_run_audit",
+      "dq_audit": "etl_dq_audit",
+      "recommendations_audit": "etl_recommendations_audit"
+    },
     "store_lineage": "Y",
     "store_metrics": "Y",
     "store_recommendations": "Y",
