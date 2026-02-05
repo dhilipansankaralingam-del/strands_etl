@@ -1,0 +1,84 @@
+{
+  "job_name": "critical_financial_etl",
+  "description": "Critical financial data ETL - All notifications enabled",
+
+  "source": {
+    "type": "glue_catalog",
+    "database": "finance_db",
+    "table": "daily_transactions"
+  },
+
+  "target": {
+    "type": "redshift",
+    "connection_name": "finance-redshift",
+    "schema": "analytics",
+    "table": "transaction_facts",
+    "mode": "append"
+  },
+
+  "platform": "glue",
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "Y",
+    "rules": [
+      {
+        "name": "no_null_amounts",
+        "type": "not_null",
+        "column": "transaction_amount"
+      },
+      {
+        "name": "positive_amounts",
+        "type": "range",
+        "column": "transaction_amount",
+        "min": 0.01
+      }
+    ]
+  },
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "Y",
+      "webhook_url": "${SLACK_WEBHOOK_URL}",
+      "channel": "#finance-alerts"
+    },
+
+    "teams": {
+      "enabled": "Y",
+      "webhook_url": "https://company.webhook.office.com/webhookb2/xxx/IncomingWebhook/yyy/zzz",
+      "channel": "Finance Data Team"
+    },
+
+    "email": {
+      "enabled": "Y",
+      "sender": "finance-etl@company.com",
+      "recipients": [
+        "finance-data@company.com",
+        "finance-oncall@company.com",
+        "cfo-office@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+
+    "preferences": {
+      "on_start": "Y",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "Y",
+      "on_dq_failure": "Y",
+      "on_cost_alert": "Y",
+      "on_recommendations": "Y",
+
+      "dq_score_threshold": 0.99,
+      "cost_alert_threshold_usd": 25.0,
+      "duration_alert_minutes": 15,
+
+      "mention_users_on_failure": [
+        "finance-lead@company.com",
+        "data-oncall@company.com"
+      ]
+    }
+  }
+}

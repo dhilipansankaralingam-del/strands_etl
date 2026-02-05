@@ -1,0 +1,50 @@
+{
+  "job_name": "daily_report_etl",
+  "description": "Daily report generation - Email alerts only",
+
+  "source": {
+    "type": "jdbc",
+    "connection_name": "prod-mysql",
+    "query": "SELECT * FROM orders WHERE order_date = CURRENT_DATE - 1"
+  },
+
+  "target": {
+    "type": "s3",
+    "path": "s3://reports-bucket/daily/orders/",
+    "format": "csv",
+    "options": {
+      "header": true,
+      "delimiter": ","
+    }
+  },
+
+  "platform": "glue",
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "N"
+    },
+
+    "teams": {
+      "enabled": "N"
+    },
+
+    "email": {
+      "enabled": "Y",
+      "sender": "etl-reports@company.com",
+      "recipients": [
+        "data-team@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+
+    "preferences": {
+      "on_start": "N",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "N"
+    }
+  }
+}

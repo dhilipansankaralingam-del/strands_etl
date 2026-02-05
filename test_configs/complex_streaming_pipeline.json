@@ -1,0 +1,176 @@
+{
+  "job_name": "realtime_clickstream_pipeline",
+  "description": "Complex streaming pipeline with Kinesis source and Delta Lake target",
+
+  "source": {
+    "type": "kinesis",
+    "stream_name": "clickstream-events",
+    "region": "us-east-1",
+    "starting_position": "LATEST",
+    "checkpoint_location": "s3://checkpoints/clickstream/"
+  },
+
+  "target": {
+    "type": "delta",
+    "path": "s3://data-lake/streaming/clickstream/",
+    "mode": "append",
+    "partition_by": ["event_date", "event_hour"],
+    "optimize": {
+      "enabled": "Y",
+      "z_order_by": ["user_id", "session_id"]
+    }
+  },
+
+  "platform": {
+    "primary": "emr_serverless",
+    "fallback": ["emr"],
+    "auto_heal": true
+  },
+
+  "transformations": [
+    {
+      "type": "parse_json",
+      "source_column": "data",
+      "schema": {
+        "event_id": "string",
+        "user_id": "string",
+        "session_id": "string",
+        "event_type": "string",
+        "page_url": "string",
+        "referrer": "string",
+        "user_agent": "string",
+        "ip_address": "string",
+        "event_timestamp": "timestamp"
+      }
+    },
+    {
+      "type": "add_columns",
+      "columns": {
+        "event_date": "DATE(event_timestamp)",
+        "event_hour": "HOUR(event_timestamp)",
+        "is_bot": "CASE WHEN user_agent LIKE '%bot%' THEN true ELSE false END",
+        "device_type": "CASE WHEN user_agent LIKE '%Mobile%' THEN 'mobile' WHEN user_agent LIKE '%Tablet%' THEN 'tablet' ELSE 'desktop' END"
+      }
+    },
+    {
+      "type": "filter",
+      "condition": "is_bot = false AND event_type IS NOT NULL"
+    },
+    {
+      "type": "deduplicate",
+      "columns": ["event_id"],
+      "keep": "first"
+    }
+  ],
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "rules": [
+      {
+        "name": "valid_event_id",
+        "type": "not_null",
+        "column": "event_id"
+      },
+      {
+        "name": "valid_user_id",
+        "type": "regex",
+        "column": "user_id",
+        "pattern": "^[a-zA-Z0-9-]{36}$"
+      },
+      {
+        "name": "valid_event_type",
+        "type": "allowed_values",
+        "column": "event_type",
+        "values": ["page_view", "click", "scroll", "form_submit", "purchase", "add_to_cart"]
+      },
+      {
+        "name": "freshness_check",
+        "type": "freshness",
+        "column": "event_timestamp",
+        "max_delay_minutes": 5
+      }
+    ]
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "frameworks": ["GDPR", "CCPA"],
+    "pii_columns": ["ip_address", "user_agent"],
+    "anonymize": {
+      "ip_address": "hash",
+      "user_agent": "generalize"
+    }
+  },
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "Y",
+      "webhook_url": "${SLACK_WEBHOOK_URL}",
+      "channel": "#streaming-alerts"
+    },
+
+    "teams": {
+      "enabled": "N"
+    },
+
+    "email": {
+      "enabled": "Y",
+      "sender": "streaming-alerts@company.com",
+      "recipients": [
+        "streaming-oncall@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+
+    "preferences": {
+      "on_start": "N",
+      "on_success": "N",
+      "on_failure": "Y",
+      "on_warning": "Y",
+      "on_dq_failure": "Y",
+      "on_cost_alert": "Y",
+      "on_recommendations": "N",
+
+      "dq_score_threshold": 0.90,
+      "cost_alert_threshold_usd": 200.0,
+      "duration_alert_minutes": 5
+    }
+  },
+
+  "resources": {
+    "emr_serverless": {
+      "application_id": "00f00000000000000",
+      "execution_role_arn": "arn:aws:iam::123456789012:role/EMRServerlessRole",
+      "initial_capacity": {
+        "driver": {"cpu": "4vCPU", "memory": "16GB"},
+        "executor": {"cpu": "4vCPU", "memory": "16GB", "count": 10}
+      },
+      "max_capacity": {
+        "cpu": "400vCPU",
+        "memory": "1600GB"
+      }
+    }
+  },
+
+  "monitoring": {
+    "enabled": "Y",
+    "cloudwatch": {
+      "enabled": "Y",
+      "namespace": "ETL/Streaming",
+      "metrics": ["records_processed", "processing_latency", "error_count"]
+    },
+    "prometheus": {
+      "enabled": "N"
+    }
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "store_metrics": "Y",
+    "sample_failed_records": "Y",
+    "sample_rate": 0.01
+  }
+}

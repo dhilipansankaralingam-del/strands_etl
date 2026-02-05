@@ -1,0 +1,50 @@
+{
+  "job_name": "simple_glue_etl",
+  "description": "Simple Glue Catalog table to S3 - Slack only",
+
+  "source": {
+    "type": "glue_catalog",
+    "database": "sales_db",
+    "table": "transactions"
+  },
+
+  "target": {
+    "type": "s3",
+    "path": "s3://data-lake/curated/transactions/",
+    "format": "parquet",
+    "partition_by": ["year", "month"]
+  },
+
+  "platform": "glue",
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "status = 'COMPLETED'"
+    }
+  ],
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "Y",
+      "webhook_url": "${SLACK_WEBHOOK_URL}",
+      "channel": "#etl-alerts"
+    },
+
+    "teams": {
+      "enabled": "N"
+    },
+
+    "email": {
+      "enabled": "N"
+    },
+
+    "preferences": {
+      "on_start": "N",
+      "on_success": "Y",
+      "on_failure": "Y"
+    }
+  }
+}

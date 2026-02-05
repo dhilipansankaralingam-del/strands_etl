@@ -1,0 +1,209 @@
+{
+  "job_name": "ml_feature_engineering",
+  "description": "Complex ML feature engineering on EKS with Karpenter - Teams + Email",
+
+  "source": {
+    "type": "multi_source",
+    "sources": [
+      {
+        "name": "user_events",
+        "type": "delta",
+        "path": "s3://data-lake/events/user_events/"
+      },
+      {
+        "name": "user_profiles",
+        "type": "delta",
+        "path": "s3://data-lake/master/user_profiles/"
+      },
+      {
+        "name": "product_embeddings",
+        "type": "parquet",
+        "path": "s3://ml-artifacts/embeddings/products/"
+      }
+    ]
+  },
+
+  "target": {
+    "type": "delta",
+    "path": "s3://ml-features/user_features/",
+    "mode": "merge",
+    "merge_keys": ["user_id"],
+    "partition_by": ["feature_date"]
+  },
+
+  "platform": {
+    "primary": "eks",
+    "fallback": ["emr"],
+    "auto_heal": true,
+    "eks_config": {
+      "cluster_name": "data-platform-eks",
+      "namespace": "spark-jobs",
+      "service_account": "spark-sa",
+      "use_karpenter": true,
+      "use_spot": true,
+      "use_graviton": true,
+      "node_selector": {
+        "karpenter.sh/capacity-type": "spot",
+        "kubernetes.io/arch": "arm64"
+      }
+    }
+  },
+
+  "transformations": [
+    {
+      "type": "window",
+      "partition_by": ["user_id"],
+      "order_by": ["event_timestamp"],
+      "functions": {
+        "events_last_7d": "COUNT(*) OVER (PARTITION BY user_id ORDER BY event_timestamp RANGE BETWEEN INTERVAL 7 DAYS PRECEDING AND CURRENT ROW)",
+        "events_last_30d": "COUNT(*) OVER (PARTITION BY user_id ORDER BY event_timestamp RANGE BETWEEN INTERVAL 30 DAYS PRECEDING AND CURRENT ROW)",
+        "last_event_type": "LAST_VALUE(event_type) OVER (PARTITION BY user_id ORDER BY event_timestamp)"
+      }
+    },
+    {
+      "type": "join",
+      "left": "_result",
+      "right": "user_profiles",
+      "on": ["user_id"],
+      "how": "left"
+    },
+    {
+      "type": "aggregate",
+      "group_by": ["user_id"],
+      "aggregations": {
+        "total_events": "SUM(events_last_30d)",
+        "unique_products_viewed": "COUNT(DISTINCT product_id)",
+        "avg_session_duration": "AVG(session_duration)",
+        "purchase_count": "SUM(CASE WHEN event_type = 'purchase' THEN 1 ELSE 0 END)",
+        "cart_abandon_rate": "SUM(CASE WHEN event_type = 'add_to_cart' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN event_type = 'purchase' THEN 1 ELSE 0 END), 0)"
+      }
+    },
+    {
+      "type": "ml_transform",
+      "operation": "vector_similarity",
+      "config": {
+        "user_embedding_col": "user_embedding",
+        "product_embedding_col": "product_embeddings.embedding",
+        "output_col": "product_affinity_scores",
+        "top_k": 10
+      }
+    },
+    {
+      "type": "add_columns",
+      "columns": {
+        "feature_date": "CURRENT_DATE()",
+        "feature_version": "'v2.1'",
+        "is_high_value": "CASE WHEN purchase_count > 5 AND total_events > 100 THEN true ELSE false END"
+      }
+    }
+  ],
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "rules": [
+      {
+        "name": "user_id_not_null",
+        "type": "not_null",
+        "column": "user_id"
+      },
+      {
+        "name": "valid_event_counts",
+        "type": "range",
+        "column": "total_events",
+        "min": 0
+      },
+      {
+        "name": "embedding_dimension",
+        "type": "sql",
+        "query": "SELECT COUNT(*) FROM _result WHERE SIZE(product_affinity_scores) != 10",
+        "expected": 0
+      },
+      {
+        "name": "feature_freshness",
+        "type": "sql",
+        "query": "SELECT COUNT(*) FROM _result WHERE feature_date < CURRENT_DATE() - INTERVAL 1 DAY",
+        "expected": 0
+      }
+    ]
+  },
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "N"
+    },
+
+    "teams": {
+      "enabled": "Y",
+      "webhook_url": "https://company.webhook.office.com/webhookb2/xxx-xxx-xxx/IncomingWebhook/yyy/zzz",
+      "channel": "ML Platform"
+    },
+
+    "email": {
+      "enabled": "Y",
+      "sender": "ml-platform@company.com",
+      "recipients": [
+        "ml-engineering@company.com",
+        "data-science@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+
+    "preferences": {
+      "on_start": "Y",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "Y",
+      "on_dq_failure": "Y",
+      "on_cost_alert": "Y",
+      "on_recommendations": "Y",
+
+      "dq_score_threshold": 0.95,
+      "cost_alert_threshold_usd": 100.0,
+      "duration_alert_minutes": 60,
+
+      "mention_users_on_failure": [
+        "ml-oncall@company.com"
+      ]
+    }
+  },
+
+  "resources": {
+    "eks": {
+      "driver": {
+        "cores": 4,
+        "memory": "16g",
+        "instance_types": ["m6g.xlarge", "m7g.xlarge"]
+      },
+      "executor": {
+        "cores": 8,
+        "memory": "32g",
+        "instances": 20,
+        "instance_types": ["r6g.2xlarge", "r7g.2xlarge"]
+      },
+      "karpenter": {
+        "provisioner": "spark-graviton-spot",
+        "consolidation_policy": "WhenUnderutilized",
+        "ttl_seconds_after_empty": 30
+      },
+      "spark_config": {
+        "spark.kubernetes.allocation.batch.size": "10",
+        "spark.dynamicAllocation.enabled": "true",
+        "spark.dynamicAllocation.minExecutors": "5",
+        "spark.dynamicAllocation.maxExecutors": "50",
+        "spark.sql.adaptive.enabled": "true"
+      }
+    }
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "store_lineage": "Y",
+    "store_metrics": "Y",
+    "store_recommendations": "Y",
+    "store_feature_stats": "Y",
+    "retention_days": 180
+  }
+}

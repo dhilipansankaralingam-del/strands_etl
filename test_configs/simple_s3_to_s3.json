@@ -1,0 +1,23 @@
+{
+  "job_name": "simple_s3_copy",
+  "description": "Simple S3 to S3 data copy - No notifications",
+
+  "source": {
+    "type": "s3",
+    "path": "s3://source-bucket/raw/sales/",
+    "format": "parquet"
+  },
+
+  "target": {
+    "type": "s3",
+    "path": "s3://target-bucket/processed/sales/",
+    "format": "parquet",
+    "mode": "overwrite"
+  },
+
+  "platform": "auto",
+
+  "notifications": {
+    "enabled": "N"
+  }
+}
