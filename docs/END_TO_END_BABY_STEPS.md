@@ -3154,3 +3154,347 @@ PART 3: Test Agents → PART 4: Test Integrations →
 PART 5: Simple E2E → PART 6: Complex E2E →
 PART 7: Get Recommendations
 ```
+
+---
+
+# PART 8: GLUE INTEGRATION - USING FRAMEWORK WITH EXISTING SCRIPTS
+
+This section shows how to integrate the framework with your **existing Glue PySpark scripts** that read/write to Glue Catalog tables.
+
+## 8.1 Framework Overview for Glue
+
+The framework wraps your existing code to provide:
+- **Code Analysis Agent**: Analyzes PySpark for 50+ optimization patterns
+- **Data Quality Agent**: Natural Language + SQL validation rules
+- **Compliance Agent**: GDPR/PCI-DSS checks, PII masking
+- **Auto-Healing Agent**: Retry on failures, error recovery
+- **AWS Recommendations**: Cost optimization suggestions
+- **Workload Assessment**: Platform comparison (Glue vs EMR vs EKS)
+
+## 8.2 Simple Glue Use Case
+
+**Config**: `test_configs/glue_simple_use_case.json`
+
+This config is for a simple ETL that:
+- Reads from `raw_db.customers` (Glue Catalog)
+- Applies transformations
+- Writes to `curated_db.customers_curated` (Glue Catalog)
+
+### View the Simple Config
+
+```bash
+cat test_configs/glue_simple_use_case.json | python -m json.tool | head -60
+```
+
+### Key Sections:
+
+```json
+{
+  "etl_script": {
+    "path": "s3://your-scripts-bucket/glue_scripts/customer_daily_etl.py",
+    "local_path": "glue_scripts/customer_daily_etl.py"
+  },
+  "source": {
+    "type": "glue_catalog",
+    "tables": [{
+      "database": "raw_db",
+      "table": "customers",
+      "push_down_predicate": "year='${YEAR}' AND month='${MONTH}'"
+    }]
+  },
+  "target": {
+    "type": "glue_catalog",
+    "database": "curated_db",
+    "table": "customers_curated"
+  },
+  "data_quality": {
+    "natural_language_rules": [
+      "customer_id should not be null",
+      "email should be a valid email"
+    ]
+  }
+}
+```
+
+### Simple Glue Script Pattern
+
+```python
+# glue_scripts/customer_daily_etl.py
+from framework.glue_wrapper import GlueETLFramework
+
+framework = GlueETLFramework("s3://configs/glue_simple_use_case.json")
+
+with framework.run() as ctx:
+    # Read from Glue Catalog (replaces spark.table())
+    df = ctx.read_catalog("raw_db", "customers")
+
+    # Your existing transformation code
+    df_transformed = df.filter(col("status") == "ACTIVE")
+
+    # Register for DQ validation
+    ctx.register_dataframe("output", df_transformed)
+
+    # Write to Glue Catalog
+    ctx.write_to_catalog(df_transformed, "curated_db", "customers_curated")
+```
+
+## 8.3 Complex Glue Use Case
+
+**Config**: `test_configs/glue_complex_use_case.json`
+
+This config is for a complex ETL that:
+- Reads 5 tables from Glue Catalog (transactions, customers, products, stores, promotions)
+- Joins with broadcast hints for small tables
+- Creates 3 output tables (facts, daily summary, customer metrics)
+- Applies RFM scoring with window functions
+
+### View the Complex Config
+
+```bash
+cat test_configs/glue_complex_use_case.json | python -m json.tool | head -100
+```
+
+### Key Multi-Table Join Pattern
+
+```json
+{
+  "source": {
+    "type": "multi_source",
+    "tables": [
+      {"name": "transactions", "database": "sales_db", "table": "transactions",
+       "push_down_predicate": "transaction_date >= '${START_DATE}'"},
+      {"name": "customers", "database": "crm_db", "table": "customers"},
+      {"name": "products", "database": "master_db", "table": "products"},
+      {"name": "stores", "database": "master_db", "table": "stores"}
+    ]
+  },
+  "transformations": [
+    {"type": "join", "left": "transactions", "right": "customers",
+     "on": ["customer_id"], "broadcast_right": true}
+  ]
+}
+```
+
+## 8.4 Test Code Analysis Agent on Your Script
+
+The Code Analysis Agent checks for 50+ PySpark optimization patterns:
+
+```bash
+python -c "
+from agents.pyspark_code_analysis_agent import PySparkCodeAnalysisAgent
+
+# Analyze your existing Glue script
+agent = PySparkCodeAnalysisAgent()
+result = agent.analyze_file('glue_scripts/sales_analytics_pipeline.py')
+
+# Print detailed report
+agent.print_report(result)
+
+print('\n' + '=' * 70)
+print(f'OPTIMIZATION SCORE: {result.metrics[\"optimization_score\"]}/100')
+print('=' * 70)
+"
+```
+
+**Expected Output:**
+```
+======================================================================
+PYSPARK CODE ANALYSIS REPORT: glue_scripts/sales_analytics_pipeline.py
+======================================================================
+Optimization Score: 85/100
+Total Issues: 3
+  Critical: 0
+  High: 0
+  Medium: 2
+  Low: 1
+======================================================================
+
+DETAILED FINDINGS:
+
+🟡 Issue #1 [MEDIUM] - join
+   Line 142: Join without broadcast hint may cause unnecessary shuffle
+   Recommendation: Use broadcast() for small tables (<10MB) to avoid shuffle
+   Fix Example:
+      # Instead of:
+      large_df.join(small_df, 'key')
+
+      # Use:
+      from pyspark.sql.functions import broadcast
+      large_df.join(broadcast(small_df), 'key')
+```
+
+## 8.5 Optimization Categories Checked
+
+| Category | Examples |
+|----------|----------|
+| **Anti-Patterns** | collect(), toPandas(), count in loops |
+| **Join** | Missing broadcast, cartesian joins, self-joins |
+| **Shuffle** | groupByKey, repartition vs coalesce, sort before groupBy |
+| **Caching** | Missing unpersist, cache after read, repeated actions |
+| **Memory** | SELECT *, collect_list, explode + aggregate |
+| **Catalyst** | Filter after join, type casting in predicates |
+| **Partition** | High cardinality partitioning, hardcoded counts |
+| **UDF** | Python UDFs instead of built-in functions |
+| **Glue-Specific** | Missing push_down_predicate, bookmark not enabled |
+
+## 8.6 Run Framework with Your Existing Script
+
+### Option 1: Wrap Your Code (Recommended)
+
+```python
+# your_existing_script.py
+from framework.glue_wrapper import GlueETLFramework
+
+framework = GlueETLFramework("s3://your-bucket/config.json")
+
+with framework.run() as ctx:
+    # YOUR EXISTING CODE - just change spark.table() to ctx.read_catalog()
+
+    # Before: df = spark.table("db.table")
+    # After:
+    df = ctx.read_catalog("db", "table")
+
+    # Your transformations (no changes needed)
+    df_transformed = df.filter(...).withColumn(...)
+
+    # Register for DQ
+    ctx.register_dataframe("output", df_transformed)
+
+    # Before: df.write.saveAsTable("out_db.out_table")
+    # After:
+    ctx.write_to_catalog(df_transformed, "out_db", "out_table")
+```
+
+### Option 2: Analyze Without Modification
+
+```python
+# Analyze your script without changing it
+from framework.glue_wrapper import GlueETLFramework
+
+framework = GlueETLFramework()
+results = framework.analyze_script("s3://scripts/your_script.py")
+
+print(f"Optimization Score: {results['optimization_score']}/100")
+for finding in results['findings']:
+    print(f"- Line {finding['line']}: {finding['issue']}")
+```
+
+## 8.7 Data Quality with Natural Language in Glue
+
+```python
+from agents.data_quality_nl_agent import DataQualityNLAgent
+
+# After your transformations
+dq_agent = DataQualityNLAgent(spark)
+
+# Define rules in plain English
+dq_agent.add_rule_nl("customer_id should not be null")
+dq_agent.add_rule_nl("transaction_amount must be between 0 and 1000000")
+dq_agent.add_rule_nl("email should be a valid email")
+dq_agent.add_rule_nl("created_date should not be in the future")
+
+# Or SQL rules
+dq_agent.add_rule_sql("revenue_calc",
+    "ABS(revenue - (quantity * unit_price)) < 0.01",
+    "Revenue must equal quantity * price")
+
+# Validate
+results = dq_agent.validate(your_dataframe)
+
+# Check results
+for r in results:
+    status = "PASS" if r.passed else "FAIL"
+    print(f"[{status}] {r.rule_name}: {r.pass_rate*100:.1f}%")
+```
+
+## 8.8 Deploy to Glue
+
+### Step 1: Upload Scripts to S3
+
+```bash
+# Upload framework and agents
+aws s3 cp framework/ s3://your-scripts-bucket/framework/ --recursive
+aws s3 cp agents/ s3://your-scripts-bucket/agents/ --recursive
+aws s3 cp glue_scripts/ s3://your-scripts-bucket/glue_scripts/ --recursive
+
+# Upload config
+aws s3 cp test_configs/glue_complex_use_case.json s3://your-configs-bucket/
+```
+
+### Step 2: Create Glue Job
+
+```bash
+aws glue create-job \
+    --name "sales-analytics-pipeline" \
+    --role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role" \
+    --command '{
+        "Name": "glueetl",
+        "ScriptLocation": "s3://your-scripts-bucket/glue_scripts/sales_analytics_pipeline.py",
+        "PythonVersion": "3"
+    }' \
+    --default-arguments '{
+        "--CONFIG_PATH": "s3://your-configs-bucket/glue_complex_use_case.json",
+        "--extra-py-files": "s3://your-scripts-bucket/framework/glue_wrapper.py,s3://your-scripts-bucket/agents/data_quality_nl_agent.py,s3://your-scripts-bucket/agents/pyspark_code_analysis_agent.py",
+        "--START_DATE": "2025-01-01",
+        "--END_DATE": "2025-02-01"
+    }' \
+    --glue-version "4.0" \
+    --number-of-workers 20 \
+    --worker-type "G.2X"
+```
+
+### Step 3: Run the Job
+
+```bash
+aws glue start-job-run \
+    --job-name "sales-analytics-pipeline" \
+    --arguments '{
+        "--START_DATE": "2025-01-01",
+        "--END_DATE": "2025-02-01"
+    }'
+```
+
+## 8.9 Expected Framework Output
+
+When you run with the framework, you'll see:
+
+```
+============================================================
+PRE-EXECUTION AGENT ANALYSIS
+============================================================
+[Code Analysis] Analyzing: s3://scripts/sales_analytics_pipeline.py
+[Code Analysis] Found 2 issues
+[Code Analysis] Optimization Score: 85/100
+[Workload Assessment] Recommended Platform: Glue (current)
+
+============================================================
+EXECUTING USER ETL CODE
+============================================================
+[Framework] Reading: sales_db.transactions
+[Framework] Reading: crm_db.customers
+...
+[Framework] Writing: analytics_db.sales_facts
+
+============================================================
+POST-EXECUTION AGENT ANALYSIS
+============================================================
+[Data Quality] Validating: sales_facts
+  [PASS] transaction_id should not be null: 100.0%
+  [PASS] transaction_id should be unique: 100.0%
+  [PASS] amount must be between 0 and 1000000: 99.8%
+  [WARN] customer_email should be a valid email: 94.2%
+
+[Compliance] Checked: ['GDPR', 'PCI-DSS'], Issues: 2
+[AWS Recommendations] Estimated cost: $12.50
+  - Job runs in 25 minutes. Consider reducing workers from 20 to 10.
+
+============================================================
+PIPELINE EXECUTION SUMMARY
+============================================================
+CODE_ANALYSIS: success (2 findings)
+DATA_QUALITY: warning (1 findings)
+COMPLIANCE: warning (2 findings)
+AWS_RECOMMENDATIONS: success (1 findings)
+
+[Framework] Audit saved to etl_run_audit
+```

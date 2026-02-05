@@ -1,0 +1,183 @@
+{
+  "job_name": "glue_customer_daily_etl",
+  "description": "Simple Glue ETL: Read from catalog, transform, write to catalog",
+
+  "etl_script": {
+    "path": "s3://your-scripts-bucket/glue_scripts/customer_daily_etl.py",
+    "local_path": "glue_scripts/customer_daily_etl.py",
+    "type": "pyspark",
+    "glue_version": "4.0",
+    "python_version": "3"
+  },
+
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role"
+  },
+
+  "source": {
+    "type": "glue_catalog",
+    "tables": [
+      {
+        "name": "raw_customers",
+        "database": "raw_db",
+        "table": "customers",
+        "push_down_predicate": "year='${YEAR}' AND month='${MONTH}'"
+      }
+    ]
+  },
+
+  "target": {
+    "type": "glue_catalog",
+    "database": "curated_db",
+    "table": "customers_curated",
+    "mode": "overwrite",
+    "partition_by": ["year", "month"],
+    "format": "parquet",
+    "enable_update_catalog": true
+  },
+
+  "platform": {
+    "type": "glue",
+    "auto_scaling": true
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "status = 'ACTIVE' AND email IS NOT NULL"
+    },
+    {
+      "type": "add_columns",
+      "columns": {
+        "full_name": "CONCAT(first_name, ' ', last_name)",
+        "email_domain": "SPLIT(email, '@')[1]",
+        "year": "YEAR(CURRENT_DATE())",
+        "month": "MONTH(CURRENT_DATE())",
+        "etl_timestamp": "CURRENT_TIMESTAMP()"
+      }
+    },
+    {
+      "type": "select",
+      "columns": [
+        "customer_id",
+        "full_name",
+        "email",
+        "email_domain",
+        "phone",
+        "city",
+        "state",
+        "country",
+        "registration_date",
+        "status",
+        "year",
+        "month",
+        "etl_timestamp"
+      ]
+    }
+  ],
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "agent": "data_quality_nl_agent",
+
+    "natural_language_rules": [
+      "customer_id should not be null",
+      "customer_id should be unique",
+      "email should not be null",
+      "email should be a valid email"
+    ],
+
+    "sql_rules": [
+      {
+        "name": "valid_country_code",
+        "expression": "country IS NULL OR LENGTH(country) BETWEEN 2 AND 3",
+        "description": "Country must be ISO code"
+      }
+    ],
+
+    "template_rules": [
+      {
+        "template": "completeness",
+        "column": "phone",
+        "threshold": 0.8
+      }
+    ]
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "frameworks": ["GDPR"],
+    "pii_columns": ["email", "phone"],
+    "mask_pii": "N",
+    "audit_access": "Y"
+  },
+
+  "notifications": {
+    "enabled": "Y",
+    "slack": {
+      "enabled": "Y",
+      "webhook_secret": "etl/notifications/slack-webhook",
+      "channel": "#data-etl-alerts"
+    },
+    "teams": {
+      "enabled": "N"
+    },
+    "email": {
+      "enabled": "N"
+    },
+    "preferences": {
+      "on_start": "N",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_dq_failure": "Y"
+    }
+  },
+
+  "resources": {
+    "glue": {
+      "worker_type": "G.1X",
+      "number_of_workers": 5,
+      "timeout_minutes": 60,
+      "max_retries": 1
+    }
+  },
+
+  "spark_configs": {
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.sql.shuffle.partitions": "200"
+  },
+
+  "scheduling": {
+    "enabled": "Y",
+    "cron": "0 6 * * *",
+    "timezone": "UTC"
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamodb_tables": {
+      "run_audit": "etl_run_audit"
+    }
+  },
+
+  "agents": {
+    "code_analysis": {
+      "enabled": "Y",
+      "analyze_before_run": "Y"
+    },
+    "workload_assessment": {
+      "enabled": "Y"
+    },
+    "aws_recommendations": {
+      "enabled": "Y",
+      "cost_alert_threshold_usd": 10.0
+    },
+    "auto_healing": {
+      "enabled": "Y",
+      "retry_on_memory_error": "Y",
+      "retry_on_timeout": "Y"
+    }
+  }
+}
