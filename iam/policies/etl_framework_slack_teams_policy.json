@@ -1,0 +1,64 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SecretsManagerAccess",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:etl-framework/slack/*",
+        "arn:aws:secretsmanager:*:*:secret:etl-framework/teams/*"
+      ]
+    },
+    {
+      "Sid": "LambdaForSlackBot",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:InvokeFunction",
+        "lambda:GetFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:etl-slack-*",
+        "arn:aws:lambda:*:*:function:etl-teams-*"
+      ]
+    },
+    {
+      "Sid": "APIGatewayForWebhooks",
+      "Effect": "Allow",
+      "Action": [
+        "execute-api:Invoke"
+      ],
+      "Resource": [
+        "arn:aws:execute-api:*:*:*/*/POST/slack/*",
+        "arn:aws:execute-api:*:*:*/*/POST/teams/*"
+      ]
+    },
+    {
+      "Sid": "SESForEmail",
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ses:FromAddress": "etl-notifications@example.com"
+        }
+      }
+    },
+    {
+      "Sid": "SNSForNotifications",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish"
+      ],
+      "Resource": [
+        "arn:aws:sns:*:*:etl-framework-*"
+      ]
+    }
+  ]
+}

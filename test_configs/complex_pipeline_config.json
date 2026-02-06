@@ -1,0 +1,259 @@
+{
+  "job_name": "complex_sales_analytics_pipeline",
+  "description": "Complex multi-stage ETL pipeline for sales analytics with joins, aggregations, and Delta Lake",
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr", "eks"],
+    "force_platform": null,
+    "auto_fallback_on_error": "Y"
+  },
+
+  "auto_healing": {
+    "enabled": "Y",
+    "correct_code": "Y",
+    "auto_rerun": "Y",
+    "max_retries": 3,
+    "heal_memory_errors": "Y",
+    "heal_shuffle_errors": "Y",
+    "heal_timeout_errors": "Y",
+    "heal_connection_errors": "Y",
+    "heal_data_skew": "Y",
+    "heal_partition_errors": "Y"
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "check_sources": "Y",
+    "check_targets": "Y",
+    "frameworks": ["GDPR", "PCI_DSS", "SOX"],
+    "pii_columns": [
+      "customer_email", "customer_phone", "customer_address",
+      "credit_card_number", "billing_address"
+    ],
+    "mask_pii": "Y"
+  },
+
+  "data_quality": {
+    "enabled": "Y",
+    "natural_language_rules": [
+      "order_id should not be null",
+      "order_id should be unique",
+      "customer_id should not be null",
+      "order_date should not be null",
+      "total_amount should be positive",
+      "quantity should be greater than 0"
+    ],
+    "sql_rules": [
+      {
+        "id": "SQL_001",
+        "description": "Order total matches line items sum",
+        "sql": "SELECT COUNT(*) FROM {table} o JOIN (SELECT order_id, SUM(line_total) as calc_total FROM order_lines GROUP BY order_id) l ON o.order_id = l.order_id WHERE ABS(o.total_amount - l.calc_total) > 0.01",
+        "threshold": 0
+      },
+      {
+        "id": "SQL_002",
+        "description": "No orphan order lines",
+        "sql": "SELECT COUNT(*) FROM order_lines l LEFT JOIN orders o ON l.order_id = o.order_id WHERE o.order_id IS NULL",
+        "threshold": 0
+      },
+      {
+        "id": "SQL_003",
+        "description": "Valid customer references",
+        "sql": "SELECT COUNT(*) FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+        "threshold": 0
+      }
+    ],
+    "template_rules": [
+      {
+        "template": "range_check",
+        "parameters": {"column": "total_amount", "min": 0, "max": 1000000},
+        "threshold": 0.999
+      },
+      {
+        "template": "completeness_check",
+        "parameters": {"column": "customer_id"},
+        "threshold": 0.99
+      }
+    ]
+  },
+
+  "workload_assessment": {
+    "enabled": "Y",
+    "analyze_input_size": "Y",
+    "consider_weekday_weekend": "Y",
+    "use_historical_trends": "Y",
+    "monitor_cpu_load": "Y",
+    "monitor_memory_profile": "Y",
+    "detect_data_skew": "Y",
+    "analyze_join_metrics": "Y",
+    "track_shuffle_bytes": "Y",
+    "track_s3_io": "Y"
+  },
+
+  "code_analysis": {
+    "enabled": "Y",
+    "check_anti_patterns": "Y",
+    "check_join_optimizations": "Y",
+    "recommend_aws_tools": "Y",
+    "recommend_delta_optimizations": "Y"
+  },
+
+  "learning": {
+    "enabled": "Y",
+    "store_history": "Y",
+    "predict_optimal_config": "Y",
+    "detect_anomalies": "Y"
+  },
+
+  "integrations": {
+    "slack_enabled": "Y",
+    "slack_channel": "#etl-complex-jobs",
+    "slack_voice_enabled": "Y",
+    "slack_etl_trigger_enabled": "Y",
+    "teams_enabled": "Y",
+    "teams_webhook_url_secret": "etl-framework/teams/webhook-url",
+    "email_enabled": "Y",
+    "email_recipients": ["etl-team@company.com", "data-engineering@company.com"],
+    "streamlit_enabled": "Y"
+  },
+
+  "dashboard": {
+    "cloudwatch_enabled": "Y",
+    "cloudwatch_namespace": "ETLFramework",
+    "cloudwatch_log_group": "/etl-framework/complex-jobs",
+    "enterprise_summary_enabled": "Y",
+    "predict_failures": "Y",
+    "track_cost_metrics": "Y",
+    "track_compliance_metrics": "Y"
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "audit_on_start": "Y",
+    "audit_on_read": "Y",
+    "audit_on_transform": "Y",
+    "audit_on_write": "Y",
+    "audit_on_complete": "Y",
+    "dynamodb_table": "etl_audit_log"
+  },
+
+  "eks_karpenter": {
+    "enabled": "Y",
+    "use_karpenter": "Y",
+    "use_spot": "Y",
+    "use_graviton": "Y",
+    "node_pool": "spark-workers",
+    "min_nodes": 3,
+    "max_nodes": 50
+  },
+
+  "sources": [
+    {
+      "name": "orders",
+      "type": "glue_catalog",
+      "database": "sales_raw",
+      "table": "orders",
+      "format": "parquet",
+      "estimated_size_gb": 50
+    },
+    {
+      "name": "order_lines",
+      "type": "glue_catalog",
+      "database": "sales_raw",
+      "table": "order_lines",
+      "format": "parquet",
+      "estimated_size_gb": 200
+    },
+    {
+      "name": "customers",
+      "type": "glue_catalog",
+      "database": "master_data",
+      "table": "customers",
+      "format": "parquet",
+      "estimated_size_gb": 5
+    },
+    {
+      "name": "products",
+      "type": "glue_catalog",
+      "database": "master_data",
+      "table": "products",
+      "format": "parquet",
+      "estimated_size_gb": 1
+    },
+    {
+      "name": "regions",
+      "type": "glue_catalog",
+      "database": "master_data",
+      "table": "regions",
+      "format": "parquet",
+      "estimated_size_gb": 0.01
+    }
+  ],
+
+  "targets": [
+    {
+      "name": "sales_fact",
+      "type": "delta",
+      "path": "s3://etl-framework-data/delta/sales_fact/",
+      "partition_keys": ["order_date", "region"],
+      "write_mode": "merge",
+      "merge_key": "order_id"
+    },
+    {
+      "name": "customer_aggregates",
+      "type": "glue_catalog",
+      "database": "analytics",
+      "table": "customer_aggregates",
+      "format": "parquet",
+      "partition_keys": ["snapshot_date"],
+      "write_mode": "overwrite"
+    },
+    {
+      "name": "product_performance",
+      "type": "glue_catalog",
+      "database": "analytics",
+      "table": "product_performance",
+      "format": "parquet",
+      "partition_keys": ["year", "month"],
+      "write_mode": "append"
+    }
+  ],
+
+  "spark_config": {
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.sql.adaptive.skewJoin.enabled": "true",
+    "spark.sql.adaptive.skewJoin.skewedPartitionFactor": "5",
+    "spark.sql.shuffle.partitions": "400",
+    "spark.executor.memory": "8g",
+    "spark.executor.cores": "4",
+    "spark.driver.memory": "4g",
+    "spark.dynamicAllocation.enabled": "true",
+    "spark.dynamicAllocation.minExecutors": "5",
+    "spark.dynamicAllocation.maxExecutors": "50"
+  },
+
+  "glue_config": {
+    "worker_type": "G.2X",
+    "number_of_workers": 20,
+    "timeout_minutes": 180,
+    "job_bookmark_option": "job-bookmark-enable",
+    "enable_continuous_logging": true,
+    "enable_metrics": true
+  },
+
+  "emr_config": {
+    "cluster_name": "etl-sales-analytics",
+    "release_label": "emr-6.10.0",
+    "master_instance_type": "m5.xlarge",
+    "core_instance_type": "r5.2xlarge",
+    "core_instance_count": 10,
+    "task_instance_type": "r5.xlarge",
+    "task_instance_count": 20,
+    "use_spot_for_task": true,
+    "spot_bid_percentage": 60
+  },
+
+  "script_path": "scripts/pyspark/complex_sales_analytics.py"
+}

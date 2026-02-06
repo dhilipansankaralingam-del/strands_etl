@@ -1,0 +1,94 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GlueJobManagement",
+      "Effect": "Allow",
+      "Action": [
+        "glue:StartJobRun",
+        "glue:GetJobRun",
+        "glue:GetJobRuns",
+        "glue:BatchStopJobRun",
+        "glue:GetJob",
+        "glue:GetJobs",
+        "glue:UpdateJob",
+        "glue:CreateJob",
+        "glue:DeleteJob"
+      ],
+      "Resource": [
+        "arn:aws:glue:*:*:job/etl-*"
+      ]
+    },
+    {
+      "Sid": "GlueCatalogAccess",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:BatchGetPartition",
+        "glue:CreateTable",
+        "glue:UpdateTable",
+        "glue:DeleteTable",
+        "glue:CreatePartition",
+        "glue:BatchCreatePartition",
+        "glue:UpdatePartition",
+        "glue:DeletePartition"
+      ],
+      "Resource": [
+        "arn:aws:glue:*:*:catalog",
+        "arn:aws:glue:*:*:database/*",
+        "arn:aws:glue:*:*:table/*"
+      ]
+    },
+    {
+      "Sid": "S3DataAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::etl-framework-*",
+        "arn:aws:s3:::etl-framework-*/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/aws-glue/*",
+        "arn:aws:logs:*:*:log-group:/etl-framework/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "cloudwatch:namespace": "ETLFramework"
+        }
+      }
+    }
+  ]
+}
