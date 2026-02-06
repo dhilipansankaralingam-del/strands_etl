@@ -1,0 +1,384 @@
+{
+  "_description": "Complex ETL Demo - Sales Analytics Pipeline with ALL Agents & Integrations",
+  "_use_case": "Multi-table join, aggregations, Delta Lake MERGE, full enterprise features",
+
+  "job_name": "demo_complex_sales_analytics",
+  "job_description": "Enterprise sales analytics with Delta Lake, all agents, and full monitoring",
+
+  "script": {
+    "path": "s3://etl-framework-scripts/pyspark/complex_sales_analytics.py",
+    "local_path": "scripts/pyspark/complex_sales_analytics.py",
+    "type": "pyspark"
+  },
+
+  "job_arguments": {
+    "--source_database": "raw_data",
+    "--target_database": "analytics",
+    "--delta_path": "s3://etl-framework-data/delta"
+  },
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr", "eks"],
+    "force_platform": null,
+    "auto_fallback_on_error": "Y",
+    "_comment": "Full fallback chain: Glue → EMR → EKS with Karpenter"
+  },
+
+  "glue_config": {
+    "glue_version": "4.0",
+    "worker_type": "G.2X",
+    "number_of_workers": 10,
+    "timeout_minutes": 180,
+    "additional_python_modules": ["delta-spark"],
+    "spark_configs": {
+      "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+      "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+      "spark.sql.adaptive.enabled": "true",
+      "spark.sql.adaptive.coalescePartitions.enabled": "true",
+      "spark.sql.adaptive.skewJoin.enabled": "true"
+    }
+  },
+
+  "emr_config": {
+    "release_label": "emr-6.10.0",
+    "instance_type": "m5.2xlarge",
+    "instance_count": 5,
+    "applications": ["Spark", "Hadoop"],
+    "spark_configs": {
+      "spark.executor.memory": "8g",
+      "spark.executor.cores": "4",
+      "spark.sql.shuffle.partitions": "200"
+    }
+  },
+
+  "eks_config": {
+    "cluster_name": "etl-eks-cluster",
+    "namespace": "spark-jobs",
+    "use_karpenter": "Y",
+    "use_spot": "Y",
+    "use_graviton": "Y",
+    "executor_instances": 10,
+    "executor_memory": "8g",
+    "executor_cores": 4
+  },
+
+  "auto_healing": {
+    "enabled": "Y",
+    "correct_code": "Y",
+    "auto_rerun": "Y",
+    "max_retries": 3,
+    "heal_memory_errors": "Y",
+    "heal_shuffle_errors": "Y",
+    "heal_timeout_errors": "Y",
+    "heal_connection_errors": "Y",
+    "heal_data_skew": "Y",
+    "heal_partition_errors": "Y",
+    "_comment": "Full auto-healing for complex pipeline"
+  },
+
+  "code_analysis": {
+    "enabled": "Y",
+    "check_anti_patterns": "Y",
+    "check_join_optimizations": "Y",
+    "check_window_functions": "Y",
+    "check_aggregation_patterns": "Y",
+    "recommend_aws_tools": "Y",
+    "recommend_delta_optimizations": "Y",
+    "recommend_caching": "Y"
+  },
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_critical": "Y",
+    "sample_size": 100000,
+
+    "natural_language_rules": [
+      "order_id should not be null",
+      "order_id should be unique",
+      "customer_id should not be null",
+      "order_date should not be null",
+      "quantity should be greater than 0",
+      "unit_price should be positive",
+      "line_total should be positive",
+      "net_amount should be positive",
+      "profit_margin should be between -100 and 100"
+    ],
+
+    "sql_rules": [
+      {
+        "id": "SQL_ORDER_LINE_MATCH",
+        "description": "Every order line must have a valid order",
+        "sql": "SELECT COUNT(*) FROM order_lines ol LEFT JOIN orders o ON ol.order_id = o.order_id WHERE o.order_id IS NULL",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_CUSTOMER_EXISTS",
+        "description": "Every order must have a valid customer",
+        "sql": "SELECT COUNT(*) FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_PRODUCT_EXISTS",
+        "description": "Every order line must have a valid product",
+        "sql": "SELECT COUNT(*) FROM order_lines ol LEFT JOIN products p ON ol.product_id = p.product_id WHERE p.product_id IS NULL",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_NEGATIVE_PROFIT",
+        "description": "Flag orders with negative profit (warning only)",
+        "sql": "SELECT COUNT(*) FROM sales_fact WHERE profit < 0",
+        "threshold": 1000,
+        "severity": "warning"
+      },
+      {
+        "id": "SQL_DISCOUNT_RANGE",
+        "description": "Discount should be between 0 and 1",
+        "sql": "SELECT COUNT(*) FROM order_lines WHERE discount < 0 OR discount > 1",
+        "threshold": 0,
+        "severity": "error"
+      }
+    ],
+
+    "template_rules": [
+      {
+        "template": "null_check",
+        "parameters": {"column": "order_id"}
+      },
+      {
+        "template": "completeness_check",
+        "parameters": {"column": "customer_id"},
+        "threshold": 0.99
+      },
+      {
+        "template": "completeness_check",
+        "parameters": {"column": "product_id"},
+        "threshold": 0.99
+      },
+      {
+        "template": "row_count_check",
+        "parameters": {"min_rows": 1000, "max_rows": 100000000}
+      }
+    ],
+
+    "post_transform_rules": [
+      "total_revenue should be positive",
+      "customer aggregates should have at least 1 order per customer"
+    ]
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "check_sources": "Y",
+    "check_targets": "Y",
+    "frameworks": ["GDPR", "PCI_DSS", "SOX"],
+    "pii_columns": [
+      "customer_email", "customer_name", "phone", "address",
+      "credit_card_number", "ssn"
+    ],
+    "mask_pii": "Y",
+    "mask_strategy": "hash",
+    "audit_data_access": "Y",
+    "retention_days": 365,
+    "_comment": "Full compliance for enterprise data"
+  },
+
+  "workload_assessment": {
+    "enabled": "Y",
+    "analyze_input_size": "Y",
+    "consider_weekday_weekend": "Y",
+    "use_historical_trends": "Y",
+    "monitor_cpu_load": "Y",
+    "monitor_memory_profile": "Y",
+    "monitor_executor_usage": "Y",
+    "detect_data_skew": "Y",
+    "track_s3_bytes": "Y",
+    "track_shuffle_bytes": "Y",
+    "track_cost": "Y",
+    "recommend_resources": "Y"
+  },
+
+  "learning": {
+    "enabled": "Y",
+    "store_history": "Y",
+    "history_table": "etl_execution_history",
+    "baseline_table": "etl_job_baselines",
+    "detect_anomalies": "Y",
+    "predict_failures": "Y",
+    "update_baseline": "Y",
+    "trend_window_days": 30
+  },
+
+  "recommendation": {
+    "enabled": "Y",
+    "aggregate_from_all_agents": "Y",
+    "prioritize_by_impact": "Y",
+    "generate_implementation_plan": "Y",
+    "track_recommendation_status": "Y"
+  },
+
+  "integrations": {
+    "slack_enabled": "Y",
+    "slack_channel": "#etl-analytics",
+    "slack_voice_enabled": "Y",
+    "slack_etl_trigger_enabled": "Y",
+    "slack_notifications": {
+      "on_start": "Y",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_dq_failure": "Y",
+      "on_healing": "Y",
+      "include_metrics": "Y",
+      "include_recommendations": "Y"
+    },
+
+    "teams_enabled": "Y",
+    "teams_webhook_url": "https://outlook.office.com/webhook/...",
+    "teams_notifications": {
+      "on_start": "N",
+      "on_success": "Y",
+      "on_failure": "Y"
+    },
+
+    "email_enabled": "Y",
+    "email_sender": "etl-notifications@company.com",
+    "email_recipients": [
+      "data-engineering@company.com",
+      "analytics-team@company.com"
+    ],
+    "email_on_success": "Y",
+    "email_on_failure": "Y",
+    "email_daily_summary": "Y",
+    "email_include_html_report": "Y",
+
+    "streamlit_enabled": "Y",
+    "streamlit_port": 8501
+  },
+
+  "dashboard": {
+    "cloudwatch_enabled": "Y",
+    "cloudwatch_namespace": "ETL/SalesAnalytics",
+    "cloudwatch_metrics": [
+      "duration_seconds",
+      "records_processed",
+      "cost_dollars",
+      "dq_pass_rate",
+      "memory_utilization",
+      "cpu_utilization"
+    ],
+    "cloudwatch_alarms": {
+      "duration_threshold_minutes": 120,
+      "cost_threshold_dollars": 100,
+      "dq_failure_threshold": 0.95
+    },
+
+    "enterprise_summary_enabled": "Y",
+    "predict_failures": "Y",
+    "show_cost_trends": "Y",
+    "show_dq_trends": "Y",
+    "show_compliance_status": "Y",
+
+    "html_reports_enabled": "Y",
+    "report_output_path": "s3://etl-framework-reports/sales-analytics/",
+    "report_retention_days": 90
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamo_table": "etl_audit_log",
+    "audit_on_start": "Y",
+    "audit_on_read": "Y",
+    "audit_on_transform": "Y",
+    "audit_on_dq": "Y",
+    "audit_on_compliance": "Y",
+    "audit_on_write": "Y",
+    "audit_on_complete": "Y",
+    "audit_on_error": "Y",
+    "audit_on_healing": "Y",
+    "include_row_counts": "Y",
+    "include_schema_info": "Y"
+  },
+
+  "source_tables": [
+    {
+      "database": "raw_data",
+      "table": "orders",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/raw/orders/",
+      "estimated_size_gb": 50,
+      "partition_column": "order_date"
+    },
+    {
+      "database": "raw_data",
+      "table": "order_lines",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/raw/order_lines/",
+      "estimated_size_gb": 200,
+      "partition_column": "order_date"
+    },
+    {
+      "database": "master_data",
+      "table": "customers",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/master/customers/",
+      "estimated_size_gb": 5,
+      "broadcast": true
+    },
+    {
+      "database": "master_data",
+      "table": "products",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/master/products/",
+      "estimated_size_gb": 1,
+      "broadcast": true
+    },
+    {
+      "database": "master_data",
+      "table": "regions",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/master/regions/",
+      "estimated_size_gb": 0.01,
+      "broadcast": true
+    }
+  ],
+
+  "target_tables": [
+    {
+      "database": "analytics",
+      "table": "sales_fact",
+      "format": "delta",
+      "location": "s3://etl-framework-data/delta/sales_fact/",
+      "partition_by": ["order_year", "order_month"],
+      "write_mode": "merge",
+      "merge_keys": ["order_id", "product_id"],
+      "enable_cdc": true
+    },
+    {
+      "database": "analytics",
+      "table": "customer_aggregates",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/analytics/customer_aggregates/",
+      "partition_by": ["snapshot_date"],
+      "write_mode": "append"
+    },
+    {
+      "database": "analytics",
+      "table": "product_performance",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/analytics/product_performance/",
+      "partition_by": ["order_year", "order_month"],
+      "write_mode": "overwrite"
+    }
+  ],
+
+  "schedule": {
+    "enabled": "Y",
+    "cron_expression": "0 6 * * *",
+    "timezone": "America/New_York",
+    "retry_on_failure": "Y",
+    "max_retries": 2
+  }
+}
