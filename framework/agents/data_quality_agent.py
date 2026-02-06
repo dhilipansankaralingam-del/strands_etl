@@ -348,9 +348,21 @@ class DataQualityAgent:
                 sql = template["sql"].format(table=table_name, **params)
                 description = template["description"].format(**params)
 
+                # Map template name to DQRuleType
+                type_mapping = {
+                    "null_check": DQRuleType.NULL_CHECK,
+                    "unique_check": DQRuleType.UNIQUE_CHECK,
+                    "range_check": DQRuleType.RANGE_CHECK,
+                    "pattern_check": DQRuleType.PATTERN_CHECK,
+                    "completeness_check": DQRuleType.COMPLETENESS,
+                    "row_count_check": DQRuleType.STATISTICAL_CHECK,
+                    "statistical_check": DQRuleType.STATISTICAL_CHECK
+                }
+                rule_type = type_mapping.get(template_name, DQRuleType.CUSTOM_SQL)
+
                 rules.append(DQRule(
                     rule_id=f"TPL_{template_name}_{len(rules)}",
-                    rule_type=DQRuleType(template_name.replace("_check", "")),
+                    rule_type=rule_type,
                     description=description,
                     column=params.get("column"),
                     table=table_name,
