@@ -38,12 +38,10 @@ GLUE_JOBS = {
             "--enable-spark-ui": "true",
             "--spark-event-logs-path": "s3://etl-framework-logs/spark-logs/",
             "--enable-glue-datacatalog": "true",
-            "--additional-python-modules": "delta-spark",
-            "--conf": "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
-            "--datalake-formats": "delta",
+            "--datalake-formats": "iceberg",
             "--source_database": "raw_data",
             "--target_database": "analytics",
-            "--delta_path": "s3://etl-framework-data/delta"
+            "--iceberg_path": "s3://etl-framework-data/iceberg"
         },
         "tags": {
             "Environment": "production",
@@ -226,7 +224,7 @@ This script performs:
 2. Join with customer and product dimension tables
 3. Apply data quality checks
 4. Calculate aggregations
-5. Write to Delta Lake with MERGE (upsert)
+5. Write to Iceberg with MERGE (upsert)
 
 Usage (Glue Job):
     This script is executed as a Glue ETL job with parameters passed via --args
@@ -246,14 +244,17 @@ args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'source_database',
     'target_database',
-    'delta_path'
+    'iceberg_path'
 ])
 
-# Initialize Spark and Glue contexts
+# Initialize Spark and Glue contexts with Iceberg support
 spark = SparkSession.builder \\
     .appName(args['JOB_NAME']) \\
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \\
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \\
+    .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \\
+    .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \\
+    .config("spark.sql.catalog.glue_catalog.warehouse", args['iceberg_path']) \\
+    .config("spark.sql.catalog.glue_catalog.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog") \\
+    .config("spark.sql.catalog.glue_catalog.io-impl", "org.apache.iceberg.aws.s3.S3FileIO") \\
     .getOrCreate()
 
 glueContext = GlueContext(spark.sparkContext)
@@ -266,7 +267,7 @@ print("=" * 70)
 
 source_db = args['source_database']
 target_db = args['target_database']
-delta_path = args['delta_path']
+iceberg_path = args['iceberg_path']
 
 # =============================================================================
 # STEP 1: Read Source Data
@@ -380,21 +381,56 @@ sales_fact_df = sales_df.select(
 print(f"  Sales Fact: {sales_fact_df.count():,} records after join")
 
 # =============================================================================
-# STEP 3: Write Sales Fact to Delta Lake
+# STEP 3: Write Sales Fact to Iceberg
 # =============================================================================
-print("\\n[STEP 3] Writing Sales Fact to Delta Lake...")
+print("\\n[STEP 3] Writing Sales Fact to Iceberg...")
 
-delta_sales_path = f"{delta_path}/sales_fact"
+iceberg_table = "glue_catalog.analytics.sales_fact"
 
-# Write as Delta with partitioning
-sales_fact_df.write \\
-    .format("delta") \\
-    .mode("overwrite") \\
-    .partitionBy("order_year", "order_month") \\
-    .option("overwriteSchema", "true") \\
-    .save(delta_sales_path)
+# Create Iceberg table if not exists
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {iceberg_table} (
+        order_id STRING,
+        order_line_id STRING,
+        customer_id STRING,
+        customer_name_masked STRING,
+        product_id STRING,
+        product_name STRING,
+        category STRING,
+        region_id STRING,
+        region_name STRING,
+        order_date DATE,
+        quantity INT,
+        unit_price DOUBLE,
+        discount DOUBLE,
+        line_total DOUBLE,
+        line_cost DOUBLE,
+        profit DOUBLE,
+        profit_margin DOUBLE,
+        customer_tier STRING,
+        etl_timestamp TIMESTAMP,
+        order_year INT,
+        order_month INT
+    )
+    USING iceberg
+    PARTITIONED BY (order_year, order_month)
+    LOCATION '{iceberg_path}/sales_fact'
+""")
 
-print(f"  ✓ Written to: {delta_sales_path}")
+# Write to Iceberg using MERGE for upsert
+sales_fact_df.createOrReplaceTempView("sales_fact_updates")
+
+spark.sql(f"""
+    MERGE INTO {iceberg_table} t
+    USING sales_fact_updates s
+    ON t.order_line_id = s.order_line_id
+    WHEN MATCHED THEN UPDATE SET *
+    WHEN NOT MATCHED THEN INSERT *
+""")
+
+record_count = spark.sql(f"SELECT COUNT(*) FROM {iceberg_table}").collect()[0][0]
+print(f"  ✓ Written to Iceberg: {iceberg_table}")
+print(f"  ✓ Total records: {record_count:,}")
 
 # =============================================================================
 # STEP 4: Create Customer Aggregates
@@ -438,7 +474,7 @@ favorite_categories = category_counts.withColumn(
 customer_agg_df = customer_agg_df.join(favorite_categories, "customer_id", "left")
 
 # Write customer aggregates
-customer_agg_path = f"{delta_path}/../analytics/customer_aggregates"
+customer_agg_path = f"{iceberg_path}/../analytics/customer_aggregates"
 customer_agg_df.write \\
     .mode("overwrite") \\
     .partitionBy("snapshot_date") \\
@@ -470,7 +506,7 @@ product_perf_df = sales_fact_df.groupBy(
 )
 
 # Write product performance
-product_perf_path = f"{delta_path}/../analytics/product_performance"
+product_perf_path = f"{iceberg_path}/../analytics/product_performance"
 product_perf_df.write \\
     .mode("overwrite") \\
     .partitionBy("order_year", "order_month") \\

@@ -165,8 +165,8 @@ TABLES = {
     # -------------------------------------------------------------------------
     "analytics.sales_fact": {
         "description": "Sales fact table with full grain",
-        "location": f"s3://{S3_BUCKET}/delta/sales_fact/",
-        "format": "delta",
+        "location": f"s3://{S3_BUCKET}/iceberg/sales_fact/",
+        "format": "iceberg",
         "partition_keys": [
             {"Name": "order_year", "Type": "int"},
             {"Name": "order_month", "Type": "int"}
@@ -321,6 +321,12 @@ class GlueCatalogManager:
         if table_def['format'] == 'delta':
             table_input['Parameters']['spark.sql.sources.provider'] = 'delta'
             table_input['Parameters']['delta.lastCommitTimestamp'] = '0'
+
+        # Add Iceberg-specific parameters
+        if table_def['format'] == 'iceberg':
+            table_input['TableType'] = 'EXTERNAL_TABLE'
+            table_input['Parameters']['table_type'] = 'ICEBERG'
+            table_input['Parameters']['metadata_location'] = f"{table_def['location']}metadata/"
 
         if self.dry_run:
             print(f"  [DRY RUN] Would create table: {full_name}")
