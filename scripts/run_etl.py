@@ -42,6 +42,7 @@ from framework.agents.data_quality_agent import DataQualityAgent
 from framework.agents.workload_assessment_agent import WorkloadAssessmentAgent
 from framework.agents.learning_agent import LearningAgent
 from framework.agents.recommendation_agent import RecommendationAgent
+from framework.execution.aws_job_executor import AWSJobExecutor, validate_and_execute
 
 
 @dataclass
@@ -859,25 +860,72 @@ class ETLOrchestrator:
             )
 
     def _execute_job(self, ctx: ExecutionContext) -> Dict[str, Any]:
-        """Execute the actual ETL job."""
+        """Execute the actual ETL job using AWS Job Executor."""
         platform = self.config.get('platform', {}).get('primary', 'glue')
         ctx.platform = platform
 
-        # In a real implementation, this would:
-        # 1. Submit job to Glue/EMR/EKS
-        # 2. Monitor for completion
-        # 3. Handle platform fallback if needed
+        # Create the AWS Job Executor
+        executor = AWSJobExecutor(self.config)
 
-        # For demo, simulate execution
-        import time
-        time.sleep(1)  # Simulate some work
+        # Step 1: Pre-flight validation
+        validation = executor.validate_before_execution()
 
-        return {
-            'records_processed': 1000000,
-            'duration_seconds': 1,
-            'cost': 0.50,
-            'platform': platform
+        if not validation.valid:
+            # Validation failed - notify immediately and raise
+            print("\n" + "=" * 60)
+            print("PRE-FLIGHT VALIDATION FAILED")
+            print("=" * 60)
+            for error in validation.errors:
+                print(f"  ✗ {error}")
+
+            if validation.warnings:
+                print("\nWarnings:")
+                for warning in validation.warnings:
+                    print(f"  ⚠ {warning}")
+
+            # Add to context for notifications
+            ctx.errors.extend(validation.errors)
+            ctx.warnings.extend(validation.warnings)
+
+            raise ValueError(f"Pre-flight validation failed: {'; '.join(validation.errors)}")
+
+        # Log job details from validation
+        if validation.job_details:
+            print("\n  Job Details from AWS:")
+            for key, value in validation.job_details.items():
+                print(f"    {key}: {value}")
+
+        # Step 2: Execute with platform fallback
+        print("\n  Executing job with platform fallback chain...")
+        metrics = executor.execute_with_fallback()
+
+        # Update context with execution results
+        ctx.platform = metrics.platform
+        ctx.status = metrics.status
+
+        # Build result dict
+        result = {
+            'execution_id': metrics.execution_id,
+            'records_processed': metrics.records_read or metrics.records_written or 0,
+            'duration_seconds': metrics.duration_seconds,
+            'cost': metrics.estimated_cost,
+            'platform': metrics.platform,
+            'dpu_hours': metrics.dpu_hours,
+            'status': metrics.status,
+            'input_bytes': metrics.input_bytes,
+            'output_bytes': metrics.output_bytes,
+            'shuffle_bytes': metrics.shuffle_bytes,
+            'workers': metrics.executor_count
         }
+
+        # If job failed, raise exception for auto-healing
+        if metrics.status in ('FAILED', 'TIMEOUT'):
+            ctx.errors.append(metrics.error_message)
+            raise RuntimeError(
+                f"Job execution failed ({metrics.error_category}): {metrics.error_message}"
+            )
+
+        return result
 
     def _generate_html_report(self, result: ExecutionResult, path: str):
         """Generate HTML report for the execution."""
