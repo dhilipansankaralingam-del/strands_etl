@@ -51,12 +51,12 @@ TABLES = {
             {"Name": "customer_id", "Type": "string", "Comment": "Customer identifier"},
             {"Name": "customer_name", "Type": "string", "Comment": "Customer full name"},
             {"Name": "region_id", "Type": "string", "Comment": "Region identifier"},
-            {"Name": "order_year", "Type": "int", "Comment": "Order year"},
-            {"Name": "order_month", "Type": "int", "Comment": "Order month"},
-            {"Name": "order_day", "Type": "int", "Comment": "Order day"},
-            {"Name": "order_dayofweek", "Type": "int", "Comment": "Day of week (0=Monday)"},
+            {"Name": "order_year", "Type": "bigint", "Comment": "Order year"},
+            {"Name": "order_month", "Type": "bigint", "Comment": "Order month"},
+            {"Name": "order_day", "Type": "bigint", "Comment": "Order day"},
+            {"Name": "order_dayofweek", "Type": "bigint", "Comment": "Day of week (0=Monday)"},
             {"Name": "status", "Type": "string", "Comment": "Order status"},
-            {"Name": "num_items", "Type": "int", "Comment": "Number of line items"},
+            {"Name": "num_items", "Type": "bigint", "Comment": "Number of line items"},
             {"Name": "subtotal", "Type": "double", "Comment": "Order subtotal"},
             {"Name": "tax_rate", "Type": "double", "Comment": "Applied tax rate"},
             {"Name": "tax_amount", "Type": "double", "Comment": "Tax amount"},
@@ -67,8 +67,8 @@ TABLES = {
             {"Name": "profit_margin", "Type": "double", "Comment": "Profit margin percentage"},
             {"Name": "payment_method", "Type": "string", "Comment": "Payment method used"},
             {"Name": "shipping_method", "Type": "string", "Comment": "Shipping method"},
-            {"Name": "created_at", "Type": "timestamp", "Comment": "Record creation timestamp"},
-            {"Name": "updated_at", "Type": "timestamp", "Comment": "Record update timestamp"}
+            {"Name": "created_at", "Type": "string", "Comment": "Record creation timestamp"},
+            {"Name": "updated_at", "Type": "string", "Comment": "Record update timestamp"}
         ]
     },
 
@@ -81,11 +81,11 @@ TABLES = {
         ],
         "columns": [
             {"Name": "order_id", "Type": "string", "Comment": "Order identifier"},
-            {"Name": "line_number", "Type": "int", "Comment": "Line item number"},
+            {"Name": "line_number", "Type": "bigint", "Comment": "Line item number"},
             {"Name": "product_id", "Type": "string", "Comment": "Product identifier"},
             {"Name": "product_name", "Type": "string", "Comment": "Product name"},
             {"Name": "category", "Type": "string", "Comment": "Product category"},
-            {"Name": "quantity", "Type": "int", "Comment": "Quantity ordered"},
+            {"Name": "quantity", "Type": "bigint", "Comment": "Quantity ordered"},
             {"Name": "unit_price", "Type": "double", "Comment": "Unit price"},
             {"Name": "unit_cost", "Type": "double", "Comment": "Unit cost"},
             {"Name": "discount", "Type": "double", "Comment": "Discount rate (0-1)"},
@@ -155,7 +155,7 @@ TABLES = {
             {"Name": "region_name", "Type": "string", "Comment": "Region name"},
             {"Name": "country", "Type": "string", "Comment": "Country code"},
             {"Name": "tax_rate", "Type": "double", "Comment": "Regional tax rate"},
-            {"Name": "shipping_zone", "Type": "int", "Comment": "Shipping zone (1-5)"},
+            {"Name": "shipping_zone", "Type": "bigint", "Comment": "Shipping zone (1-5)"},
             {"Name": "is_active", "Type": "boolean", "Comment": "Active status"}
         ]
     },
@@ -183,9 +183,9 @@ TABLES = {
             {"Name": "total_profit", "Type": "double", "Comment": "Total profit"},
             {"Name": "avg_order_value", "Type": "double", "Comment": "Average order value"},
             {"Name": "avg_profit_margin", "Type": "double", "Comment": "Average profit margin"},
-            {"Name": "first_order_date", "Type": "date", "Comment": "First order date"},
-            {"Name": "last_order_date", "Type": "date", "Comment": "Most recent order date"},
-            {"Name": "days_since_last_order", "Type": "int", "Comment": "Days since last order"},
+            {"Name": "first_order_date", "Type": "string", "Comment": "First order date"},
+            {"Name": "last_order_date", "Type": "string", "Comment": "Most recent order date"},
+            {"Name": "days_since_last_order", "Type": "bigint", "Comment": "Days since last order"},
             {"Name": "favorite_category", "Type": "string", "Comment": "Most purchased category"}
         ]
     },
@@ -195,8 +195,8 @@ TABLES = {
         "location": f"s3://{S3_BUCKET}/analytics/product_performance/",
         "format": "parquet",
         "partition_keys": [
-            {"Name": "order_year", "Type": "int"},
-            {"Name": "order_month", "Type": "int"}
+            {"Name": "order_year", "Type": "bigint"},
+            {"Name": "order_month", "Type": "bigint"}
         ],
         "columns": [
             {"Name": "product_id", "Type": "string", "Comment": "Product identifier"},
