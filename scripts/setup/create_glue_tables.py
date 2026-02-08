@@ -163,36 +163,8 @@ TABLES = {
     # -------------------------------------------------------------------------
     # ANALYTICS TABLES
     # -------------------------------------------------------------------------
-    "analytics.sales_fact": {
-        "description": "Sales fact table with full grain",
-        "location": f"s3://{S3_BUCKET}/iceberg/sales_fact/",
-        "format": "iceberg",
-        "partition_keys": [
-            {"Name": "order_year", "Type": "int"},
-            {"Name": "order_month", "Type": "int"}
-        ],
-        "columns": [
-            {"Name": "order_id", "Type": "string", "Comment": "Order identifier"},
-            {"Name": "order_line_id", "Type": "string", "Comment": "Order line identifier"},
-            {"Name": "customer_id", "Type": "string", "Comment": "Customer identifier"},
-            {"Name": "customer_name_masked", "Type": "string", "Comment": "Masked customer name"},
-            {"Name": "product_id", "Type": "string", "Comment": "Product identifier"},
-            {"Name": "product_name", "Type": "string", "Comment": "Product name"},
-            {"Name": "category", "Type": "string", "Comment": "Product category"},
-            {"Name": "region_id", "Type": "string", "Comment": "Region identifier"},
-            {"Name": "region_name", "Type": "string", "Comment": "Region name"},
-            {"Name": "order_date", "Type": "date", "Comment": "Order date"},
-            {"Name": "quantity", "Type": "int", "Comment": "Quantity"},
-            {"Name": "unit_price", "Type": "double", "Comment": "Unit price"},
-            {"Name": "discount", "Type": "double", "Comment": "Discount rate"},
-            {"Name": "line_total", "Type": "double", "Comment": "Line total"},
-            {"Name": "line_cost", "Type": "double", "Comment": "Line cost"},
-            {"Name": "profit", "Type": "double", "Comment": "Profit"},
-            {"Name": "profit_margin", "Type": "double", "Comment": "Profit margin %"},
-            {"Name": "customer_tier", "Type": "string", "Comment": "Customer tier"},
-            {"Name": "etl_timestamp", "Type": "timestamp", "Comment": "ETL processing timestamp"}
-        ]
-    },
+    # NOTE: analytics.sales_fact is created by the PySpark job using Iceberg
+    # Do NOT pre-create Iceberg tables in Glue - Spark creates them automatically
 
     "analytics.customer_aggregates": {
         "description": "Customer-level aggregated metrics",
@@ -322,11 +294,8 @@ class GlueCatalogManager:
             table_input['Parameters']['spark.sql.sources.provider'] = 'delta'
             table_input['Parameters']['delta.lastCommitTimestamp'] = '0'
 
-        # Add Iceberg-specific parameters
-        if table_def['format'] == 'iceberg':
-            table_input['TableType'] = 'EXTERNAL_TABLE'
-            table_input['Parameters']['table_type'] = 'ICEBERG'
-            table_input['Parameters']['metadata_location'] = f"{table_def['location']}metadata/"
+        # NOTE: Iceberg tables should be created by Spark, not Glue catalog API
+        # The PySpark job will create the Iceberg table with proper metadata
 
         if self.dry_run:
             print(f"  [DRY RUN] Would create table: {full_name}")
