@@ -509,6 +509,100 @@ class PredictionEngine:
                 return float(tier)
         return 512.0
 
+    def _estimate_cost(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate cost when no historical data available."""
+        # Use baseline or default values
+        base_cost = baseline.get('avg_cost', 0.50)
+        base_records = baseline.get('avg_records', 100000)
+
+        # Scale cost (sub-linear scaling)
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        scale_efficiency = 0.85 if actual_scale > 1 else 1.0
+        predicted_cost = base_cost * (actual_scale ** scale_efficiency)
+
+        recommendations = []
+        if predicted_cost > 5.0:
+            recommendations.append("Consider reserved capacity for cost savings")
+
+        return PredictionResult(
+            metric='cost_usd',
+            current_value=base_cost,
+            predicted_value=round(predicted_cost, 2),
+            scale_factor=scale,
+            confidence=0.60,
+            recommendations=recommendations
+        )
+
+    def _estimate_duration(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate duration when no historical data available."""
+        base_duration = baseline.get('avg_duration', 300)  # 5 min default
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Duration scales mostly linearly but with some efficiency gains
+        parallelism_factor = 0.9 if actual_scale > 1 else 1.0
+        predicted_duration = base_duration * actual_scale * parallelism_factor
+
+        recommendations = []
+        if predicted_duration > 3600:
+            recommendations.append("Consider partitioning data for parallel processing")
+
+        return PredictionResult(
+            metric='duration_seconds',
+            current_value=base_duration,
+            predicted_value=round(predicted_duration, 0),
+            scale_factor=scale,
+            confidence=0.55,
+            recommendations=recommendations
+        )
+
+    def _estimate_memory(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate memory when no historical data available."""
+        base_memory = baseline.get('avg_memory_gb', 8.0)
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Memory scales with sqrt of records
+        memory_scale = math.sqrt(actual_scale) if actual_scale > 1 else actual_scale
+        predicted_memory = self._round_to_memory_tier(base_memory * memory_scale)
+
+        recommendations = []
+        if predicted_memory > 32:
+            recommendations.append("Use memory-optimized instance types")
+
+        return PredictionResult(
+            metric='memory_gb',
+            current_value=base_memory,
+            predicted_value=predicted_memory,
+            scale_factor=scale,
+            confidence=0.50,
+            recommendations=recommendations
+        )
+
+    def _estimate_workers(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate workers when no historical data available."""
+        base_workers = baseline.get('typical_workers', 5)
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Workers scale with sqrt of records
+        worker_scale = math.sqrt(actual_scale) if actual_scale > 1 else 1
+        predicted_workers = max(2, int(base_workers * worker_scale))
+        predicted_workers = min(predicted_workers, 100)
+
+        recommendations = []
+        if predicted_workers > 20:
+            recommendations.append("Consider using dynamic allocation")
+
+        return PredictionResult(
+            metric='workers',
+            current_value=base_workers,
+            predicted_value=predicted_workers,
+            scale_factor=scale,
+            confidence=0.55,
+            recommendations=recommendations
+        )
+
 
 class InteractiveAgentCLI:
     """
