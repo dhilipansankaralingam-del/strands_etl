@@ -620,6 +620,12 @@ class InteractiveAgentCLI:
         # Command history for interactive mode
         self.history = []
 
+        # Historical compliance data (simulated from last runs)
+        self.compliance_history = self._load_compliance_history()
+
+        # Historical learning data (simulated from last runs)
+        self.learning_history = self._load_learning_history()
+
         # Available commands
         self.commands = {
             'help': self.cmd_help,
@@ -635,8 +641,124 @@ class InteractiveAgentCLI:
             'platform': self.cmd_platform,
             'cost': self.cmd_cost,
             'memory': self.cmd_memory,
+            'learning': self.cmd_learning,
+            'trend': self.cmd_trend,
+            'anomaly': self.cmd_anomaly,
+            'ask': self.cmd_ask,
             'exit': self.cmd_exit,
             'quit': self.cmd_exit,
+        }
+
+    def _load_compliance_history(self) -> Dict:
+        """Load simulated compliance history from last runs."""
+        return {
+            'last_run': {
+                'timestamp': '2024-02-14 15:30:00',
+                'job_name': 'demo_complex_sales_analytics',
+                'overall_status': 'COMPLIANT',
+                'frameworks': {
+                    'GDPR': {
+                        'status': 'COMPLIANT',
+                        'checks_passed': 7,
+                        'checks_failed': 0,
+                        'warnings': 1,
+                        'findings': [
+                            {'check': 'PII Masking', 'status': 'WARNING',
+                             'detail': 'customer_name partially masked, consider full masking'}
+                        ],
+                        'pii_columns_detected': ['customer_email', 'customer_name', 'phone', 'address'],
+                        'pii_columns_masked': ['customer_email', 'phone', 'credit_card_masked'],
+                        'encryption_status': 'ENABLED',
+                        'retention_policy': '365 days'
+                    },
+                    'PCI_DSS': {
+                        'status': 'COMPLIANT',
+                        'checks_passed': 6,
+                        'checks_failed': 0,
+                        'warnings': 0,
+                        'findings': [],
+                        'card_data_masked': True,
+                        'encryption_status': 'ENABLED'
+                    },
+                    'SOX': {
+                        'status': 'COMPLIANT',
+                        'checks_passed': 5,
+                        'checks_failed': 0,
+                        'warnings': 0,
+                        'findings': [],
+                        'audit_trail': 'ENABLED',
+                        'data_lineage': 'TRACKED'
+                    }
+                },
+                'recommendations': [
+                    'Apply full masking to customer_name field',
+                    'Consider adding automated PII detection for new columns',
+                    'Set up compliance drift alerts'
+                ]
+            },
+            'history': [
+                {'date': '2024-02-14', 'status': 'COMPLIANT', 'warnings': 1},
+                {'date': '2024-02-13', 'status': 'COMPLIANT', 'warnings': 1},
+                {'date': '2024-02-12', 'status': 'COMPLIANT', 'warnings': 2},
+                {'date': '2024-02-11', 'status': 'COMPLIANT', 'warnings': 1},
+                {'date': '2024-02-10', 'status': 'COMPLIANT', 'warnings': 1},
+            ]
+        }
+
+    def _load_learning_history(self) -> Dict:
+        """Load simulated learning history from last runs."""
+        return {
+            'job_name': 'demo_complex_sales_analytics',
+            'baseline': {
+                'avg_duration_seconds': 1544,
+                'avg_cost': 1.08,
+                'avg_records': 290000,
+                'avg_memory_gb': 15.0,
+                'typical_workers': 9,
+                'success_rate': 98.5,
+                'created_at': '2024-01-15',
+                'updated_at': '2024-02-14',
+                'sample_count': 45
+            },
+            'last_run': {
+                'timestamp': '2024-02-14 15:30:00',
+                'duration_seconds': 1710,
+                'cost': 1.25,
+                'records_processed': 312000,
+                'memory_used_gb': 18.0,
+                'workers_used': 10,
+                'status': 'SUCCESS',
+                'platform': 'glue',
+                'deviations': {
+                    'duration': '+10.7%',
+                    'cost': '+15.7%',
+                    'records': '+7.6%'
+                },
+                'anomalies_detected': 0
+            },
+            'trends': {
+                'duration': {'direction': 'stable', 'change': '+2.3%', 'period': '7 days'},
+                'cost': {'direction': 'increasing', 'change': '+5.1%', 'period': '7 days'},
+                'records': {'direction': 'increasing', 'change': '+3.2%', 'period': '7 days'},
+                'failure_rate': {'direction': 'stable', 'change': '0%', 'period': '7 days'}
+            },
+            'predictions': {
+                'next_run_duration': 1580,
+                'next_run_cost': 1.12,
+                'failure_probability': 0.02,
+                'recommended_workers': 10
+            },
+            'recent_runs': [
+                {'date': '2024-02-14', 'duration': 1710, 'cost': 1.25, 'records': 312000, 'status': 'SUCCESS'},
+                {'date': '2024-02-13', 'duration': 1620, 'cost': 1.18, 'records': 305000, 'status': 'SUCCESS'},
+                {'date': '2024-02-12', 'duration': 1450, 'cost': 0.98, 'records': 278000, 'status': 'SUCCESS'},
+                {'date': '2024-02-11', 'duration': 1580, 'cost': 1.12, 'records': 292000, 'status': 'SUCCESS'},
+                {'date': '2024-02-10', 'duration': 1520, 'cost': 1.05, 'records': 285000, 'status': 'SUCCESS'},
+            ],
+            'anomalies_history': [
+                {'date': '2024-02-05', 'type': 'DURATION', 'detail': 'Duration 45% above baseline', 'resolved': True},
+                {'date': '2024-01-28', 'type': 'COST', 'detail': 'Cost spike due to data skew', 'resolved': True},
+            ]
         }
 
     def get_agent(self, agent_type: str):
@@ -689,18 +811,28 @@ class InteractiveAgentCLI:
 ╔══════════════════════════════════════════════════════════════════════╗
 ║                  ETL AGENT INTERACTIVE CLI                           ║
 ║                                                                      ║
-║  Commands:                                                           ║
-║    predict <job> --from <records> --to <records>  Scale prediction   ║
+║  Prediction & Scaling:                                               ║
+║    scale <from> <to>                              Quick scale predict║
 ║    cost <job> --records <count>                   Cost estimation    ║
 ║    memory <job> --records <count>                 Memory prediction  ║
 ║    platform <records>                             Platform recommend ║
+║                                                                      ║
+║  Learning Agent (Historical Analysis):                               ║
+║    learning [--last|--baseline|--predictions]     Learning insights  ║
+║    trend [metric]                                 Trend analysis     ║
+║    anomaly                                        Anomaly detection  ║
+║    ask <question>                                 Natural language Q ║
+║                                                                      ║
+║  Compliance Agent:                                                   ║
+║    compliance [GDPR|PCI_DSS|SOX] [--pii|--history]                   ║
+║                                                                      ║
+║  Other Agents:                                                       ║
 ║    analyze <script_path>                          Code analysis      ║
 ║    quality <table>                                Data quality check ║
-║    compliance <framework>                         Compliance check   ║
 ║    workload                                       Workload assessment║
-║    history                                        Show exec history  ║
-║    baseline <job>                                 Show baseline      ║
+║    recommend                                      Get recommendations║
 ║                                                                      ║
+║  Type 'help' for full command list                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
         print(banner)
@@ -884,14 +1016,41 @@ AGENTS:
   quality <table_name>
       Check data quality for a table
 
-  compliance <framework>
-      Run compliance check (gdpr, hipaa, pci-dss, sox)
+  compliance [framework] [--last] [--pii] [--history]
+      Run compliance check (GDPR, PCI_DSS, SOX)
+      Example: compliance            (show last run status)
+      Example: compliance GDPR       (show GDPR details)
+      Example: compliance --pii      (show PII analysis)
+      Example: compliance --history  (show compliance history)
 
   workload
       Run workload assessment
 
   recommend
       Get aggregated recommendations
+
+LEARNING AGENT:
+  learning [--last] [--baseline] [--predictions]
+      Query learning agent based on historical runs
+      Example: learning              (show all)
+      Example: learning --last       (show last run analysis)
+      Example: learning --baseline   (show baseline metrics)
+      Example: learning --predictions (show predictions)
+
+  trend [metric]
+      Show trend analysis for metrics
+      Example: trend                 (show all trends)
+      Example: trend cost            (show cost trend)
+
+  anomaly
+      Show anomaly detection results
+
+  ask <question>
+      Natural language query to agents
+      Example: ask why did cost increase?
+      Example: ask is the job GDPR compliant?
+      Example: ask what is the failure probability?
+      Example: ask how much memory for 1 million records?
 
 HISTORY & BASELINES:
   history
@@ -1095,21 +1254,121 @@ NATURAL LANGUAGE:
         print("  • range_check on amount: 3 values outside range")
 
     def cmd_compliance(self, args):
-        """Run compliance check."""
-        framework = args[0].upper() if args else "GDPR"
+        """Run compliance check based on historical data."""
+        # Parse arguments
+        framework = None
+        show_last = False
+        show_pii = False
+        show_history = False
 
-        print(f"\n\033[1;33mCompliance Check: {framework}\033[0m")
-        print("-" * 60)
+        for i, arg in enumerate(args):
+            if arg in ('--last', '-l'):
+                show_last = True
+            elif arg in ('--pii', '-p'):
+                show_pii = True
+            elif arg in ('--history', '-h'):
+                show_history = True
+            elif not arg.startswith('-'):
+                framework = arg.upper()
 
-        # Simulated compliance results
-        print(f"\nFramework: {framework}")
-        print("Status: COMPLIANT with recommendations")
-        print("\nFindings:")
-        print("  • PII fields detected: email, phone")
-        print("  • Encryption: Enabled")
-        print("  • Data retention: Configured")
-        print("\nRecommendations:")
-        print("  • Consider adding data masking for PII")
+        last_run = self.compliance_history.get('last_run', {})
+
+        if show_last or (not framework and not show_pii and not show_history):
+            # Show last run summary
+            print(f"\n\033[1;33m📋 COMPLIANCE STATUS (Last Run)\033[0m")
+            print("-" * 60)
+            print(f"  Job: {last_run.get('job_name', 'unknown')}")
+            print(f"  Timestamp: {last_run.get('timestamp', 'unknown')}")
+
+            status = last_run.get('overall_status', 'UNKNOWN')
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Overall Status: {status_color}{status}\033[0m")
+
+            print(f"\n  Frameworks Checked:")
+            for fw_name, fw_data in last_run.get('frameworks', {}).items():
+                fw_status = fw_data.get('status', 'UNKNOWN')
+                fw_color = "\033[0;32m" if fw_status == 'COMPLIANT' else "\033[0;31m"
+                warnings = fw_data.get('warnings', 0)
+                warn_str = f" ({warnings} warnings)" if warnings > 0 else ""
+                print(f"    • {fw_name}: {fw_color}{fw_status}{warn_str}\033[0m")
+
+        if framework:
+            # Show specific framework details
+            fw_data = last_run.get('frameworks', {}).get(framework, {})
+            if not fw_data:
+                print(f"\n\033[0;31mFramework '{framework}' not found in last run.\033[0m")
+                print(f"Available: {list(last_run.get('frameworks', {}).keys())}")
+                return
+
+            print(f"\n\033[1;33m🔒 {framework} COMPLIANCE DETAILS\033[0m")
+            print("-" * 60)
+
+            status = fw_data.get('status', 'UNKNOWN')
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Status: {status_color}{status}\033[0m")
+            print(f"  Checks Passed: {fw_data.get('checks_passed', 0)}")
+            print(f"  Checks Failed: {fw_data.get('checks_failed', 0)}")
+            print(f"  Warnings: {fw_data.get('warnings', 0)}")
+
+            if framework == 'GDPR':
+                print(f"\n  GDPR Specifics:")
+                print(f"    Encryption: {fw_data.get('encryption_status', 'UNKNOWN')}")
+                print(f"    Retention Policy: {fw_data.get('retention_policy', 'Not set')}")
+                print(f"    PII Columns Detected: {len(fw_data.get('pii_columns_detected', []))}")
+                print(f"    PII Columns Masked: {len(fw_data.get('pii_columns_masked', []))}")
+
+            elif framework == 'PCI_DSS':
+                print(f"\n  PCI-DSS Specifics:")
+                print(f"    Card Data Masked: {'Yes' if fw_data.get('card_data_masked') else 'No'}")
+                print(f"    Encryption: {fw_data.get('encryption_status', 'UNKNOWN')}")
+
+            elif framework == 'SOX':
+                print(f"\n  SOX Specifics:")
+                print(f"    Audit Trail: {fw_data.get('audit_trail', 'UNKNOWN')}")
+                print(f"    Data Lineage: {fw_data.get('data_lineage', 'UNKNOWN')}")
+
+            if fw_data.get('findings'):
+                print(f"\n  Findings:")
+                for finding in fw_data['findings']:
+                    status_icon = "⚠️" if finding['status'] == 'WARNING' else "❌"
+                    print(f"    {status_icon} [{finding['status']}] {finding['check']}")
+                    print(f"       {finding['detail']}")
+
+        if show_pii:
+            # Show PII details
+            gdpr_data = last_run.get('frameworks', {}).get('GDPR', {})
+            print(f"\n\033[1;33m🔐 PII ANALYSIS\033[0m")
+            print("-" * 60)
+
+            detected = gdpr_data.get('pii_columns_detected', [])
+            masked = gdpr_data.get('pii_columns_masked', [])
+            unmasked = [col for col in detected if col not in masked]
+
+            print(f"\n  PII Columns Detected ({len(detected)}):")
+            for col in detected:
+                mask_status = "✓ Masked" if col in masked else "⚠️ NOT Masked"
+                print(f"    • {col}: {mask_status}")
+
+            if unmasked:
+                print(f"\n  \033[0;33m⚠️ Action Required: {len(unmasked)} columns need masking\033[0m")
+                for col in unmasked:
+                    print(f"    • {col}")
+
+        if show_history:
+            # Show compliance history
+            print(f"\n\033[1;33m📊 COMPLIANCE HISTORY\033[0m")
+            print("-" * 60)
+            print(f"\n  {'Date':<12} {'Status':<12} {'Warnings'}")
+            print(f"  {'-'*12} {'-'*12} {'-'*10}")
+            for h in self.compliance_history.get('history', []):
+                status_color = "\033[0;32m" if h['status'] == 'COMPLIANT' else "\033[0;31m"
+                print(f"  {h['date']:<12} {status_color}{h['status']:<12}\033[0m {h['warnings']}")
+
+        # Always show recommendations
+        if last_run.get('recommendations'):
+            print(f"\n  \033[1;36mRecommendations:\033[0m")
+            for rec in last_run['recommendations']:
+                print(f"    • {rec}")
 
     def cmd_workload(self, args):
         """Run workload assessment."""
@@ -1177,6 +1436,269 @@ NATURAL LANGUAGE:
         print(f"  Average Cost: ${baseline.get('avg_cost', 0):.2f}")
         print(f"  Average Memory: {baseline.get('avg_memory_gb', 0)} GB")
         print(f"  Typical Workers: {baseline.get('typical_workers', 0)}")
+
+    def cmd_learning(self, args):
+        """Query the learning agent based on historical runs."""
+        show_last = False
+        show_baseline = False
+        show_predictions = False
+        show_all = len(args) == 0
+
+        for arg in args:
+            if arg in ('--last', '-l'):
+                show_last = True
+            elif arg in ('--baseline', '-b'):
+                show_baseline = True
+            elif arg in ('--predictions', '-p'):
+                show_predictions = True
+
+        if show_all:
+            show_last = show_baseline = show_predictions = True
+
+        lh = self.learning_history
+
+        print(f"\n\033[1;33m📚 LEARNING AGENT - {lh.get('job_name', 'unknown')}\033[0m")
+        print("=" * 60)
+
+        if show_last:
+            last = lh.get('last_run', {})
+            print(f"\n\033[1;36m📊 Last Run Analysis\033[0m")
+            print("-" * 50)
+            print(f"  Timestamp: {last.get('timestamp', 'unknown')}")
+            print(f"  Status: \033[0;32m{last.get('status', 'unknown')}\033[0m")
+            print(f"  Platform: {last.get('platform', 'unknown')}")
+            print(f"\n  Metrics:")
+            print(f"    Duration: {last.get('duration_seconds', 0) / 60:.1f} min")
+            print(f"    Cost: ${last.get('cost', 0):.2f}")
+            print(f"    Records: {last.get('records_processed', 0):,}")
+            print(f"    Memory Used: {last.get('memory_used_gb', 0):.1f} GB")
+            print(f"    Workers: {last.get('workers_used', 0)}")
+
+            deviations = last.get('deviations', {})
+            if deviations:
+                print(f"\n  Deviations from Baseline:")
+                for metric, value in deviations.items():
+                    color = "\033[0;33m" if value.startswith('+') and float(value.rstrip('%')) > 10 else "\033[0;32m"
+                    print(f"    {metric.capitalize()}: {color}{value}\033[0m")
+
+            anomalies = last.get('anomalies_detected', 0)
+            if anomalies > 0:
+                print(f"\n  \033[0;31m⚠️ Anomalies Detected: {anomalies}\033[0m")
+            else:
+                print(f"\n  \033[0;32m✓ No anomalies detected\033[0m")
+
+        if show_baseline:
+            baseline = lh.get('baseline', {})
+            print(f"\n\033[1;36m📏 Baseline Metrics\033[0m")
+            print("-" * 50)
+            print(f"  Sample Count: {baseline.get('sample_count', 0)} runs")
+            print(f"  Created: {baseline.get('created_at', 'unknown')}")
+            print(f"  Last Updated: {baseline.get('updated_at', 'unknown')}")
+            print(f"\n  Averages:")
+            print(f"    Duration: {baseline.get('avg_duration_seconds', 0) / 60:.1f} min")
+            print(f"    Cost: ${baseline.get('avg_cost', 0):.2f}")
+            print(f"    Records: {baseline.get('avg_records', 0):,}")
+            print(f"    Memory: {baseline.get('avg_memory_gb', 0):.1f} GB")
+            print(f"    Workers: {baseline.get('typical_workers', 0)}")
+            print(f"    Success Rate: {baseline.get('success_rate', 0):.1f}%")
+
+        if show_predictions:
+            predictions = lh.get('predictions', {})
+            print(f"\n\033[1;36m🔮 Predictions (Next Run)\033[0m")
+            print("-" * 50)
+            print(f"  Expected Duration: {predictions.get('next_run_duration', 0) / 60:.1f} min")
+            print(f"  Expected Cost: ${predictions.get('next_run_cost', 0):.2f}")
+            print(f"  Recommended Workers: {predictions.get('recommended_workers', 0)}")
+            fail_prob = predictions.get('failure_probability', 0) * 100
+            fail_color = "\033[0;32m" if fail_prob < 5 else "\033[0;33m" if fail_prob < 15 else "\033[0;31m"
+            print(f"  Failure Probability: {fail_color}{fail_prob:.1f}%\033[0m")
+
+    def cmd_trend(self, args):
+        """Show trends from learning agent."""
+        metric = args[0].lower() if args else None
+
+        trends = self.learning_history.get('trends', {})
+
+        print(f"\n\033[1;33m📈 TREND ANALYSIS\033[0m")
+        print("-" * 60)
+
+        if metric and metric in trends:
+            # Show specific metric trend
+            t = trends[metric]
+            direction_icon = "📈" if t['direction'] == 'increasing' else "📉" if t['direction'] == 'decreasing' else "➡️"
+            print(f"\n  {metric.upper()} Trend:")
+            print(f"    Direction: {direction_icon} {t['direction'].capitalize()}")
+            print(f"    Change: {t['change']}")
+            print(f"    Period: {t['period']}")
+        else:
+            # Show all trends
+            for metric_name, t in trends.items():
+                direction_icon = "📈" if t['direction'] == 'increasing' else "📉" if t['direction'] == 'decreasing' else "➡️"
+                direction_color = "\033[0;33m" if t['direction'] == 'increasing' else "\033[0;32m"
+                print(f"\n  {metric_name.upper()}:")
+                print(f"    {direction_icon} {direction_color}{t['direction'].capitalize()}\033[0m ({t['change']} over {t['period']})")
+
+        # Show recent runs for context
+        print(f"\n  Recent Execution Data:")
+        print(f"  {'Date':<12} {'Duration':<12} {'Cost':<10} {'Records':<12}")
+        print(f"  {'-'*12} {'-'*12} {'-'*10} {'-'*12}")
+        for run in self.learning_history.get('recent_runs', [])[:5]:
+            print(f"  {run['date']:<12} {run['duration']/60:.1f} min      ${run['cost']:<8.2f} {run['records']:,}")
+
+    def cmd_anomaly(self, args):
+        """Show anomaly detection results."""
+        print(f"\n\033[1;33m🚨 ANOMALY DETECTION\033[0m")
+        print("-" * 60)
+
+        last_run = self.learning_history.get('last_run', {})
+        anomalies_detected = last_run.get('anomalies_detected', 0)
+
+        if anomalies_detected == 0:
+            print(f"\n  \033[0;32m✓ Last run: No anomalies detected\033[0m")
+            print(f"    All metrics within expected thresholds (±20%)")
+        else:
+            print(f"\n  \033[0;31m⚠️ Last run: {anomalies_detected} anomalies detected\033[0m")
+
+        # Show deviations
+        deviations = last_run.get('deviations', {})
+        if deviations:
+            print(f"\n  Metric Deviations:")
+            for metric, value in deviations.items():
+                pct = float(value.rstrip('%'))
+                status = "⚠️ ANOMALY" if abs(pct) > 20 else "✓ Normal"
+                color = "\033[0;31m" if abs(pct) > 20 else "\033[0;32m"
+                print(f"    {metric.capitalize()}: {value} {color}({status})\033[0m")
+
+        # Show historical anomalies
+        anomaly_history = self.learning_history.get('anomalies_history', [])
+        if anomaly_history:
+            print(f"\n  Historical Anomalies (Last 30 days):")
+            for a in anomaly_history:
+                resolved = "✓ Resolved" if a.get('resolved') else "⚠️ Open"
+                print(f"    [{a['date']}] {a['type']}: {a['detail']} - {resolved}")
+
+    def cmd_ask(self, args):
+        """Natural language query to agents."""
+        if not args:
+            print("Usage: ask <question>")
+            print("Examples:")
+            print("  ask why did cost increase?")
+            print("  ask is the job compliant with GDPR?")
+            print("  ask what is the failure probability?")
+            print("  ask how much memory for 1 million records?")
+            return
+
+        question = ' '.join(args).lower()
+
+        print(f"\n\033[1;33m🤖 Agent Response\033[0m")
+        print("-" * 60)
+
+        # Pattern matching for common questions
+        if any(word in question for word in ['cost', 'expensive', 'price', 'money']):
+            if 'increase' in question or 'why' in question or 'high' in question:
+                # Cost analysis
+                last = self.learning_history.get('last_run', {})
+                baseline = self.learning_history.get('baseline', {})
+                deviation = last.get('deviations', {}).get('cost', '+0%')
+
+                print(f"\n  📊 Cost Analysis:")
+                print(f"  Last run cost: ${last.get('cost', 0):.2f}")
+                print(f"  Baseline cost: ${baseline.get('avg_cost', 0):.2f}")
+                print(f"  Deviation: {deviation}")
+
+                print(f"\n  Possible Reasons:")
+                if float(deviation.rstrip('%')) > 10:
+                    print(f"    • Data volume increased by {last.get('deviations', {}).get('records', '0%')}")
+                    print(f"    • More workers used ({last.get('workers_used', 0)} vs baseline {baseline.get('typical_workers', 0)})")
+                    print(f"    • Longer execution time due to data complexity")
+                else:
+                    print(f"    • Cost is within normal variance")
+
+            elif any(word in question for word in ['million', 'records', 'scale']):
+                # Cost prediction
+                import re
+                numbers = re.findall(r'[\d,]+(?:k|m)?', question)
+                if numbers:
+                    records = self._parse_number(numbers[0])
+                    self.cmd_cost(['sales_analytics', '--records', str(records)])
+                    return
+
+        elif any(word in question for word in ['memory', 'ram', 'gb']):
+            if any(word in question for word in ['million', 'records', 'scale', 'need']):
+                import re
+                numbers = re.findall(r'[\d,]+(?:k|m)?', question)
+                if numbers:
+                    records = self._parse_number(numbers[0])
+                    self.cmd_memory(['sales_analytics', '--records', str(records)])
+                    return
+
+            # Memory analysis
+            last = self.learning_history.get('last_run', {})
+            baseline = self.learning_history.get('baseline', {})
+            print(f"\n  🧠 Memory Analysis:")
+            print(f"  Last run: {last.get('memory_used_gb', 0):.1f} GB")
+            print(f"  Baseline: {baseline.get('avg_memory_gb', 0):.1f} GB")
+            print(f"\n  Memory scales with √(records). For 10x data, expect ~3.2x memory.")
+
+        elif any(word in question for word in ['compliant', 'compliance', 'gdpr', 'pci', 'sox', 'hipaa']):
+            # Compliance query
+            last_compliance = self.compliance_history.get('last_run', {})
+            status = last_compliance.get('overall_status', 'UNKNOWN')
+
+            print(f"\n  🔒 Compliance Status:")
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Overall: {status_color}{status}\033[0m")
+
+            if 'gdpr' in question:
+                gdpr = last_compliance.get('frameworks', {}).get('GDPR', {})
+                print(f"\n  GDPR Specifics:")
+                print(f"    Status: {gdpr.get('status', 'UNKNOWN')}")
+                print(f"    PII Detected: {len(gdpr.get('pii_columns_detected', []))} columns")
+                print(f"    PII Masked: {len(gdpr.get('pii_columns_masked', []))} columns")
+            elif 'pci' in question:
+                pci = last_compliance.get('frameworks', {}).get('PCI_DSS', {})
+                print(f"\n  PCI-DSS Specifics:")
+                print(f"    Status: {pci.get('status', 'UNKNOWN')}")
+                print(f"    Card Data Masked: {'Yes' if pci.get('card_data_masked') else 'No'}")
+
+        elif any(word in question for word in ['failure', 'fail', 'probability', 'risk']):
+            predictions = self.learning_history.get('predictions', {})
+            fail_prob = predictions.get('failure_probability', 0) * 100
+
+            print(f"\n  ⚠️ Failure Risk Analysis:")
+            fail_color = "\033[0;32m" if fail_prob < 5 else "\033[0;33m" if fail_prob < 15 else "\033[0;31m"
+            print(f"  Failure Probability: {fail_color}{fail_prob:.1f}%\033[0m")
+
+            print(f"\n  Risk Factors:")
+            if fail_prob < 5:
+                print(f"    ✓ Low risk - job has been stable")
+            else:
+                print(f"    • Recent trend shows increasing duration")
+                print(f"    • Consider monitoring resource usage")
+
+            print(f"\n  Based on {self.learning_history.get('baseline', {}).get('sample_count', 0)} historical runs")
+
+        elif any(word in question for word in ['trend', 'pattern', 'direction']):
+            self.cmd_trend([])
+
+        elif any(word in question for word in ['anomaly', 'anomalies', 'unusual', 'strange']):
+            self.cmd_anomaly([])
+
+        elif any(word in question for word in ['baseline', 'average', 'normal']):
+            self.cmd_learning(['--baseline'])
+
+        elif any(word in question for word in ['predict', 'next', 'expect', 'future']):
+            self.cmd_learning(['--predictions'])
+
+        else:
+            print(f"\n  I can help you with questions about:")
+            print(f"    • Cost analysis (e.g., 'why did cost increase?')")
+            print(f"    • Memory requirements (e.g., 'how much memory for 1m records?')")
+            print(f"    • Compliance status (e.g., 'is the job GDPR compliant?')")
+            print(f"    • Failure probability (e.g., 'what is the failure risk?')")
+            print(f"    • Trends (e.g., 'show me trends')")
+            print(f"    • Anomalies (e.g., 'any anomalies detected?')")
+            print(f"\n  Try: 'ask why did cost increase?'")
 
     def cmd_exit(self, args):
         """Exit the CLI."""
