@@ -579,18 +579,34 @@ class ETLOrchestrator:
 
             # Store execution metrics to local agent store for learning
             if not self.dry_run and ctx.metrics.get('status') != 'FAILED':
+                # Get memory from worker type
+                worker_type = ctx.metrics.get('worker_type', 'G.1X')
+                memory_map = {'G.1X': 16, 'G.2X': 32, 'G.4X': 64, 'G.8X': 128}
+                memory_per_worker = memory_map.get(worker_type, 16)
+                workers = ctx.metrics.get('workers', 5)
+
                 self.run_collector.record_run(
                     job_name=ctx.job_name,
                     records_processed=ctx.metrics.get('records_processed', 0),
                     duration_seconds=ctx.metrics.get('duration_seconds', 0),
                     cost_usd=ctx.metrics.get('cost', 0),
                     platform=ctx.platform,
-                    workers=ctx.metrics.get('workers', 5),
-                    memory_gb=16.0,  # Default, could be extracted from config
+                    workers=workers,
+                    memory_gb=memory_per_worker * workers,
                     status='SUCCEEDED',
-                    run_id=ctx.execution_id
+                    run_id=ctx.execution_id,
+                    input_tables=ctx.metrics.get('input_tables', []),
+                    output_tables=ctx.metrics.get('output_tables', []),
+                    spark_metrics={
+                        'dpu_hours': ctx.metrics.get('dpu_hours', 0),
+                        'shuffle_bytes': ctx.metrics.get('shuffle_bytes', 0),
+                        'bytes_read': ctx.metrics.get('input_bytes', 0),
+                        'bytes_written': ctx.metrics.get('output_bytes', 0),
+                        'worker_type': worker_type
+                    }
                 )
                 print(f"  ✓ Metrics stored to local agent store")
+                print(f"    (DPU: {ctx.metrics.get('dpu_hours', 0):.2f}h, Cost: ${ctx.metrics.get('cost', 0):.2f})")
 
             stages_completed.append("execution")
 
@@ -994,39 +1010,56 @@ class ETLOrchestrator:
         ctx.platform = metrics.platform
         ctx.status = metrics.status
 
-        # Build result dict with fallback estimates
-        records = metrics.records_read or metrics.records_written or 0
+        # Step 3: Collect complete metrics from CloudWatch after job completion
+        complete_metrics = {}
+        if metrics.status == 'SUCCEEDED' and metrics.execution_id:
+            print("\n  Collecting complete metrics from CloudWatch...")
+            complete_metrics = executor.collect_complete_metrics(
+                self.config.get('job_name'),
+                metrics.execution_id
+            )
+
+        # Build result dict using complete metrics when available
+        records = (complete_metrics.get('records_read') or
+                   complete_metrics.get('records_written') or
+                   metrics.records_read or metrics.records_written or 0)
 
         # If no records captured, estimate from source config
         if records == 0:
             for table in self.config.get('source_tables', []):
                 records += table.get('estimated_rows', 0)
                 if not records:
-                    # Estimate from size (500 bytes per record)
                     size_gb = table.get('estimated_size_gb', 0)
                     records += int(size_gb * 1024 * 1024 * 1024 / 500)
             if records == 0:
                 records = 100000  # Default estimate
 
-        # If no cost captured, estimate from duration and workers
-        cost = metrics.estimated_cost
+        # Use complete metrics for cost and DPU if available
+        cost = complete_metrics.get('estimated_cost') or metrics.estimated_cost
+        dpu_hours = complete_metrics.get('dpu_hours') or metrics.dpu_hours
+        workers = complete_metrics.get('workers') or metrics.executor_count
+
         if cost == 0 and metrics.duration_seconds > 0:
-            workers = metrics.executor_count or self.config.get('glue_config', {}).get('number_of_workers', 5)
+            workers = workers or self.config.get('glue_config', {}).get('number_of_workers', 5)
             dpu_hours = (metrics.duration_seconds / 3600) * workers
             cost = dpu_hours * 0.44
 
         result = {
             'execution_id': metrics.execution_id,
             'records_processed': records,
-            'duration_seconds': metrics.duration_seconds,
+            'duration_seconds': complete_metrics.get('duration_seconds') or metrics.duration_seconds,
             'cost': cost,
             'platform': metrics.platform,
-            'dpu_hours': metrics.dpu_hours or (metrics.duration_seconds / 3600 * (metrics.executor_count or 5)),
+            'dpu_hours': dpu_hours or (metrics.duration_seconds / 3600 * (workers or 5)),
             'status': metrics.status,
-            'input_bytes': metrics.input_bytes,
-            'output_bytes': metrics.output_bytes,
-            'shuffle_bytes': metrics.shuffle_bytes,
-            'workers': metrics.executor_count or self.config.get('glue_config', {}).get('number_of_workers', 5)
+            'input_bytes': complete_metrics.get('bytes_read') or metrics.input_bytes,
+            'output_bytes': complete_metrics.get('bytes_written') or metrics.output_bytes,
+            'shuffle_bytes': complete_metrics.get('shuffle_bytes') or metrics.shuffle_bytes,
+            'workers': workers or self.config.get('glue_config', {}).get('number_of_workers', 5),
+            'worker_type': complete_metrics.get('worker_type', 'G.1X'),
+            'memory_gb': complete_metrics.get('memory_gb', 0),
+            's3_bytes_read': complete_metrics.get('s3_bytes_read', 0),
+            's3_bytes_written': complete_metrics.get('s3_bytes_written', 0)
         }
 
         # If job failed, raise exception for auto-healing

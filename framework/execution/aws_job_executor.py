@@ -713,65 +713,202 @@ class AWSJobExecutor:
 
         return total_records
 
-    def get_execution_metrics_from_cloudwatch(self, job_name: str, run_id: str) -> Dict:
-        """Get detailed metrics from CloudWatch."""
+    def get_execution_metrics_from_cloudwatch(self, job_name: str, run_id: str,
+                                              start_time: datetime = None,
+                                              end_time: datetime = None) -> Dict:
+        """
+        Get detailed metrics from CloudWatch after job completion.
+
+        Metrics collected:
+        - bytes_read: Total bytes read from sources
+        - bytes_written: Total bytes written to targets
+        - shuffle_bytes_read: Shuffle data read
+        - shuffle_bytes_written: Shuffle data written
+        - records_read: Total records read
+        - records_written: Total records written
+        - heap_memory_used: JVM heap memory used (bytes)
+        - non_heap_memory_used: Non-heap memory used (bytes)
+        - s3_bytes_read: Bytes read from S3
+        - s3_bytes_written: Bytes written to S3
+        """
         metrics = {}
 
         if not self.cloudwatch_client:
             return metrics
 
         try:
-            # Get Glue job metrics
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=2)
+            # Use provided times or default to last 2 hours
+            if not end_time:
+                end_time = datetime.utcnow()
+            if not start_time:
+                start_time = end_time - timedelta(hours=2)
 
-            metric_queries = [
-                {
-                    'Id': 'bytes_read',
-                    'MetricStat': {
-                        'Metric': {
-                            'Namespace': 'Glue',
-                            'MetricName': 'glue.driver.aggregate.bytesRead',
-                            'Dimensions': [
-                                {'Name': 'JobName', 'Value': job_name},
-                                {'Name': 'JobRunId', 'Value': run_id}
-                            ]
-                        },
-                        'Period': 300,
-                        'Stat': 'Sum'
-                    }
-                },
-                {
-                    'Id': 'shuffle_bytes',
-                    'MetricStat': {
-                        'Metric': {
-                            'Namespace': 'Glue',
-                            'MetricName': 'glue.driver.aggregate.shuffleBytesWritten',
-                            'Dimensions': [
-                                {'Name': 'JobName', 'Value': job_name},
-                                {'Name': 'JobRunId', 'Value': run_id}
-                            ]
-                        },
-                        'Period': 300,
-                        'Stat': 'Sum'
-                    }
-                }
+            # All available Glue metrics
+            metric_names = [
+                ('glue.driver.aggregate.bytesRead', 'bytes_read'),
+                ('glue.driver.aggregate.bytesWritten', 'bytes_written'),
+                ('glue.driver.aggregate.recordsRead', 'records_read'),
+                ('glue.driver.aggregate.recordsWritten', 'records_written'),
+                ('glue.driver.aggregate.shuffleBytesWritten', 'shuffle_bytes_written'),
+                ('glue.driver.aggregate.shuffleLocalBytesRead', 'shuffle_bytes_read'),
+                ('glue.driver.aggregate.elapsedTime', 'elapsed_time_ms'),
+                ('glue.driver.jvm.heap.used', 'heap_memory_bytes'),
+                ('glue.driver.jvm.non-heap.used', 'non_heap_memory_bytes'),
+                ('glue.driver.s3.filesystem.read_bytes', 's3_bytes_read'),
+                ('glue.driver.s3.filesystem.write_bytes', 's3_bytes_written'),
+                ('glue.driver.aggregate.numCompletedTasks', 'tasks_completed'),
+                ('glue.driver.aggregate.numFailedTasks', 'tasks_failed'),
             ]
 
+            # Build metric queries
+            metric_queries = []
+            for i, (metric_name, metric_id) in enumerate(metric_names):
+                metric_queries.append({
+                    'Id': f'm{i}',
+                    'Label': metric_id,
+                    'MetricStat': {
+                        'Metric': {
+                            'Namespace': 'Glue',
+                            'MetricName': metric_name,
+                            'Dimensions': [
+                                {'Name': 'JobName', 'Value': job_name},
+                                {'Name': 'JobRunId', 'Value': run_id}
+                            ]
+                        },
+                        'Period': 60,  # 1 minute granularity
+                        'Stat': 'Sum'
+                    }
+                })
+
+            # Fetch metrics in batches (CloudWatch allows max 500 queries)
             response = self.cloudwatch_client.get_metric_data(
                 MetricDataQueries=metric_queries,
                 StartTime=start_time,
-                EndTime=end_time
+                EndTime=end_time + timedelta(minutes=5)  # Buffer
             )
 
             for result in response['MetricDataResults']:
+                label = result.get('Label', result['Id'])
                 if result['Values']:
-                    metrics[result['Id']] = sum(result['Values'])
+                    # Sum all datapoints
+                    metrics[label] = sum(result['Values'])
+
+            # Convert bytes to human readable for logging
+            if metrics:
+                print(f"\n  CloudWatch Metrics Retrieved:")
+                if 'bytes_read' in metrics:
+                    print(f"    Input Data: {metrics['bytes_read'] / (1024**3):.2f} GB")
+                if 'bytes_written' in metrics:
+                    print(f"    Output Data: {metrics['bytes_written'] / (1024**3):.2f} GB")
+                if 'shuffle_bytes_written' in metrics:
+                    print(f"    Shuffle Data: {metrics['shuffle_bytes_written'] / (1024**3):.2f} GB")
+                if 'records_read' in metrics:
+                    print(f"    Records Read: {int(metrics['records_read']):,}")
+                if 'records_written' in metrics:
+                    print(f"    Records Written: {int(metrics['records_written']):,}")
+                if 'heap_memory_bytes' in metrics:
+                    print(f"    Heap Memory: {metrics['heap_memory_bytes'] / (1024**3):.2f} GB")
 
         except Exception as e:
             print(f"  [WARN] Could not get CloudWatch metrics: {e}")
 
         return metrics
+
+    def collect_complete_metrics(self, job_name: str, run_id: str) -> Dict:
+        """
+        Collect complete metrics from both Glue API and CloudWatch.
+        Call this after job completion for accurate training data.
+        """
+        complete_metrics = {}
+
+        if not self.glue_client:
+            return complete_metrics
+
+        try:
+            # Get job run details from Glue API
+            response = self.glue_client.get_job_run(
+                JobName=job_name,
+                RunId=run_id
+            )
+            run = response['JobRun']
+
+            # Basic metrics from Glue API
+            complete_metrics['execution_id'] = run_id
+            complete_metrics['job_name'] = job_name
+            complete_metrics['status'] = run.get('JobRunState', 'UNKNOWN')
+            complete_metrics['start_time'] = run.get('StartedOn')
+            complete_metrics['end_time'] = run.get('CompletedOn')
+
+            # Duration
+            if run.get('ExecutionTime'):
+                complete_metrics['duration_seconds'] = run['ExecutionTime']
+            elif run.get('StartedOn') and run.get('CompletedOn'):
+                complete_metrics['duration_seconds'] = (
+                    run['CompletedOn'] - run['StartedOn']
+                ).total_seconds()
+
+            # DPU and Cost
+            complete_metrics['dpu_seconds'] = run.get('DPUSeconds', 0)
+            complete_metrics['dpu_hours'] = complete_metrics['dpu_seconds'] / 3600
+            complete_metrics['workers'] = run.get('NumberOfWorkers', 0)
+            complete_metrics['worker_type'] = run.get('WorkerType', 'G.1X')
+            complete_metrics['max_capacity'] = run.get('MaxCapacity', 0)
+
+            # Cost calculation
+            dpu_hour_cost = 0.44  # Standard
+            if 'flex' in str(run.get('ExecutionClass', '')).lower():
+                dpu_hour_cost = 0.29  # Flex pricing
+            complete_metrics['estimated_cost'] = complete_metrics['dpu_hours'] * dpu_hour_cost
+
+            # Memory from worker type
+            memory_map = {'G.1X': 16, 'G.2X': 32, 'G.4X': 64, 'G.8X': 128, 'Standard': 16}
+            complete_metrics['memory_gb'] = memory_map.get(
+                complete_metrics['worker_type'], 16
+            ) * complete_metrics['workers']
+
+            # Get CloudWatch metrics
+            cw_metrics = self.get_execution_metrics_from_cloudwatch(
+                job_name, run_id,
+                complete_metrics.get('start_time'),
+                complete_metrics.get('end_time')
+            )
+
+            # Merge CloudWatch metrics
+            complete_metrics['records_read'] = int(cw_metrics.get('records_read', 0))
+            complete_metrics['records_written'] = int(cw_metrics.get('records_written', 0))
+            complete_metrics['bytes_read'] = int(cw_metrics.get('bytes_read', 0))
+            complete_metrics['bytes_written'] = int(cw_metrics.get('bytes_written', 0))
+            complete_metrics['shuffle_bytes'] = int(
+                cw_metrics.get('shuffle_bytes_written', 0) +
+                cw_metrics.get('shuffle_bytes_read', 0)
+            )
+            complete_metrics['s3_bytes_read'] = int(cw_metrics.get('s3_bytes_read', 0))
+            complete_metrics['s3_bytes_written'] = int(cw_metrics.get('s3_bytes_written', 0))
+            complete_metrics['heap_memory_used'] = int(cw_metrics.get('heap_memory_bytes', 0))
+            complete_metrics['tasks_completed'] = int(cw_metrics.get('tasks_completed', 0))
+            complete_metrics['tasks_failed'] = int(cw_metrics.get('tasks_failed', 0))
+
+            # Print summary
+            print(f"\n  {'=' * 50}")
+            print(f"  COMPLETE METRICS COLLECTED")
+            print(f"  {'=' * 50}")
+            print(f"  Duration: {complete_metrics['duration_seconds']:.0f}s ({complete_metrics['duration_seconds']/60:.1f} min)")
+            print(f"  DPU Hours: {complete_metrics['dpu_hours']:.2f}")
+            print(f"  Cost: ${complete_metrics['estimated_cost']:.2f}")
+            print(f"  Workers: {complete_metrics['workers']} x {complete_metrics['worker_type']}")
+            print(f"  Memory: {complete_metrics['memory_gb']} GB total")
+            if complete_metrics['records_read']:
+                print(f"  Records: {complete_metrics['records_read']:,} read, {complete_metrics['records_written']:,} written")
+            if complete_metrics['bytes_read']:
+                print(f"  Data: {complete_metrics['bytes_read']/(1024**3):.2f} GB in, {complete_metrics['bytes_written']/(1024**3):.2f} GB out")
+            if complete_metrics['shuffle_bytes']:
+                print(f"  Shuffle: {complete_metrics['shuffle_bytes']/(1024**3):.2f} GB")
+            print(f"  {'=' * 50}")
+
+        except Exception as e:
+            print(f"  [ERROR] Failed to collect complete metrics: {e}")
+
+        return complete_metrics
 
 
 def validate_and_execute(config_path: str, dry_run: bool = False) -> Optional[ExecutionMetrics]:
