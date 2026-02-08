@@ -9,10 +9,14 @@ Allows users to interact with trained agents and get predictions for:
 - Platform recommendations
 - Performance predictions
 
+Data is loaded from local storage (data/agent_store/) which captures
+actual job run metrics.
+
 Usage:
     python scripts/agent_cli.py --config demo_configs/complex_demo_config.json
     python scripts/agent_cli.py --agent workload
     python scripts/agent_cli.py --predict-cost --records 1000000
+    python scripts/agent_cli.py --seed  # Seed sample data for demo
 """
 
 import os
@@ -34,6 +38,9 @@ from framework.agents.data_quality_agent import DataQualityAgent
 from framework.agents.code_analysis_agent import CodeAnalysisAgent
 from framework.agents.compliance_agent import ComplianceAgent
 from framework.agents.recommendation_agent import RecommendationAgent
+
+# Import local storage
+from framework.storage import LocalAgentStore, get_store
 
 
 @dataclass
@@ -66,103 +73,61 @@ class PredictionResult:
 
 class AgentDataStore:
     """
-    In-memory store for agent training data.
-    In production, this would connect to DynamoDB or similar.
+    Data store that reads from local persistent storage.
+    Connects to LocalAgentStore for actual historical data.
     """
 
     def __init__(self):
+        # Use local persistent storage
+        self.local_store = get_store()
+
         self.execution_history: List[ExecutionHistory] = []
         self.baselines: Dict[str, Any] = {}
         self.anomalies: List[Dict] = []
         self.recommendations: List[Dict] = []
 
-        # Load sample historical data for demo
-        self._load_sample_data()
+        # Load from local storage
+        self._load_from_storage()
 
-    def _load_sample_data(self):
-        """Load sample historical data for prediction capabilities."""
-        # Sample execution history for different record counts
-        sample_runs = [
-            ExecutionHistory(
-                job_name="sales_analytics",
-                records_processed=10000,
-                duration_seconds=120,
-                dpu_hours=0.2,
-                cost_usd=0.09,
-                memory_gb=4.0,
-                platform="glue",
-                workers=2,
-                timestamp=datetime.now(),
-                status="SUCCEEDED"
-            ),
-            ExecutionHistory(
-                job_name="sales_analytics",
-                records_processed=100000,
-                duration_seconds=480,
-                dpu_hours=0.8,
-                cost_usd=0.35,
-                memory_gb=8.0,
-                platform="glue",
-                workers=5,
-                timestamp=datetime.now(),
-                status="SUCCEEDED"
-            ),
-            ExecutionHistory(
-                job_name="sales_analytics",
-                records_processed=500000,
-                duration_seconds=1800,
-                dpu_hours=3.0,
-                cost_usd=1.32,
-                memory_gb=16.0,
-                platform="glue",
-                workers=10,
-                timestamp=datetime.now(),
-                status="SUCCEEDED"
-            ),
-            ExecutionHistory(
-                job_name="sales_analytics",
-                records_processed=1000000,
-                duration_seconds=3600,
-                dpu_hours=6.0,
-                cost_usd=2.64,
-                memory_gb=32.0,
-                platform="emr",
-                workers=20,
-                timestamp=datetime.now(),
-                status="SUCCEEDED"
-            ),
-            ExecutionHistory(
-                job_name="customer_etl",
-                records_processed=50000,
-                duration_seconds=300,
-                dpu_hours=0.5,
-                cost_usd=0.22,
-                memory_gb=8.0,
-                platform="glue",
-                workers=3,
-                timestamp=datetime.now(),
-                status="SUCCEEDED"
-            ),
-        ]
-        self.execution_history = sample_runs
+    def _load_from_storage(self):
+        """Load data from local persistent storage."""
+        # Load execution history
+        history = self.local_store.get_execution_history(limit=500)
 
-        # Sample baselines
-        self.baselines = {
-            'sales_analytics': {
-                'avg_duration': 1500,
-                'avg_cost': 1.10,
-                'avg_records': 403000,
-                'avg_memory_gb': 15.0,
-                'typical_workers': 9
-            },
-            'customer_etl': {
-                'avg_duration': 300,
-                'avg_cost': 0.22,
-                'avg_records': 50000,
-                'avg_memory_gb': 8.0,
-                'typical_workers': 3
-            }
-        }
+        self.execution_history = []
+        for h in history:
+            try:
+                self.execution_history.append(ExecutionHistory(
+                    job_name=h.get('job_name', ''),
+                    records_processed=h.get('records_processed', 0),
+                    duration_seconds=h.get('duration_seconds', 0),
+                    dpu_hours=h.get('dpu_hours', 0),
+                    cost_usd=h.get('cost_usd', 0),
+                    memory_gb=h.get('memory_gb', 0),
+                    platform=h.get('platform', 'glue'),
+                    workers=h.get('workers', 2),
+                    timestamp=datetime.fromisoformat(h.get('timestamp', datetime.now().isoformat())),
+                    status=h.get('status', 'SUCCEEDED')
+                ))
+            except Exception:
+                pass
+
+        # Load baselines
+        self.baselines = self.local_store.get_all_baselines()
+
+        # Convert baseline format for compatibility
+        for job_name, baseline in self.baselines.items():
+            if 'avg_duration_seconds' in baseline and 'avg_duration' not in baseline:
+                baseline['avg_duration'] = baseline['avg_duration_seconds']
+
+        # Load anomalies
+        self.anomalies = self.local_store.get_anomalies(include_resolved=True)
+
+        # Load recommendations
+        self.recommendations = self.local_store.get_recommendations()
+
+        if not self.execution_history:
+            print("\033[0;33mNo execution history found. Run with --seed to populate sample data.\033[0m")
 
     def add_execution(self, history: ExecutionHistory):
         """Add an execution to history."""
@@ -171,6 +136,10 @@ class AgentDataStore:
     def get_history_for_job(self, job_name: str) -> List[ExecutionHistory]:
         """Get execution history for a specific job."""
         return [h for h in self.execution_history if h.job_name == job_name]
+
+    def refresh(self):
+        """Reload data from storage."""
+        self._load_from_storage()
 
 
 class PredictionEngine:
@@ -645,120 +614,107 @@ class InteractiveAgentCLI:
             'trend': self.cmd_trend,
             'anomaly': self.cmd_anomaly,
             'ask': self.cmd_ask,
+            'seed': self.cmd_seed,
+            'refresh': self.cmd_refresh,
+            'record': self.cmd_record,
             'exit': self.cmd_exit,
             'quit': self.cmd_exit,
         }
 
     def _load_compliance_history(self) -> Dict:
-        """Load simulated compliance history from last runs."""
+        """Load compliance history from local storage."""
+        local_store = get_store()
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+
+        # Get last compliance result
+        last_compliance = local_store.get_last_compliance(job_name)
+        compliance_history = local_store.get_compliance_history(job_name, limit=10)
+
+        if not last_compliance:
+            # Return empty structure if no data
+            return {
+                'last_run': None,
+                'history': [],
+                'message': f'No compliance data found for {job_name}. Run a compliance check first.'
+            }
+
+        # Build history list
+        history = []
+        for h in compliance_history:
+            warnings = sum(fw.get('warnings', 0) for fw in h.get('frameworks', {}).values())
+            history.append({
+                'date': h.get('timestamp', '')[:10],
+                'status': h.get('overall_status', 'UNKNOWN'),
+                'warnings': warnings
+            })
+
         return {
             'last_run': {
-                'timestamp': '2024-02-14 15:30:00',
-                'job_name': 'demo_complex_sales_analytics',
-                'overall_status': 'COMPLIANT',
-                'frameworks': {
-                    'GDPR': {
-                        'status': 'COMPLIANT',
-                        'checks_passed': 7,
-                        'checks_failed': 0,
-                        'warnings': 1,
-                        'findings': [
-                            {'check': 'PII Masking', 'status': 'WARNING',
-                             'detail': 'customer_name partially masked, consider full masking'}
-                        ],
-                        'pii_columns_detected': ['customer_email', 'customer_name', 'phone', 'address'],
-                        'pii_columns_masked': ['customer_email', 'phone', 'credit_card_masked'],
-                        'encryption_status': 'ENABLED',
-                        'retention_policy': '365 days'
-                    },
-                    'PCI_DSS': {
-                        'status': 'COMPLIANT',
-                        'checks_passed': 6,
-                        'checks_failed': 0,
-                        'warnings': 0,
-                        'findings': [],
-                        'card_data_masked': True,
-                        'encryption_status': 'ENABLED'
-                    },
-                    'SOX': {
-                        'status': 'COMPLIANT',
-                        'checks_passed': 5,
-                        'checks_failed': 0,
-                        'warnings': 0,
-                        'findings': [],
-                        'audit_trail': 'ENABLED',
-                        'data_lineage': 'TRACKED'
-                    }
-                },
-                'recommendations': [
-                    'Apply full masking to customer_name field',
-                    'Consider adding automated PII detection for new columns',
-                    'Set up compliance drift alerts'
-                ]
+                'timestamp': last_compliance.get('timestamp', ''),
+                'job_name': last_compliance.get('job_name', job_name),
+                'overall_status': last_compliance.get('overall_status', 'UNKNOWN'),
+                'frameworks': last_compliance.get('frameworks', {}),
+                'recommendations': last_compliance.get('recommendations', [])
             },
-            'history': [
-                {'date': '2024-02-14', 'status': 'COMPLIANT', 'warnings': 1},
-                {'date': '2024-02-13', 'status': 'COMPLIANT', 'warnings': 1},
-                {'date': '2024-02-12', 'status': 'COMPLIANT', 'warnings': 2},
-                {'date': '2024-02-11', 'status': 'COMPLIANT', 'warnings': 1},
-                {'date': '2024-02-10', 'status': 'COMPLIANT', 'warnings': 1},
-            ]
+            'history': history
         }
 
     def _load_learning_history(self) -> Dict:
-        """Load simulated learning history from last runs."""
+        """Load learning history from local storage."""
+        local_store = get_store()
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+
+        # Get learning summary from local store
+        summary = local_store.get_learning_summary(job_name)
+
+        if not summary.get('last_run') and not summary.get('baseline'):
+            return {
+                'job_name': job_name,
+                'baseline': None,
+                'last_run': None,
+                'trends': {},
+                'predictions': {},
+                'recent_runs': [],
+                'anomalies_history': [],
+                'message': f'No learning data found for {job_name}. Run jobs to build history.'
+            }
+
+        # Format last run for display
+        last_run = summary.get('last_run')
+        formatted_last_run = None
+        if last_run:
+            formatted_last_run = {
+                'timestamp': last_run.get('timestamp', ''),
+                'duration_seconds': last_run.get('duration_seconds', 0),
+                'cost': last_run.get('cost_usd', 0),
+                'records_processed': last_run.get('records_processed', 0),
+                'memory_used_gb': last_run.get('memory_gb', 0),
+                'workers_used': last_run.get('workers', 0),
+                'status': last_run.get('status', 'UNKNOWN'),
+                'platform': last_run.get('platform', 'glue'),
+                'deviations': summary.get('deviations', {}),
+                'anomalies_detected': summary.get('anomalies_count', 0)
+            }
+
+        # Format recent runs
+        recent_runs = []
+        for run in summary.get('recent_runs', [])[:10]:
+            recent_runs.append({
+                'date': run.get('timestamp', '')[:10] if run.get('timestamp') else '',
+                'duration': run.get('duration_seconds', 0),
+                'cost': run.get('cost_usd', 0),
+                'records': run.get('records_processed', 0),
+                'status': run.get('status', 'UNKNOWN')
+            })
+
         return {
-            'job_name': 'demo_complex_sales_analytics',
-            'baseline': {
-                'avg_duration_seconds': 1544,
-                'avg_cost': 1.08,
-                'avg_records': 290000,
-                'avg_memory_gb': 15.0,
-                'typical_workers': 9,
-                'success_rate': 98.5,
-                'created_at': '2024-01-15',
-                'updated_at': '2024-02-14',
-                'sample_count': 45
-            },
-            'last_run': {
-                'timestamp': '2024-02-14 15:30:00',
-                'duration_seconds': 1710,
-                'cost': 1.25,
-                'records_processed': 312000,
-                'memory_used_gb': 18.0,
-                'workers_used': 10,
-                'status': 'SUCCESS',
-                'platform': 'glue',
-                'deviations': {
-                    'duration': '+10.7%',
-                    'cost': '+15.7%',
-                    'records': '+7.6%'
-                },
-                'anomalies_detected': 0
-            },
-            'trends': {
-                'duration': {'direction': 'stable', 'change': '+2.3%', 'period': '7 days'},
-                'cost': {'direction': 'increasing', 'change': '+5.1%', 'period': '7 days'},
-                'records': {'direction': 'increasing', 'change': '+3.2%', 'period': '7 days'},
-                'failure_rate': {'direction': 'stable', 'change': '0%', 'period': '7 days'}
-            },
-            'predictions': {
-                'next_run_duration': 1580,
-                'next_run_cost': 1.12,
-                'failure_probability': 0.02,
-                'recommended_workers': 10
-            },
-            'recent_runs': [
-                {'date': '2024-02-14', 'duration': 1710, 'cost': 1.25, 'records': 312000, 'status': 'SUCCESS'},
-                {'date': '2024-02-13', 'duration': 1620, 'cost': 1.18, 'records': 305000, 'status': 'SUCCESS'},
-                {'date': '2024-02-12', 'duration': 1450, 'cost': 0.98, 'records': 278000, 'status': 'SUCCESS'},
-                {'date': '2024-02-11', 'duration': 1580, 'cost': 1.12, 'records': 292000, 'status': 'SUCCESS'},
-                {'date': '2024-02-10', 'duration': 1520, 'cost': 1.05, 'records': 285000, 'status': 'SUCCESS'},
-            ],
-            'anomalies_history': [
-                {'date': '2024-02-05', 'type': 'DURATION', 'detail': 'Duration 45% above baseline', 'resolved': True},
-                {'date': '2024-01-28', 'type': 'COST', 'detail': 'Cost spike due to data skew', 'resolved': True},
-            ]
+            'job_name': job_name,
+            'baseline': summary.get('baseline'),
+            'last_run': formatted_last_run,
+            'trends': summary.get('trends', {}),
+            'predictions': summary.get('predictions', {}),
+            'recent_runs': recent_runs,
+            'anomalies_history': summary.get('anomalies', [])
         }
 
     def get_agent(self, agent_type: str):
@@ -1059,6 +1015,17 @@ HISTORY & BASELINES:
   baseline <job_name>
       Show baseline metrics for a job
 
+DATA STORE:
+  seed
+      Seed sample data for demo (populates historical runs)
+
+  refresh
+      Reload data from local storage
+
+  record <job> <records> <duration_sec> <cost> [workers] [memory_gb]
+      Manually record a job run
+      Example: record sales_analytics 500000 1800 1.50 10 16
+
 OTHER:
   help          Show this help
   exit/quit     Exit the CLI
@@ -1068,6 +1035,8 @@ NATURAL LANGUAGE:
   - "What will be the cost if I scale from 100k to 1m records?"
   - "How much memory do I need for 5 million records?"
   - "Should I switch to EMR for 2 million records?"
+
+NOTE: Data is stored locally in data/agent_store/. Run 'seed' to populate sample data.
 """
         print(help_text)
 
@@ -1700,6 +1669,74 @@ NATURAL LANGUAGE:
             print(f"    • Anomalies (e.g., 'any anomalies detected?')")
             print(f"\n  Try: 'ask why did cost increase?'")
 
+    def cmd_seed(self, args):
+        """Seed sample data into local store."""
+        print("\n\033[1;33mSeeding sample data...\033[0m")
+        from framework.storage.run_collector import seed_sample_data
+        seed_sample_data()
+
+        # Refresh data
+        self.data_store.refresh()
+        self.compliance_history = self._load_compliance_history()
+        self.learning_history = self._load_learning_history()
+
+        print("\n\033[0;32mData seeded successfully! Try 'learning' or 'compliance' commands.\033[0m")
+
+    def cmd_refresh(self, args):
+        """Refresh data from local store."""
+        print("\n\033[1;33mRefreshing data from local store...\033[0m")
+
+        self.data_store.refresh()
+        self.compliance_history = self._load_compliance_history()
+        self.learning_history = self._load_learning_history()
+
+        print(f"\033[0;32mData refreshed!\033[0m")
+        print(f"  Execution records: {len(self.data_store.execution_history)}")
+        print(f"  Baselines: {len(self.data_store.baselines)}")
+
+    def cmd_record(self, args):
+        """Record a job run manually.
+
+        Usage: record <job_name> <records> <duration_sec> <cost> [workers] [memory_gb]
+        Example: record sales_analytics 500000 1800 1.50 10 16
+        """
+        if len(args) < 4:
+            print("Usage: record <job_name> <records> <duration_sec> <cost> [workers] [memory_gb]")
+            print("Example: record sales_analytics 500000 1800 1.50 10 16")
+            return
+
+        from framework.storage.run_collector import RunCollector
+        collector = RunCollector()
+
+        job_name = args[0]
+        records = self._parse_number(args[1])
+        duration = float(args[2])
+        cost = float(args[3])
+        workers = int(args[4]) if len(args) > 4 else 5
+        memory = float(args[5]) if len(args) > 5 else 16.0
+
+        record = collector.record_run(
+            job_name=job_name,
+            records_processed=records,
+            duration_seconds=duration,
+            cost_usd=cost,
+            workers=workers,
+            memory_gb=memory
+        )
+
+        print(f"\n\033[0;32mRecorded execution:\033[0m")
+        print(f"  Job: {record.job_name}")
+        print(f"  Records: {record.records_processed:,}")
+        print(f"  Duration: {record.duration_seconds/60:.1f} min")
+        print(f"  Cost: ${record.cost_usd:.2f}")
+        print(f"  Workers: {record.workers}")
+        print(f"  Memory: {record.memory_gb} GB")
+
+        # Refresh data
+        self.data_store.refresh()
+        self.learning_history = self._load_learning_history()
+        print("\n\033[0;36mData store updated. Baselines will auto-update after 5+ runs.\033[0m")
+
     def cmd_exit(self, args):
         """Exit the CLI."""
         print("\nExiting...")
@@ -1723,8 +1760,75 @@ def main():
     parser.add_argument('--predict-memory', action='store_true', help='Predict memory')
     parser.add_argument('--records', type=int, help='Target record count')
     parser.add_argument('--from-records', type=int, help='Source record count')
+    parser.add_argument('--seed', action='store_true', help='Seed sample data for demo')
+    parser.add_argument('--collect', help='Collect metrics from a Glue job run (format: job_name:run_id)')
+    parser.add_argument('--show-store', action='store_true', help='Show what data is in the local store')
 
     args = parser.parse_args()
+
+    # Handle --seed: populate sample data
+    if args.seed:
+        print("Seeding sample data into local store...")
+        from framework.storage.run_collector import seed_sample_data
+        seed_sample_data()
+        print("\nYou can now run: python scripts/agent_cli.py")
+        return
+
+    # Handle --collect: collect from actual Glue run
+    if args.collect:
+        from framework.storage.run_collector import RunCollector
+        collector = RunCollector()
+
+        parts = args.collect.split(':')
+        if len(parts) != 2:
+            print("Error: --collect format should be job_name:run_id")
+            return
+
+        job_name, run_id = parts
+        print(f"Collecting metrics for {job_name}/{run_id}...")
+        record = collector.collect_glue_run(job_name, run_id)
+        if record:
+            print(f"  Status: {record.status}")
+            print(f"  Duration: {record.duration_seconds/60:.1f} min")
+            print(f"  Cost: ${record.cost_usd:.2f}")
+            print(f"  Records: {record.records_processed:,}")
+        else:
+            print("Failed to collect metrics. Check AWS credentials and job/run IDs.")
+        return
+
+    # Handle --show-store: show store contents
+    if args.show_store:
+        store = get_store()
+        print("\n=== Local Agent Store Contents ===\n")
+
+        # Execution history
+        history = store.get_execution_history(limit=10)
+        print(f"Execution History ({len(history)} most recent):")
+        for h in history[:5]:
+            print(f"  - {h.get('job_name')}: {h.get('status')} "
+                  f"({h.get('records_processed', 0):,} records, ${h.get('cost_usd', 0):.2f})")
+
+        # Baselines
+        baselines = store.get_all_baselines()
+        print(f"\nBaselines ({len(baselines)} jobs):")
+        for job, b in baselines.items():
+            print(f"  - {job}: {b.get('sample_count', 0)} samples, "
+                  f"avg ${b.get('avg_cost', 0):.2f}, "
+                  f"{b.get('avg_duration_seconds', 0)/60:.1f} min")
+
+        # Compliance
+        compliance = store.get_compliance_history(limit=5)
+        print(f"\nCompliance History ({len(compliance)} checks):")
+        for c in compliance[:3]:
+            print(f"  - {c.get('job_name')}: {c.get('overall_status')} ({c.get('timestamp', '')[:10]})")
+
+        # Anomalies
+        anomalies = store.get_anomalies(days=30)
+        print(f"\nAnomalies (last 30 days): {len(anomalies)}")
+        for a in anomalies[:3]:
+            print(f"  - [{a.get('type')}] {a.get('detail')} ({'Resolved' if a.get('resolved') else 'Open'})")
+
+        return
 
     # Load config if provided
     config = {}
