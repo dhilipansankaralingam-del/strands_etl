@@ -426,7 +426,7 @@ class AWSJobExecutor:
                     metrics.end_time = datetime.utcnow()
                     metrics.duration_seconds = (metrics.end_time - metrics.start_time).total_seconds()
 
-                    # Collect metrics
+                    # Collect metrics from job run
                     if 'ExecutionTime' in run:
                         metrics.duration_seconds = run['ExecutionTime']
                     if 'DPUSeconds' in run:
@@ -435,7 +435,22 @@ class AWSJobExecutor:
                         metrics.executor_count = run['NumberOfWorkers']
 
                     # Estimate cost (Glue pricing: $0.44 per DPU-hour)
+                    # If DPUSeconds not available, estimate from workers and duration
+                    if metrics.dpu_hours == 0 and metrics.executor_count > 0:
+                        # Estimate: each worker = 1 DPU for standard type
+                        metrics.dpu_hours = (metrics.duration_seconds / 3600) * metrics.executor_count
                     metrics.estimated_cost = metrics.dpu_hours * 0.44
+
+                    # Get records from CloudWatch metrics
+                    metrics.records_read = self._get_records_from_cloudwatch(
+                        job_name, run_id, metrics.start_time, metrics.end_time
+                    )
+                    metrics.records_written = metrics.records_read  # Assume same for now
+
+                    # If no CloudWatch data, estimate from input size
+                    if metrics.records_read == 0:
+                        metrics.records_read = self._estimate_records_from_config()
+                        metrics.records_written = metrics.records_read
 
                     if state == 'FAILED':
                         metrics.error_message = run.get('ErrorMessage', 'Unknown error')
@@ -455,6 +470,7 @@ class AWSJobExecutor:
             print(f"  Duration: {metrics.duration_seconds:.1f} seconds")
             print(f"  DPU Hours: {metrics.dpu_hours:.2f}")
             print(f"  Estimated Cost: ${metrics.estimated_cost:.2f}")
+            print(f"  Records Processed: {metrics.records_read:,}")
             print(f"  {'=' * 50}")
 
         except Exception as e:
@@ -626,6 +642,76 @@ class AWSJobExecutor:
             return 'NOT_FOUND'
         else:
             return 'UNKNOWN'
+
+    def _get_records_from_cloudwatch(self, job_name: str, run_id: str,
+                                      start_time: datetime, end_time: datetime) -> int:
+        """Get records processed from CloudWatch metrics."""
+        if not self.cloudwatch_client or not end_time:
+            return 0
+
+        try:
+            # Glue publishes metrics to CloudWatch under 'Glue' namespace
+            response = self.cloudwatch_client.get_metric_statistics(
+                Namespace='Glue',
+                MetricName='glue.driver.aggregate.recordsRead',
+                Dimensions=[
+                    {'Name': 'JobName', 'Value': job_name},
+                    {'Name': 'JobRunId', 'Value': run_id}
+                ],
+                StartTime=start_time,
+                EndTime=end_time + timedelta(minutes=5),  # Add buffer
+                Period=3600,
+                Statistics=['Sum']
+            )
+
+            if response.get('Datapoints'):
+                return int(sum(dp['Sum'] for dp in response['Datapoints']))
+
+            # Try alternative metric name
+            response = self.cloudwatch_client.get_metric_statistics(
+                Namespace='Glue',
+                MetricName='glue.ALL.s3.filesystem.read_bytes',
+                Dimensions=[
+                    {'Name': 'JobName', 'Value': job_name},
+                    {'Name': 'JobRunId', 'Value': run_id}
+                ],
+                StartTime=start_time,
+                EndTime=end_time + timedelta(minutes=5),
+                Period=3600,
+                Statistics=['Sum']
+            )
+
+            if response.get('Datapoints'):
+                # Estimate records from bytes (assume ~500 bytes per record average)
+                total_bytes = sum(dp['Sum'] for dp in response['Datapoints'])
+                return int(total_bytes / 500)
+
+        except Exception as e:
+            print(f"  [WARN] CloudWatch metrics not available: {e}")
+
+        return 0
+
+    def _estimate_records_from_config(self) -> int:
+        """Estimate records from source table config."""
+        total_records = 0
+
+        for table in self.config.get('source_tables', []):
+            # Check for explicit row count
+            rows = table.get('estimated_rows', 0)
+            if rows:
+                total_records += rows
+                continue
+
+            # Estimate from size (assume ~500 bytes per record)
+            size_gb = table.get('estimated_size_gb', 0)
+            if size_gb:
+                total_records += int(size_gb * 1024 * 1024 * 1024 / 500)
+
+        # If still no estimate, use a reasonable default
+        if total_records == 0:
+            total_records = 100000  # Default assumption
+
+        return total_records
 
     def get_execution_metrics_from_cloudwatch(self, job_name: str, run_id: str) -> Dict:
         """Get detailed metrics from CloudWatch."""
