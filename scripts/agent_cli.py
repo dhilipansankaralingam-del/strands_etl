@@ -38,6 +38,7 @@ from framework.agents.data_quality_agent import DataQualityAgent
 from framework.agents.code_analysis_agent import CodeAnalysisAgent
 from framework.agents.compliance_agent import ComplianceAgent
 from framework.agents.recommendation_agent import RecommendationAgent
+from framework.agents.platform_conversion_agent import PlatformConversionAgent, Platform
 
 # Import local storage
 from framework.storage import LocalAgentStore, get_store
@@ -617,6 +618,8 @@ class InteractiveAgentCLI:
             'seed': self.cmd_seed,
             'refresh': self.cmd_refresh,
             'record': self.cmd_record,
+            'convert': self.cmd_convert,
+            'conversions': self.cmd_conversions,
             'exit': self.cmd_exit,
             'quit': self.cmd_exit,
         }
@@ -787,6 +790,10 @@ class InteractiveAgentCLI:
 ║    quality <table>                                Data quality check ║
 ║    workload                                       Workload assessment║
 ║    recommend                                      Get recommendations║
+║                                                                      ║
+║  Platform Conversion:                                                ║
+║    convert glue emr [--workers N]                Platform convert   ║
+║    conversions                                   Conversion history ║
 ║                                                                      ║
 ║  Type 'help' for full command list                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -1014,6 +1021,23 @@ HISTORY & BASELINES:
 
   baseline <job_name>
       Show baseline metrics for a job
+
+PLATFORM CONVERSION:
+  convert <source> <target> [options]
+      Convert job configuration between platforms
+      Platforms: glue, emr, eks
+      Options:
+        --workers N        Number of Glue workers
+        --worker-type TYPE Glue worker type (G.1X, G.2X)
+        --instances N      Number of EMR instances
+        --instance-type T  EMR instance type
+        --optimize GOAL    Optimization: cost, performance, balanced
+      Example: convert glue emr --workers 10 --worker-type G.1X
+      Example: convert glue eks --workers 20 --optimize cost
+      Example: convert emr glue --instances 5 --instance-type m5.xlarge
+
+  conversions [--history] [--stats]
+      Show conversion history and statistics
 
 DATA STORE:
   seed
@@ -1736,6 +1760,231 @@ NOTE: Data is stored locally in data/agent_store/. Run 'seed' to populate sample
         self.data_store.refresh()
         self.learning_history = self._load_learning_history()
         print("\n\033[0;36mData store updated. Baselines will auto-update after 5+ runs.\033[0m")
+
+    def cmd_convert(self, args):
+        """Convert job configuration between platforms.
+
+        Usage: convert <source_platform> <target_platform> [--workers N] [--worker-type TYPE] [--optimize cost|performance|balanced]
+        Platforms: glue, emr, eks
+
+        Examples:
+            convert glue emr --workers 10 --worker-type G.1X
+            convert glue eks --workers 20 --optimize cost
+            convert emr glue --instances 5 --instance-type m5.xlarge
+        """
+        if len(args) < 2:
+            print("Usage: convert <source_platform> <target_platform> [options]")
+            print("\nPlatforms: glue, emr, eks")
+            print("\nOptions:")
+            print("  --workers N        Number of workers (Glue)")
+            print("  --worker-type TYPE Worker type (G.1X, G.2X)")
+            print("  --instances N      Number of instances (EMR)")
+            print("  --instance-type T  Instance type (m5.xlarge, etc.)")
+            print("  --optimize GOAL    Optimization goal (cost, performance, balanced)")
+            print("\nExamples:")
+            print("  convert glue emr --workers 10 --worker-type G.1X")
+            print("  convert glue eks --workers 20 --optimize cost")
+            print("  convert emr glue --instances 5 --instance-type m5.xlarge")
+            return
+
+        source = args[0].lower()
+        target = args[1].lower()
+
+        # Parse options
+        workers = 10
+        worker_type = "G.1X"
+        instances = 3
+        instance_type = "m5.xlarge"
+        optimize = "balanced"
+
+        i = 2
+        while i < len(args):
+            if args[i] == '--workers' and i + 1 < len(args):
+                workers = int(args[i + 1])
+                i += 2
+            elif args[i] == '--worker-type' and i + 1 < len(args):
+                worker_type = args[i + 1]
+                i += 2
+            elif args[i] == '--instances' and i + 1 < len(args):
+                instances = int(args[i + 1])
+                i += 2
+            elif args[i] == '--instance-type' and i + 1 < len(args):
+                instance_type = args[i + 1]
+                i += 2
+            elif args[i] == '--optimize' and i + 1 < len(args):
+                optimize = args[i + 1].lower()
+                i += 2
+            else:
+                i += 1
+
+        # Map platform strings to enum
+        platform_map = {
+            'glue': Platform.GLUE,
+            'emr': Platform.EMR,
+            'eks': Platform.EKS
+        }
+
+        if source not in platform_map or target not in platform_map:
+            print(f"Invalid platform. Supported: glue, emr, eks")
+            return
+
+        # Build source config based on platform
+        if source == 'glue':
+            source_config = {
+                "Name": self.config.get('job_name', 'etl-job'),
+                "NumberOfWorkers": workers,
+                "WorkerType": worker_type,
+                "GlueVersion": "4.0",
+                "Timeout": 480,
+                "MaxRetries": 1,
+                "Command": {
+                    "Name": "glueetl",
+                    "ScriptLocation": self.config.get('script_location', 's3://bucket/scripts/job.py'),
+                    "PythonVersion": "3"
+                },
+                "DefaultArguments": {
+                    "--TempDir": "s3://bucket/temp/",
+                    "--enable-metrics": "true",
+                    "--enable-glue-datacatalog": "true"
+                }
+            }
+        else:  # emr
+            source_config = {
+                "Name": self.config.get('job_name', 'emr-job'),
+                "ReleaseLabel": "emr-6.15.0",
+                "Applications": [{"Name": "Spark"}],
+                "Instances": {
+                    "MasterInstanceType": instance_type,
+                    "SlaveInstanceType": instance_type,
+                    "InstanceCount": instances
+                },
+                "Steps": [{
+                    "Name": "Run ETL",
+                    "HadoopJarStep": {
+                        "Jar": "command-runner.jar",
+                        "Args": ["spark-submit", self.config.get('script_location', 's3a://bucket/scripts/job.py')]
+                    }
+                }],
+                "LogUri": "s3://bucket/logs/"
+            }
+
+        # Run conversion
+        agent = PlatformConversionAgent()
+        result = agent.convert(
+            source_config=source_config,
+            source_platform=platform_map[source],
+            target_platform=platform_map[target],
+            optimization_goal=optimize
+        )
+
+        # Display result
+        print(f"\n\033[1;33m🔄 PLATFORM CONVERSION: {source.upper()} → {target.upper()}\033[0m")
+        print("=" * 60)
+
+        if not result.success:
+            print(f"\n\033[0;31mConversion failed: {result.error_message}\033[0m")
+            return
+
+        # Conversion steps
+        print(f"\n\033[1;36m📋 Conversion Steps:\033[0m")
+        for step in result.conversion_steps:
+            print(f"  {step}")
+
+        # Resource mapping
+        print(f"\n\033[1;36m📊 Resource Mapping:\033[0m")
+        src = result.resource_mapping.source_config
+        tgt = result.resource_mapping.target_config
+        print(f"  Source: {json.dumps(src, indent=4)}")
+        print(f"  Target: {json.dumps(tgt, indent=4)}")
+
+        # Cost comparison
+        print(f"\n\033[1;36m💰 Cost Comparison (estimated monthly):\033[0m")
+        for key, value in result.cost_comparison.items():
+            label = key.replace('_', ' ').title()
+            if 'savings' in key.lower():
+                color = "\033[0;32m" if value > 0 else "\033[0;31m"
+                print(f"  {label}: {color}${value:.2f}\033[0m")
+            else:
+                print(f"  {label}: ${value:.2f}")
+
+        # Spark config (top 5)
+        print(f"\n\033[1;36m⚙️ Spark Configuration:\033[0m")
+        for key, value in list(result.spark_config.items())[:5]:
+            print(f"  {key}={value}")
+        if len(result.spark_config) > 5:
+            print(f"  ... and {len(result.spark_config) - 5} more settings")
+
+        # IAM requirements
+        print(f"\n\033[1;36m🔐 IAM Requirements:\033[0m")
+        for role, desc in result.iam_config.items():
+            print(f"  {role}: {desc}")
+
+        # Recommendations
+        if result.recommendations:
+            print(f"\n\033[1;36m💡 Recommendations:\033[0m")
+            for rec in result.recommendations:
+                print(f"  • {rec}")
+
+        # Warnings
+        if result.warnings:
+            print(f"\n\033[0;33m⚠️ Warnings:\033[0m")
+            for warn in result.warnings:
+                print(f"  • {warn}")
+
+        # Target config preview
+        print(f"\n\033[1;36m📄 Target Configuration Preview:\033[0m")
+        config_str = json.dumps(result.target_config, indent=2)
+        # Truncate if too long
+        if len(config_str) > 1000:
+            config_str = config_str[:1000] + "\n  ... (truncated)"
+        print(config_str)
+
+        print(f"\n\033[0;32m✓ Conversion stored to data/agent_store/platform_conversions.json\033[0m")
+
+    def cmd_conversions(self, args):
+        """Show platform conversion history and statistics.
+
+        Usage: conversions [--history] [--stats]
+        """
+        agent = PlatformConversionAgent()
+
+        show_history = '--history' in args or len(args) == 0
+        show_stats = '--stats' in args or len(args) == 0
+
+        print(f"\n\033[1;33m🔄 PLATFORM CONVERSION HISTORY\033[0m")
+        print("=" * 60)
+
+        if show_stats:
+            stats = agent.get_statistics()
+            if stats:
+                print(f"\n\033[1;36m📊 Statistics:\033[0m")
+                total_conversions = sum(s['count'] for s in stats.values())
+                total_savings = sum(s['total_savings'] for s in stats.values())
+                print(f"  Total Conversions: {total_conversions}")
+                print(f"  Total Estimated Savings: ${total_savings:.2f}/month")
+                print(f"\n  By Conversion Type:")
+                for key, data in stats.items():
+                    src, _, tgt = key.partition('_to_')
+                    print(f"    {src.upper()} → {tgt.upper()}: {data['count']} conversions, ${data['total_savings']:.2f} savings")
+            else:
+                print(f"\n  No conversion statistics yet.")
+
+        if show_history:
+            history = agent.get_conversion_history(limit=10)
+            if history:
+                print(f"\n\033[1;36m📜 Recent Conversions:\033[0m")
+                for conv in history[-5:]:
+                    src = conv.get('source_platform', 'unknown').upper()
+                    tgt = conv.get('target_platform', 'unknown').upper()
+                    savings = conv.get('estimated_cost_savings', 0)
+                    ts = conv.get('timestamp', '')[:16]
+                    savings_color = "\033[0;32m" if savings > 0 else "\033[0;31m"
+                    print(f"\n  [{ts}] {src} → {tgt}")
+                    print(f"    Estimated Savings: {savings_color}${savings:.2f}/month\033[0m")
+                    if conv.get('recommendations'):
+                        print(f"    Top Recommendation: {conv['recommendations'][0]}")
+            else:
+                print(f"\n  No conversion history yet. Run 'convert glue emr' to start.")
 
     def cmd_exit(self, args):
         """Exit the CLI."""
