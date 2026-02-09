@@ -13,6 +13,7 @@ from .workload_assessment_agent import WorkloadAssessmentAgent
 from .learning_agent import LearningAgent
 from .recommendation_agent import RecommendationAgent
 from .code_conversion_agent import CodeConversionAgent
+from .platform_conversion_agent import PlatformConversionAgent
 
 __all__ = [
     'AutoHealingAgent',
@@ -22,5 +23,6 @@ __all__ = [
     'WorkloadAssessmentAgent',
     'LearningAgent',
     'RecommendationAgent',
-    'CodeConversionAgent'
+    'CodeConversionAgent',
+    'PlatformConversionAgent'
 ]
