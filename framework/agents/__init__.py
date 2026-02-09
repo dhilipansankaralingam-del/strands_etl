@@ -14,6 +14,7 @@ from .learning_agent import LearningAgent
 from .recommendation_agent import RecommendationAgent
 from .code_conversion_agent import CodeConversionAgent
 from .platform_conversion_agent import PlatformConversionAgent
+from .resource_allocator_agent import ResourceAllocatorAgent
 
 __all__ = [
     'AutoHealingAgent',
@@ -24,5 +25,6 @@ __all__ = [
     'LearningAgent',
     'RecommendationAgent',
     'CodeConversionAgent',
-    'PlatformConversionAgent'
+    'PlatformConversionAgent',
+    'ResourceAllocatorAgent'
 ]

@@ -42,6 +42,7 @@ from framework.agents.data_quality_agent import DataQualityAgent
 from framework.agents.workload_assessment_agent import WorkloadAssessmentAgent
 from framework.agents.learning_agent import LearningAgent
 from framework.agents.recommendation_agent import RecommendationAgent
+from framework.agents.resource_allocator_agent import ResourceAllocatorAgent
 from framework.execution.aws_job_executor import AWSJobExecutor, validate_and_execute
 
 # Import local storage for agent learning
@@ -970,6 +971,71 @@ class ETLOrchestrator:
         """Execute the actual ETL job using AWS Job Executor."""
         platform = self.config.get('platform', {}).get('primary', 'glue')
         ctx.platform = platform
+
+        # Smart Resource Allocation (if enabled)
+        smart_allocation_enabled = self.config.get('smart_allocation', {}).get('enabled', True)
+
+        if smart_allocation_enabled and not self.dry_run:
+            print("\n  Running Smart Resource Allocation...")
+            allocator = ResourceAllocatorAgent()
+
+            # Build Glue config from user settings
+            glue_config = {
+                "Name": ctx.job_name,
+                "NumberOfWorkers": self.config.get('platform', {}).get('glue', {}).get('workers', 10),
+                "WorkerType": self.config.get('platform', {}).get('glue', {}).get('worker_type', 'G.1X'),
+                "Timeout": self.config.get('platform', {}).get('glue', {}).get('timeout_minutes', 480),
+                "GlueVersion": self.config.get('platform', {}).get('glue', {}).get('glue_version', '4.0'),
+                "DefaultArguments": self.config.get('platform', {}).get('glue', {}).get('extra_args', {})
+            }
+
+            # Estimate records from source tables
+            estimated_records = 0
+            for table in self.config.get('source_tables', []):
+                estimated_records += table.get('estimated_rows', 0)
+                if not estimated_records:
+                    size_gb = table.get('estimated_size_gb', 0)
+                    estimated_records += int(size_gb * 1024 * 1024 * 1024 / 500)
+
+            # Get smart allocation recommendation
+            recommendation = allocator.recommend_resources(
+                job_name=ctx.job_name,
+                config=glue_config,
+                estimated_records=estimated_records if estimated_records > 0 else None
+            )
+
+            # Display recommendation
+            print(f"    Day Type: {recommendation.pattern_analysis.day_type.value}")
+            print(f"    Data Trend: {recommendation.pattern_analysis.data_trend.value}")
+            print(f"    Original: {recommendation.original_workers} x {recommendation.original_worker_type}")
+            print(f"    Recommended: {recommendation.recommended_workers} x {recommendation.recommended_worker_type}")
+            print(f"    Confidence: {recommendation.confidence * 100:.0f}%")
+
+            if recommendation.allocation_reasons:
+                print(f"    Reasons:")
+                for reason in recommendation.allocation_reasons[:3]:
+                    print(f"      • {reason}")
+
+            # Apply smart allocation to config
+            if self.config.get('smart_allocation', {}).get('auto_apply', True):
+                if 'platform' not in self.config:
+                    self.config['platform'] = {}
+                if 'glue' not in self.config['platform']:
+                    self.config['platform']['glue'] = {}
+
+                self.config['platform']['glue']['workers'] = recommendation.recommended_workers
+                self.config['platform']['glue']['worker_type'] = recommendation.recommended_worker_type
+                self.config['platform']['glue']['timeout_minutes'] = recommendation.recommended_timeout
+
+                print(f"\n    ✓ Applied smart allocation: {recommendation.recommended_workers} x {recommendation.recommended_worker_type}")
+
+                # Store in context
+                ctx.metrics['smart_allocation'] = {
+                    'original_workers': recommendation.original_workers,
+                    'recommended_workers': recommendation.recommended_workers,
+                    'cost_savings_percent': recommendation.cost_savings_percent,
+                    'confidence': recommendation.confidence
+                }
 
         # Create the AWS Job Executor
         executor = AWSJobExecutor(self.config)

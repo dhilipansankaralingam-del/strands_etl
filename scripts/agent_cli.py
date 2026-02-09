@@ -39,6 +39,7 @@ from framework.agents.code_analysis_agent import CodeAnalysisAgent
 from framework.agents.compliance_agent import ComplianceAgent
 from framework.agents.recommendation_agent import RecommendationAgent
 from framework.agents.platform_conversion_agent import PlatformConversionAgent, Platform
+from framework.agents.resource_allocator_agent import ResourceAllocatorAgent
 
 # Import local storage
 from framework.storage import LocalAgentStore, get_store
@@ -620,6 +621,8 @@ class InteractiveAgentCLI:
             'record': self.cmd_record,
             'convert': self.cmd_convert,
             'conversions': self.cmd_conversions,
+            'allocate': self.cmd_allocate,
+            'allocations': self.cmd_allocations,
             'exit': self.cmd_exit,
             'quit': self.cmd_exit,
         }
@@ -794,6 +797,10 @@ class InteractiveAgentCLI:
 ║  Platform Conversion:                                                ║
 ║    convert glue emr [--workers N]                Platform convert   ║
 ║    conversions                                   Conversion history ║
+║                                                                      ║
+║  Smart Resource Allocation:                                          ║
+║    allocate [job] [--records N]                  Dynamic allocation ║
+║    allocations                                   Allocation history ║
 ║                                                                      ║
 ║  Type 'help' for full command list                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -1038,6 +1045,25 @@ PLATFORM CONVERSION:
 
   conversions [--history] [--stats]
       Show conversion history and statistics
+
+SMART RESOURCE ALLOCATION:
+  allocate [job_name] [options]
+      Get smart resource allocation based on patterns and trends
+      Automatically adjusts workers based on:
+        - Weekday vs weekend patterns
+        - Data volume trends (growing/shrinking)
+        - Job complexity
+        - Historical performance
+      Options:
+        --records N        Override estimated record count
+        --workers N        Original worker count to compare
+        --worker-type TYPE Original worker type
+      Example: allocate sales_analytics
+      Example: allocate --records 500000
+      Example: allocate --workers 10 --worker-type G.1X
+
+  allocations [job_name] [--limit N]
+      Show resource allocation history
 
 DATA STORE:
   seed
@@ -1985,6 +2011,171 @@ NOTE: Data is stored locally in data/agent_store/. Run 'seed' to populate sample
                         print(f"    Top Recommendation: {conv['recommendations'][0]}")
             else:
                 print(f"\n  No conversion history yet. Run 'convert glue emr' to start.")
+
+    def cmd_allocate(self, args):
+        """Smart resource allocation based on patterns and trends.
+
+        Usage: allocate [job_name] [--records N] [--workers N] [--worker-type TYPE]
+
+        Examples:
+            allocate                           # Use config job, auto-detect records
+            allocate sales_analytics           # Specific job
+            allocate --records 500000          # Override estimated records
+            allocate --workers 10 --worker-type G.1X  # Show what optimizations apply
+        """
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+        estimated_records = None
+        workers = 10
+        worker_type = "G.1X"
+
+        # Parse arguments
+        i = 0
+        while i < len(args):
+            if args[i] == '--records' and i + 1 < len(args):
+                estimated_records = self._parse_number(args[i + 1])
+                i += 2
+            elif args[i] == '--workers' and i + 1 < len(args):
+                workers = int(args[i + 1])
+                i += 2
+            elif args[i] == '--worker-type' and i + 1 < len(args):
+                worker_type = args[i + 1]
+                i += 2
+            elif not args[i].startswith('--'):
+                job_name = args[i]
+                i += 1
+            else:
+                i += 1
+
+        # Build config
+        config = {
+            "Name": job_name,
+            "NumberOfWorkers": workers,
+            "WorkerType": worker_type,
+            "Timeout": 480,
+            "GlueVersion": "4.0",
+            "DefaultArguments": self.config.get('default_arguments', {})
+        }
+
+        # Get recommendation
+        agent = ResourceAllocatorAgent()
+        rec = agent.recommend_resources(
+            job_name=job_name,
+            config=config,
+            estimated_records=estimated_records
+        )
+
+        # Display result
+        print(f"\n\033[1;33m🧠 SMART RESOURCE ALLOCATION\033[0m")
+        print("=" * 70)
+
+        print(f"\n  Job: {rec.job_name}")
+        print(f"  Confidence: {rec.confidence * 100:.0f}%")
+
+        # Pattern Analysis
+        print(f"\n\033[1;36m📊 Pattern Analysis:\033[0m")
+        print(f"  Day Type: {rec.pattern_analysis.day_type.value.upper()}")
+        print(f"  Data Trend: {rec.pattern_analysis.data_trend.value.upper()}")
+        print(f"  Growth Rate: {rec.pattern_analysis.growth_rate_percent:+.1f}%/week")
+        print(f"  Volatility Score: {rec.pattern_analysis.volatility_score:.2f}")
+
+        # Complexity
+        print(f"\n\033[1;36m🔧 Job Complexity:\033[0m")
+        print(f"  Overall Score: {rec.complexity_score.overall_score:.1f}/10")
+        print(f"  Memory Pressure: {rec.complexity_score.memory_pressure:.1f}/10")
+        print(f"  Shuffle Intensity: {rec.complexity_score.shuffle_intensity:.1f}/10")
+
+        # Resource Comparison
+        print(f"\n\033[1;36m📈 Resource Allocation:\033[0m")
+        print(f"  {'Metric':<20} {'Original':<15} {'Recommended':<15} {'Change'}")
+        print(f"  {'-'*20} {'-'*15} {'-'*15} {'-'*10}")
+
+        orig_workers_str = f"{rec.original_workers} x {rec.original_worker_type}"
+        rec_workers_str = f"{rec.recommended_workers} x {rec.recommended_worker_type}"
+        worker_change = rec.recommended_workers - rec.original_workers
+        worker_change_str = f"{worker_change:+d}" if worker_change != 0 else "="
+
+        print(f"  {'Workers':<20} {orig_workers_str:<15} {rec_workers_str:<15} {worker_change_str}")
+        print(f"  {'Timeout (min)':<20} {rec.original_timeout:<15} {rec.recommended_timeout:<15} {rec.recommended_timeout - rec.original_timeout:+d}")
+
+        # Estimates
+        print(f"\n\033[1;36m💰 Estimates:\033[0m")
+        print(f"  Records: {rec.estimated_records:,}")
+        print(f"  Duration: {rec.estimated_duration_seconds / 60:.1f} minutes")
+        print(f"  Cost: ${rec.estimated_cost:.2f}")
+
+        # Improvements
+        print(f"\n\033[1;36m📊 Projected Improvements:\033[0m")
+        cost_color = "\033[0;32m" if rec.cost_savings_percent > 0 else "\033[0;31m"
+        perf_color = "\033[0;32m" if rec.performance_improvement_percent > 0 else "\033[0;31m"
+        print(f"  Cost Savings: {cost_color}{rec.cost_savings_percent:+.1f}%\033[0m")
+        print(f"  Performance: {perf_color}{rec.performance_improvement_percent:+.1f}%\033[0m")
+
+        # Reasons
+        if rec.allocation_reasons:
+            print(f"\n\033[1;36m💡 Allocation Reasons:\033[0m")
+            for reason in rec.allocation_reasons:
+                print(f"  • {reason}")
+
+        # Warnings
+        if rec.warnings:
+            print(f"\n\033[0;33m⚠️ Warnings:\033[0m")
+            for warning in rec.warnings:
+                print(f"  • {warning}")
+
+        # Optimized config preview
+        print(f"\n\033[1;36m📄 Optimized Configuration:\033[0m")
+        opt_config = {
+            "NumberOfWorkers": rec.recommended_workers,
+            "WorkerType": rec.recommended_worker_type,
+            "Timeout": rec.recommended_timeout,
+            "MaxRetries": rec.recommended_max_retries
+        }
+        print(f"  {json.dumps(opt_config, indent=2)}")
+
+        print(f"\n\033[0;32m✓ Allocation stored to data/agent_store/resource_allocations.json\033[0m")
+
+    def cmd_allocations(self, args):
+        """Show resource allocation history.
+
+        Usage: allocations [job_name] [--limit N]
+        """
+        job_name = None
+        limit = 10
+
+        for i, arg in enumerate(args):
+            if arg == '--limit' and i + 1 < len(args):
+                limit = int(args[i + 1])
+            elif not arg.startswith('--'):
+                job_name = arg
+
+        agent = ResourceAllocatorAgent()
+        history = agent.get_allocation_history(job_name=job_name, limit=limit)
+
+        print(f"\n\033[1;33m🧠 RESOURCE ALLOCATION HISTORY\033[0m")
+        print("=" * 70)
+
+        if not history:
+            print(f"\n  No allocation history yet. Run 'allocate' to start.")
+            return
+
+        print(f"\n  {'Timestamp':<20} {'Job':<25} {'Original':<12} {'Recommended':<12} {'Savings'}")
+        print(f"  {'-'*20} {'-'*25} {'-'*12} {'-'*12} {'-'*10}")
+
+        for alloc in history:
+            ts = alloc.get('timestamp', '')[:16]
+            job = alloc.get('job_name', 'unknown')[:24]
+            orig = alloc.get('original', {})
+            rec = alloc.get('recommended', {})
+            orig_str = f"{orig.get('workers', 0)}x{orig.get('worker_type', '?')[:4]}"
+            rec_str = f"{rec.get('workers', 0)}x{rec.get('worker_type', '?')[:4]}"
+            savings = alloc.get('cost_savings_percent', 0)
+            savings_color = "\033[0;32m" if savings > 0 else "\033[0;31m"
+            print(f"  {ts:<20} {job:<25} {orig_str:<12} {rec_str:<12} {savings_color}{savings:+.1f}%\033[0m")
+
+        # Summary
+        total_savings = sum(a.get('cost_savings_percent', 0) for a in history)
+        avg_savings = total_savings / len(history) if history else 0
+        print(f"\n  Average Savings: {avg_savings:.1f}%")
 
     def cmd_exit(self, args):
         """Exit the CLI."""
