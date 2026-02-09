@@ -22,6 +22,7 @@ import json
 from pyspark.sql.functions import *
 from pyspark.sql.session import SparkSession
 import boto3
+from botocore.exceptions import ClientError
 import logging
 
 # Initialize logger
@@ -72,6 +73,8 @@ def check_fail_file_exists(bucket, table_name):
 
     try:
         s3_client.head_object(Bucket=bucket, Key=fail_file_key)
+
+        # If we get here, the file exists - this is a failure condition
         logger.error(f"❌ FAIL file detected: s3://{bucket}/{fail_file_key}")
         logger.error(f"❌ Job aborted. Please investigate and remove the FAIL file to retry.")
 
@@ -84,13 +87,21 @@ def check_fail_file_exists(bucket, table_name):
             pass
 
         raise Exception(f"FAIL file exists for table {table_name}. Job aborted.")
-    except s3_client.exceptions.NoSuchKey:
-        logger.info(f"✓ No FAIL file found for {table_name}. Proceeding...")
-        return False
+
+    except ClientError as e:
+        # Check if error is 404 (file not found) - this is the expected/good case
+        if e.response['Error']['Code'] == '404':
+            logger.info(f"✓ No FAIL file found for {table_name}. Proceeding...")
+            return False
+        else:
+            # Some other S3 error occurred
+            logger.error(f"Error checking FAIL file: {str(e)}")
+            raise
+
     except Exception as e:
         if "FAIL file exists" in str(e):
             raise
-        logger.error(f"Error checking FAIL file: {str(e)}")
+        logger.error(f"Unexpected error checking FAIL file: {str(e)}")
         raise
 
 
