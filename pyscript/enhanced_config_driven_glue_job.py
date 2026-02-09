@@ -459,16 +459,36 @@ def main():
         logger.info(f"\nReading config from: s3://{bucket_name}/{json_file_name}")
         response = s3_client.get_object(Bucket=bucket_name, Key=json_file_name)
         file_content = response['Body'].read().decode('utf-8')
-        jobs = json.loads(file_content)
+        config = json.loads(file_content)
+
+        # Extract jobs array from config
+        jobs = config.get('jobs', [])
+        global_settings = config.get('global_settings', {})
 
         logger.info(f"✓ Config loaded successfully")
         logger.info(f"  Jobs in config: {len(jobs)}")
+        logger.info(f"  Global settings: {list(global_settings.keys())}")
+
+        if not jobs:
+            error_msg = "No jobs found in configuration file"
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
 
         # Process each job
         for job_config in jobs:
             logger.info("\n" + "=" * 80)
             logger.info(f"PROCESSING JOB: {job_config.get('job_name', 'Unnamed')}")
             logger.info("=" * 80)
+
+            # Validate required fields
+            required_fields = ['s3_bucket', 'landing_loc', 'database_name', 'landing_table', 'archive_s3_path']
+            missing_fields = [field for field in required_fields if field not in job_config]
+
+            if missing_fields:
+                error_msg = f"Missing required fields in job config: {', '.join(missing_fields)}"
+                logger.error(f"❌ {error_msg}")
+                logger.error(f"Job config keys found: {list(job_config.keys())}")
+                raise Exception(error_msg)
 
             # Extract config
             s3_bucket = job_config['s3_bucket']
