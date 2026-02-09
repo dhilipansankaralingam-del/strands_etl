@@ -419,10 +419,15 @@ def move_folders_to_archive(bucket, folders, archive_path):
 
 def write_audit_record(bucket, table_name, audit_data):
     """
-    Write audit record to S3.
-    Format: Table | Folders | Files | File Count | Loaded Count | Validations | Timestamp
+    Write audit record to S3 in two formats:
+    1. Human-readable text format
+    2. Pipe-delimited format for table creation
     """
-    audit_key = f"audit/{table_name}/audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    current_time = datetime.now()
+    timestamp_str = current_time.strftime('%Y%m%d_%H%M%S')
+
+    # 1. Write human-readable audit record
+    audit_key = f"audit/{table_name}/audit_{timestamp_str}.txt"
 
     audit_content = f"""
 AUDIT RECORD
@@ -457,6 +462,75 @@ Status: {audit_data['status']}
         logger.info(f"✓ Audit record written: s3://{bucket}/{audit_key}")
     except Exception as e:
         logger.error(f"Error writing audit record: {str(e)}")
+
+    # 2. Write pipe-delimited audit record for table
+    # Partitioned by year/month/day for MSCK REPAIR support
+    year = current_time.strftime('%Y')
+    month = current_time.strftime('%m')
+    day = current_time.strftime('%d')
+
+    # Partitioned path: audit_table/year=YYYY/month=MM/day=DD/
+    partition_path = f"audit_table/year={year}/month={month}/day={day}"
+    pipe_delimited_key = f"{partition_path}/audit_{timestamp_str}.txt"
+
+    # Prepare pipe-delimited record
+    # Fields: table_name|job_name|job_run_id|folders|file_count|file_row_count|loaded_count|
+    #         count_match|validation_status|validation_details|load_timestamp|duration|status
+
+    # Convert folders list to comma-separated string
+    folders_str = ','.join(audit_data['folders'])
+
+    # Count match
+    count_match = 'PASS' if audit_data['file_row_count'] == audit_data['loaded_count'] else 'FAIL'
+
+    # Build pipe-delimited record
+    pipe_record = '|'.join([
+        str(audit_data['table_name']),
+        str(job_name),
+        str(job_run_id),
+        folders_str,
+        str(audit_data['file_count']),
+        str(audit_data['file_row_count']),
+        str(audit_data['loaded_count']),
+        count_match,
+        str(audit_data['validation_status']),
+        str(audit_data.get('validation_details', '')).replace('\n', ' ').replace('|', '_'),
+        str(audit_data['load_timestamp']),
+        str(audit_data.get('duration', 'N/A')),
+        str(audit_data['status'])
+    ])
+
+    # Add header if this is the first file in the partition (optional - helps with debugging)
+    # For production, you typically don't include headers in data files
+    header = '|'.join([
+        'table_name',
+        'job_name',
+        'job_run_id',
+        'folders',
+        'file_count',
+        'file_row_count',
+        'loaded_count',
+        'count_match',
+        'validation_status',
+        'validation_details',
+        'load_timestamp',
+        'duration',
+        'status'
+    ])
+
+    # Combine header and record (include header for first file or always for easier debugging)
+    pipe_content = f"{header}\n{pipe_record}"
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=pipe_delimited_key,
+            Body=pipe_content.encode('utf-8')
+        )
+        logger.info(f"✓ Pipe-delimited audit written: s3://{bucket}/{pipe_delimited_key}")
+        logger.info(f"  Partition: year={year}, month={month}, day={day}")
+    except Exception as e:
+        logger.error(f"Error writing pipe-delimited audit: {str(e)}")
 
 
 def main():
