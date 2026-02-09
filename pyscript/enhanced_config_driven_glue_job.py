@@ -252,9 +252,11 @@ def count_rows_in_csv_files(bucket, files_by_folder):
 
                 # Count lines (subtract 1 for header)
                 line_count = len(content.strip().split('\n'))
-                row_count = max(0, line_count - 1)  # Exclude header
+                # Use conditional instead of max() to avoid conflict with PySpark's max
+                row_count = line_count - 1 if line_count > 0 else 0
 
                 folder_rows += row_count
+                logger.info(f"    {key}: {row_count} rows")
             except Exception as e:
                 logger.error(f"Error counting rows in {file_path}: {str(e)}")
 
