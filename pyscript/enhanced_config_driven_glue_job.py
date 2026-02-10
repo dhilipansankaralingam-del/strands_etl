@@ -434,11 +434,13 @@ def move_folders_to_archive(bucket, folders, archive_path):
     logger.info(f"✓ All folders archived successfully")
 
 
-def write_audit_record(bucket, table_name, audit_data):
+def write_audit_record(bucket, table_name, audit_data, database_name):
     """
     Write audit record to S3 in two formats:
-    1. Human-readable text format
-    2. Pipe-delimited format for table creation
+    1. Human-readable text format (for manual review)
+    2. Parquet format (for querying via Athena/Glue)
+
+    Then runs MSCK REPAIR TABLE to discover new partitions
     """
     current_time = datetime.now()
     timestamp_str = current_time.strftime('%Y%m%d_%H%M%S')
@@ -476,23 +478,15 @@ Status: {audit_data['status']}
             Key=audit_key,
             Body=audit_content.encode('utf-8')
         )
-        logger.info(f"✓ Audit record written: s3://{bucket}/{audit_key}")
+        logger.info(f"✓ Human-readable audit written: s3://{bucket}/{audit_key}")
     except Exception as e:
-        logger.error(f"Error writing audit record: {str(e)}")
+        logger.error(f"Error writing text audit record: {str(e)}")
 
-    # 2. Write pipe-delimited audit record for table
+    # 2. Write Parquet audit record for table
     # Partitioned by year/month/day for MSCK REPAIR support
     year = current_time.strftime('%Y')
     month = current_time.strftime('%m')
     day = current_time.strftime('%d')
-
-    # Partitioned path: audit_table/year=YYYY/month=MM/day=DD/
-    partition_path = f"audit_table/year={year}/month={month}/day={day}"
-    pipe_delimited_key = f"{partition_path}/audit_{timestamp_str}.txt"
-
-    # Prepare pipe-delimited record
-    # Fields: table_name|job_name|job_run_id|folders|file_count|file_row_count|loaded_count|
-    #         count_match|validation_status|validation_details|load_timestamp|duration|status
 
     # Convert folders list to comma-separated string
     folders_str = ','.join(audit_data['folders'])
@@ -500,54 +494,84 @@ Status: {audit_data['status']}
     # Count match
     count_match = 'PASS' if audit_data['file_row_count'] == audit_data['loaded_count'] else 'FAIL'
 
-    # Build pipe-delimited record
-    pipe_record = '|'.join([
+    # Parse duration to seconds (handle both "N/A" and numeric values)
+    duration_str = str(audit_data.get('duration', 'N/A'))
+    if duration_str == 'N/A':
+        duration_seconds = 0.0
+    else:
+        # Extract numeric part (e.g., "123.45 seconds" -> 123.45)
+        try:
+            duration_seconds = float(duration_str.split()[0])
+        except:
+            duration_seconds = 0.0
+
+    # Create DataFrame with audit data
+    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType, DoubleType
+
+    audit_schema = StructType([
+        StructField("table_name", StringType(), False),
+        StructField("job_name", StringType(), False),
+        StructField("job_run_id", StringType(), False),
+        StructField("folders", StringType(), True),
+        StructField("file_count", IntegerType(), True),
+        StructField("file_row_count", LongType(), True),
+        StructField("loaded_count", LongType(), True),
+        StructField("count_match", StringType(), True),
+        StructField("validation_status", StringType(), True),
+        StructField("validation_details", StringType(), True),
+        StructField("load_timestamp", StringType(), True),
+        StructField("duration_seconds", DoubleType(), True),
+        StructField("status", StringType(), True)
+    ])
+
+    audit_row = [(
         str(audit_data['table_name']),
         str(job_name),
         str(job_run_id),
         folders_str,
-        str(audit_data['file_count']),
-        str(audit_data['file_row_count']),
-        str(audit_data['loaded_count']),
+        int(audit_data['file_count']),
+        int(audit_data['file_row_count']),
+        int(audit_data['loaded_count']),
         count_match,
         str(audit_data['validation_status']),
         str(audit_data.get('validation_details', '')).replace('\n', ' ').replace('|', '_'),
         str(audit_data['load_timestamp']),
-        str(audit_data.get('duration', 'N/A')),
+        duration_seconds,
         str(audit_data['status'])
-    ])
+    )]
 
-    # Add header if this is the first file in the partition (optional - helps with debugging)
-    # For production, you typically don't include headers in data files
-    header = '|'.join([
-        'table_name',
-        'job_name',
-        'job_run_id',
-        'folders',
-        'file_count',
-        'file_row_count',
-        'loaded_count',
-        'count_match',
-        'validation_status',
-        'validation_details',
-        'load_timestamp',
-        'duration',
-        'status'
-    ])
+    audit_df = spark.createDataFrame(audit_row, schema=audit_schema)
 
-    # Combine header and record (include header for first file or always for easier debugging)
-    pipe_content = f"{header}\n{pipe_record}"
+    # Add partition columns
+    audit_df = audit_df.withColumn('year', lit(year))
+    audit_df = audit_df.withColumn('month', lit(month))
+    audit_df = audit_df.withColumn('day', lit(day))
+
+    # Write as Parquet with partitioning
+    partition_path = f"s3://{bucket}/audit_table/"
 
     try:
-        s3_client.put_object(
-            Bucket=bucket,
-            Key=pipe_delimited_key,
-            Body=pipe_content.encode('utf-8')
-        )
-        logger.info(f"✓ Pipe-delimited audit written: s3://{bucket}/{pipe_delimited_key}")
+        audit_df.write \
+            .mode('append') \
+            .partitionBy('year', 'month', 'day') \
+            .parquet(partition_path)
+
+        logger.info(f"✓ Parquet audit written: {partition_path}")
         logger.info(f"  Partition: year={year}, month={month}, day={day}")
     except Exception as e:
-        logger.error(f"Error writing pipe-delimited audit: {str(e)}")
+        logger.error(f"Error writing Parquet audit: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+    # 3. Run MSCK REPAIR TABLE to discover new partitions
+    try:
+        logger.info("Running MSCK REPAIR TABLE to discover new partitions...")
+        repair_query = f"MSCK REPAIR TABLE glue_catalog.{database_name}.etl_audit_log"
+        spark.sql(repair_query)
+        logger.info(f"✓ MSCK REPAIR completed successfully")
+    except Exception as e:
+        logger.warning(f"MSCK REPAIR failed (table may not exist yet): {str(e)}")
+        logger.warning(f"  Create table using: sql/create_audit_table_parquet.sql")
 
 
 ################################################################################
@@ -1275,7 +1299,7 @@ def main():
                 'status': 'SUCCESS'
             }
 
-            write_audit_record(s3_bucket, table_name, audit_data)
+            write_audit_record(s3_bucket, table_name, audit_data, database_name)
 
             # STEP 12: Move files to archive
             logger.info("\n[STEP 12] Moving files to archive...")

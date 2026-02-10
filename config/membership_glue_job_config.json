@@ -1,0 +1,89 @@
+{
+  "jobs": [
+    {
+      "job_name": "Membership Staging Load",
+      "s3_bucket": "staging",
+      "landing_loc": "landing/mrd_prd_dtl__ct/",
+      "file_pattern_name": "*.csv",
+      "database_name": "aew_membership",
+      "landing_table": "mrd_mbr_prd_dtl__ct",
+      "archive_s3_path": "archive/mrd_mbr_prd_dtl__ct/",
+      "temp_s3_path": "temp/customers/",
+
+      "validation_queries": [
+        {
+          "name": "Check for NULL customer IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE length(fk_mhh_acl_club_c) < 3 or length(fk_mhh_mbrshp_n) < 6",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Club + Membership is a required field"
+        },
+        {
+          "name": "Check for Product codes",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE length(fk_mpr_prd_c) < 2",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Check for Product codes"
+        }
+      ]
+    },
+    {
+      "job_name": "Membership Info Staging Load",
+      "s3_bucket": "staging",
+      "landing_loc": "landing/mrd_mbr_info__ct/",
+      "file_pattern_name": "*.csv",
+      "database_name": "aew_membership",
+      "landing_table": "mrd_mbr_info__ct",
+      "archive_s3_path": "archive/mrd_mbr_info__ct/",
+      "temp_s3_path": "temp/customers/",
+
+      "validation_queries": [
+        {
+          "name": "Check for NULL customer IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE length(fk_mhh_acl_club_c) < 3 or length(fk_mhh_mbrshp_n) < 6",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Club + Membership is a required field"
+        },
+        {
+          "name": "Check for Effective date",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE length(eff_d) < 9",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Check for Effective codes"
+        }
+      ]
+    }
+  ],
+
+  "global_settings": {
+    "folder_age_threshold_minutes": 59,
+    "fail_on_no_files": true,
+    "fail_on_count_mismatch": true,
+    "archive_after_success_only": true,
+    "enable_fail_file_check": true,
+    "audit_enabled": true,
+    "audit_s3_prefix": "audit/",
+
+    "health_check": {
+      "enabled": true,
+      "trigger_hour": 21,
+      "database": "aew_membership",
+      "audit_table": "etl_audit_log",
+      "athena_output_location": "s3://staging/athena-results/",
+
+      "email": {
+        "sender": "etl-alerts@company.com",
+        "recipients": [
+          "data-team@company.com",
+          "membership-team@company.com"
+        ],
+        "smtp_host": "10.19.10.29",
+        "smtp_port": 25,
+        "use_tls": true,
+        "username": "",
+        "password": ""
+      }
+    }
+  }
+}
