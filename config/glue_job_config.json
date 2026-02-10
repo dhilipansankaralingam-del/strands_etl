@@ -156,6 +156,27 @@
     "archive_after_success_only": true,
     "enable_fail_file_check": true,
     "audit_enabled": true,
-    "audit_s3_prefix": "audit/"
+    "audit_s3_prefix": "audit/",
+
+    "health_check": {
+      "enabled": true,
+      "trigger_hour": 21,
+      "database": "etl_demo_db",
+      "audit_table": "etl_audit_log",
+      "athena_output_location": "s3://your-bucket-name/athena-results/",
+
+      "email": {
+        "sender": "master@ace.aaa.com",
+        "recipients": [
+          "email@ab.com",
+          "data-team@company.com"
+        ],
+        "smtp_host": "10.19.10.29",
+        "smtp_port": 25,
+        "use_tls": true,
+        "username": "",
+        "password": ""
+      }
+    }
   }
 }
