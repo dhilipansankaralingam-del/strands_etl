@@ -170,6 +170,123 @@ def delete_fail_file(bucket, table_name):
         logger.warning(f"Could not delete FAIL file (may not exist): {str(e)}")
 
 
+def get_current_run_hour():
+    """
+    Get current run hour identifier (YYYY-MM-DD-HH format).
+    Used to group jobs that should run together in the same hour.
+    """
+    return datetime.now().strftime('%Y-%m-%d-%H')
+
+
+def check_job_checkpoint(bucket, table_name, run_hour):
+    """
+    Check if a job already completed successfully for this run hour.
+
+    Returns:
+        True if checkpoint exists (job already ran successfully this hour)
+        False if no checkpoint (job needs to run)
+    """
+    checkpoint_key = f"checkpoints/{run_hour}/{table_name}.SUCCESS"
+
+    try:
+        s3_client.head_object(Bucket=bucket, Key=checkpoint_key)
+
+        # Checkpoint exists - job already completed this hour
+        logger.info(f"✓ Checkpoint found: s3://{bucket}/{checkpoint_key}")
+        logger.info(f"  Job '{table_name}' already completed successfully for hour {run_hour}")
+        return True
+
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            # No checkpoint - job needs to run
+            logger.info(f"No checkpoint found for {table_name} (hour: {run_hour})")
+            return False
+        else:
+            logger.error(f"Error checking checkpoint: {str(e)}")
+            raise
+
+
+def create_job_checkpoint(bucket, table_name, run_hour, audit_data):
+    """
+    Create checkpoint file indicating job completed successfully.
+    This allows restart to skip already-completed jobs within same hour.
+    """
+    checkpoint_key = f"checkpoints/{run_hour}/{table_name}.SUCCESS"
+
+    # Store some metadata in checkpoint for debugging
+    checkpoint_content = f"""
+JOB CHECKPOINT
+==============
+Table: {table_name}
+Run Hour: {run_hour}
+Completed: {datetime.now().isoformat()}
+Job Run ID: {job_run_id}
+Files Processed: {audit_data['file_count']}
+Rows Loaded: {audit_data['loaded_count']}
+Status: {audit_data['status']}
+
+This checkpoint indicates the job completed successfully.
+If you restart the job within the same hour, this job will be skipped.
+Checkpoints are automatically cleaned up after 48 hours.
+"""
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=checkpoint_key,
+            Body=checkpoint_content.encode('utf-8')
+        )
+        logger.info(f"✓ Created checkpoint: s3://{bucket}/{checkpoint_key}")
+        logger.info(f"  Job '{table_name}' can now be skipped on restart for hour {run_hour}")
+    except Exception as e:
+        logger.error(f"Error creating checkpoint: {str(e)}")
+        # Don't fail job if checkpoint creation fails - it's just an optimization
+
+
+def cleanup_old_checkpoints(bucket, hours_to_keep=48):
+    """
+    Clean up checkpoints older than specified hours.
+    Run this periodically to prevent S3 clutter.
+
+    Args:
+        bucket: S3 bucket name
+        hours_to_keep: Keep checkpoints for this many hours (default: 48)
+    """
+    try:
+        logger.info(f"Cleaning up checkpoints older than {hours_to_keep} hours...")
+
+        cutoff_time = datetime.now() - timedelta(hours=hours_to_keep)
+        cutoff_hour = cutoff_time.strftime('%Y-%m-%d-%H')
+
+        # List all checkpoint folders
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket, Prefix='checkpoints/')
+
+        deleted_count = 0
+        for page in pages:
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+
+                # Extract hour from key: checkpoints/YYYY-MM-DD-HH/table.SUCCESS
+                parts = key.split('/')
+                if len(parts) >= 2:
+                    hour_str = parts[1]
+
+                    # Compare hour strings (works because format is sortable)
+                    if hour_str < cutoff_hour:
+                        s3_client.delete_object(Bucket=bucket, Key=key)
+                        deleted_count += 1
+
+        if deleted_count > 0:
+            logger.info(f"✓ Cleaned up {deleted_count} old checkpoint(s)")
+        else:
+            logger.info(f"✓ No old checkpoints to clean up")
+
+    except Exception as e:
+        logger.warning(f"Error cleaning up checkpoints: {str(e)}")
+        # Don't fail job if cleanup fails
+
+
 def get_folders_older_than_59_minutes(bucket, prefix):
     """
     Get subfolders that are older than 59 minutes.
@@ -1145,10 +1262,26 @@ def main():
             logger.error(f"❌ {error_msg}")
             raise Exception(error_msg)
 
+        # Get current run hour for checkpoint system
+        current_run_hour = get_current_run_hour()
+        logger.info(f"\nCurrent run hour: {current_run_hour}")
+        logger.info("Jobs already completed this hour will be skipped automatically")
+
+        # Track job execution stats
+        jobs_total = len(jobs)
+        jobs_skipped = 0
+        jobs_processed = 0
+        jobs_failed = 0
+        failed_job_names = []
+
+        # Check if we should continue on error or fail fast
+        continue_on_error = global_settings.get('continue_on_error', False)
+
         # Process each job
-        for job_config in jobs:
+        for job_index, job_config in enumerate(jobs, 1):
+            try:
             logger.info("\n" + "=" * 80)
-            logger.info(f"PROCESSING JOB: {job_config.get('job_name', 'Unnamed')}")
+            logger.info(f"PROCESSING JOB {job_index}/{jobs_total}: {job_config.get('job_name', 'Unnamed')}")
             logger.info("=" * 80)
 
             # Validate required fields
@@ -1173,6 +1306,20 @@ def main():
             logger.info(f"Table: {table_name}")
             logger.info(f"Landing location: s3://{s3_bucket}/{landing_loc}")
             logger.info(f"Archive path: s3://{s3_bucket}/{archive_path}")
+
+            # CHECKPOINT CHECK: Skip if job already completed this hour
+            logger.info(f"\n[CHECKPOINT CHECK] Checking if job already completed for hour {current_run_hour}...")
+            if check_job_checkpoint(s3_bucket, table_name, current_run_hour):
+                logger.info(f"⏭️  SKIPPING JOB: Already completed successfully this hour")
+                logger.info(f"   To re-run, delete: s3://{s3_bucket}/checkpoints/{current_run_hour}/{table_name}.SUCCESS")
+                logger.info("=" * 80)
+                jobs_skipped += 1
+                continue
+
+            logger.info("✓ No checkpoint found - proceeding with job execution")
+
+            # Track that we're processing this job
+            jobs_processed += 1
 
             # STEP 1: Check for FAIL file
             logger.info("\n[STEP 1] Checking for FAIL file...")
@@ -1309,13 +1456,66 @@ def main():
             logger.info("\n[STEP 13] Cleaning up FAIL file...")
             delete_fail_file(s3_bucket, table_name)
 
+            # STEP 14: Create checkpoint for successful completion
+            logger.info("\n[STEP 14] Creating checkpoint...")
+            create_job_checkpoint(s3_bucket, table_name, current_run_hour, audit_data)
+
+                logger.info("\n" + "=" * 80)
+                logger.info(f"✓ JOB COMPLETED SUCCESSFULLY")
+                logger.info("=" * 80)
+                logger.info(f"  Files processed: {len(all_csv_files)}")
+                logger.info(f"  Rows loaded: {loaded_count}")
+                logger.info(f"  Validations passed: {len(validation_queries)}")
+                logger.info(f"  Duration: {duration:.2f} seconds")
+
+            except Exception as job_error:
+                # Job failed
+                jobs_failed += 1
+                job_name_str = job_config.get('job_name', table_name if 'table_name' in locals() else 'Unknown')
+                failed_job_names.append(job_name_str)
+
+                logger.error(f"\n{'='*80}")
+                logger.error(f"❌ JOB {job_index}/{jobs_total} FAILED: {job_name_str}")
+                logger.error(f"{'='*80}")
+                logger.error(f"Error: {str(job_error)}")
+                logger.error(f"{'='*80}")
+
+                if continue_on_error:
+                    logger.warning(f"⚠️  Continuing to next job (continue_on_error=true)")
+                    logger.warning(f"   This job will re-run on restart (no checkpoint created)")
+                    continue
+                else:
+                    logger.error(f"❌ Stopping execution (continue_on_error=false)")
+                    logger.error(f"   On restart, completed jobs will be skipped via checkpoints")
+                    raise
+
+        # Job execution complete - print summary
+        logger.info("\n" + "=" * 80)
+        logger.info("JOB EXECUTION SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Run Hour: {current_run_hour}")
+        logger.info(f"Total Jobs in Config: {jobs_total}")
+        logger.info(f"Jobs Skipped (already completed this hour): {jobs_skipped}")
+        logger.info(f"Jobs Processed: {jobs_processed}")
+        logger.info(f"Jobs Failed: {jobs_failed}")
+
+        if jobs_skipped > 0:
+            logger.info(f"\n💡 TIP: {jobs_skipped} job(s) were skipped because they already completed this hour")
+            logger.info(f"    To re-run skipped jobs, delete checkpoints: s3://{bucket_name}/checkpoints/{current_run_hour}/")
+
+        if jobs_failed > 0:
+            logger.error(f"\n⚠️  WARNING: {jobs_failed} job(s) failed")
+            logger.error(f"    Failed jobs: {', '.join(failed_job_names)}")
+            logger.info(f"    When you restart, successful jobs will be skipped automatically")
+            logger.info(f"    Only failed jobs will re-run (if retried within same hour)")
+            logger.info(f"    To force re-run all jobs, delete: s3://{bucket_name}/checkpoints/{current_run_hour}/")
+
+        # Clean up old checkpoints (keep last 48 hours)
+        if global_settings.get('cleanup_old_checkpoints', True):
             logger.info("\n" + "=" * 80)
-            logger.info(f"✓ JOB COMPLETED SUCCESSFULLY")
+            logger.info("CHECKPOINT CLEANUP")
             logger.info("=" * 80)
-            logger.info(f"  Files processed: {len(all_csv_files)}")
-            logger.info(f"  Rows loaded: {loaded_count}")
-            logger.info(f"  Validations passed: {len(validation_queries)}")
-            logger.info(f"  Duration: {duration:.2f} seconds")
+            cleanup_old_checkpoints(bucket_name, hours_to_keep=48)
 
         # After all jobs complete, check if we should run health check
         health_check_config = global_settings.get('health_check')
@@ -1324,12 +1524,33 @@ def main():
             logger.info("Conditions met for daily health check")
             run_health_check(health_check_config, bucket_name)
 
+        # Final status
+        logger.info("\n" + "=" * 80)
+        if jobs_failed == 0:
+            logger.info("✅ ALL JOBS COMPLETED SUCCESSFULLY")
+            logger.info("=" * 80)
+        else:
+            logger.error(f"⚠️  COMPLETED WITH {jobs_failed} FAILURE(S)")
+            logger.error("=" * 80)
+
+            # If continue_on_error was true, we processed all jobs but some failed
+            # Raise exception now so Glue job is marked as failed
+            if continue_on_error:
+                raise Exception(f"{jobs_failed} job(s) failed: {', '.join(failed_job_names)}")
+
     except Exception as e:
         logger.error(f"\n{'='*80}")
-        logger.error(f"❌ JOB FAILED")
+        logger.error(f"❌ JOB EXECUTION FAILED")
         logger.error(f"{'='*80}")
         logger.error(f"Error: {str(e)}")
         logger.error(f"{'='*80}")
+
+        # Print restart instructions
+        logger.info(f"\n💡 RESTART INSTRUCTIONS:")
+        logger.info(f"   When you restart this job, it will automatically skip jobs")
+        logger.info(f"   that completed successfully this hour ({current_run_hour})")
+        logger.info(f"   Only failed jobs will re-run.")
+
         raise
     finally:
         job.commit()
