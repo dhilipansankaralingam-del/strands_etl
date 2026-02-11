@@ -1,0 +1,466 @@
+{
+  "_description": "Enterprise Sales Analytics - Complex Multi-Source Pipeline",
+  "_job": "complex_enterprise_sales",
+  "_target": "bd_work.pps_jss_test",
+  "_source_count": 21,
+
+  "job_name": "complex_enterprise_sales",
+  "job_description": "Enterprise sales analytics joining 21 source tables across multiple domains",
+
+  "script": {
+    "path": "s3://etl-framework-scripts/pyspark/complex_enterprise_sales.py",
+    "local_path": "scripts/pyspark/complex_enterprise_sales.py",
+    "type": "pyspark"
+  },
+
+  "job_arguments": {
+    "--source_database": "multiple",
+    "--target_database": "bd_work",
+    "--target_table": "pps_jss_test",
+    "--run_mode": "full",
+    "--partition_date": "{{ ds }}"
+  },
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr", "eks"],
+    "auto_fallback_on_error": true,
+
+    "_comment_conversion": "Enable automatic platform conversion based on data size",
+    "auto_convert": {
+      "enabled": true,
+      "convert_to_emr_threshold_gb": 100,
+      "convert_to_eks_threshold_gb": 500,
+      "optimize_for": "cost",
+      "use_karpenter": true,
+      "use_spot_instances": true,
+      "use_graviton": true
+    }
+  },
+
+  "smart_allocation": {
+    "enabled": true,
+    "auto_apply": true,
+    "consider_weekday_weekend": true,
+    "consider_month_end": true,
+    "consider_data_trends": true,
+
+    "_comment": "Weekend runs are lighter due to no business activity",
+    "weekend_scale_factor": 0.6,
+    "month_end_scale_factor": 1.5,
+    "quarter_end_scale_factor": 2.0
+  },
+
+  "source_sizing": {
+    "_comment": "How source data sizes are determined",
+    "mode": "auto_detect",
+
+    "sizing_modes": {
+      "auto_detect": "Query Glue Catalog / S3 for actual sizes on first run",
+      "hardcoded": "Use estimated_size_gb values defined below",
+      "hybrid": "Use hardcoded if provided, else auto-detect"
+    },
+
+    "delta_mode": {
+      "enabled": true,
+      "detect_partition_size": true,
+      "partition_column": "process_date",
+      "_comment": "For delta runs, only count today's partition size, not full table"
+    },
+
+    "cache_sizes": true,
+    "cache_ttl_hours": 24,
+    "size_cache_path": "data/agent_store/source_sizes.json"
+  },
+
+  "glue_config": {
+    "glue_version": "4.0",
+    "worker_type": "G.2X",
+    "number_of_workers": 20,
+    "timeout_minutes": 360,
+    "max_retries": 2,
+
+    "_comment": "These values may be overridden by smart_allocation",
+    "_override_note": "If smart_allocation.enabled=true, workers/type will be dynamically set",
+
+    "spark_configs": {
+      "spark.sql.adaptive.enabled": "true",
+      "spark.sql.adaptive.coalescePartitions.enabled": "true",
+      "spark.sql.adaptive.skewJoin.enabled": "true",
+      "spark.sql.shuffle.partitions": "400",
+      "spark.sql.broadcastTimeout": "600",
+      "spark.dynamicAllocation.enabled": "true"
+    }
+  },
+
+  "emr_config": {
+    "_comment": "Used when auto_convert triggers EMR conversion",
+    "release_label": "emr-6.15.0",
+    "instance_type": "m5.2xlarge",
+    "instance_count": 10,
+    "use_spot": true,
+    "spot_bid_percentage": 80,
+    "applications": ["Spark", "Hadoop"],
+    "spark_configs": {
+      "spark.executor.memory": "12g",
+      "spark.executor.cores": "4",
+      "spark.sql.shuffle.partitions": "400",
+      "spark.dynamicAllocation.enabled": "true"
+    }
+  },
+
+  "eks_config": {
+    "_comment": "Used when auto_convert triggers EKS conversion (very large data)",
+    "cluster_name": "enterprise-etl-eks",
+    "namespace": "spark-jobs",
+    "use_karpenter": true,
+    "use_spot": true,
+    "use_graviton": true,
+    "executor_instances": 20,
+    "executor_memory": "12g",
+    "executor_cores": 4,
+    "node_selector": {
+      "karpenter.sh/provisioner-name": "spark-workers"
+    }
+  },
+
+  "source_tables": [
+    {
+      "_comment": "FINANCE DOMAIN",
+      "database": "finance_accounting_master",
+      "table": "autopay_products_master",
+      "full_name": "finance_accounting_master.autopay_products_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "is_dimension": true,
+      "broadcast": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "financial_services_datalake",
+      "table": "batch_prescreen_output",
+      "full_name": "financial_services_datalake.batch_prescreen_output",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "process_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "DIGITAL/CLICKSTREAM DOMAIN",
+      "database": "digital_master",
+      "table": "clickstream_hits_master",
+      "full_name": "digital_master.clickstream_hits_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "hit_date",
+      "is_fact": true,
+      "high_volume": true,
+      "_note": "Clickstream is typically very large - may trigger EMR conversion",
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "CUSTOMER DOMAIN",
+      "database": "customer_master",
+      "table": "customer_product_profile_history_master",
+      "full_name": "customer_master.customer_product_profile_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "snapshot_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "customer_staging",
+      "table": "cpm_drv_tbl",
+      "full_name": "customer_staging.cpm_drv_tbl",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "is_staging": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "customer_staging",
+      "table": "disaster_zipcodes",
+      "full_name": "customer_staging.disaster_zipcodes",
+      "format": "parquet",
+      "estimated_size_gb": 0.01,
+      "is_dimension": true,
+      "broadcast": true,
+      "refresh_frequency": "weekly"
+    },
+
+    {
+      "_comment": "DISCOUNTS DOMAIN",
+      "database": "discounts_master",
+      "table": "discounts_transactions",
+      "full_name": "discounts_master.discounts_transactions",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "transaction_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "MARKETING DOMAIN",
+      "database": "marketing_master",
+      "table": "email_transactions",
+      "full_name": "marketing_master.email_transactions",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "send_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "marketing_master",
+      "table": "marketing_product_profile_history_master",
+      "full_name": "marketing_master.marketing_product_profile_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "snapshot_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "CLAIMS DOMAIN",
+      "database": "claims_master",
+      "table": "enterprise_claims_master",
+      "full_name": "claims_master.enterprise_claims_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "claim_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "GIS/REFERENCE DOMAIN",
+      "database": "ace_common",
+      "table": "gis_lodge_name_assigned_zips",
+      "full_name": "ace_common.gis_lodge_name_assigned_zips",
+      "format": "parquet",
+      "estimated_size_gb": 0.05,
+      "is_dimension": true,
+      "broadcast": true,
+      "refresh_frequency": "monthly"
+    },
+    {
+      "database": "ace_common",
+      "table": "gis_national_zip_codes",
+      "full_name": "ace_common.gis_national_zip_codes",
+      "format": "parquet",
+      "estimated_size_gb": 0.1,
+      "is_dimension": true,
+      "broadcast": true,
+      "refresh_frequency": "monthly"
+    },
+
+    {
+      "_comment": "INSURANCE DOMAIN - AUTO",
+      "database": "insurance_master",
+      "table": "auto_policy_driver_master",
+      "full_name": "insurance_master.auto_policy_driver_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "effective_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "insurance_master",
+      "table": "auto_policy_vehicle_master",
+      "full_name": "insurance_master.auto_policy_vehicle_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "effective_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "insurance_master",
+      "table": "policy_term_master",
+      "full_name": "insurance_master.policy_term_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "is_dimension": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "INSURANCE DOMAIN - HOME",
+      "database": "insurance_master",
+      "table": "home_policy_property_master",
+      "full_name": "insurance_master.home_policy_property_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "effective_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "LIFE INSURANCE DOMAIN",
+      "database": "life_insurance_master",
+      "table": "life_party_history_master",
+      "full_name": "life_insurance_master.life_party_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "snapshot_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "life_insurance_master",
+      "table": "life_policy_history_master",
+      "full_name": "life_insurance_master.life_policy_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "snapshot_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+    {
+      "database": "life_insurance_master",
+      "table": "policy_transaction_history_master",
+      "full_name": "life_insurance_master.policy_transaction_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "transaction_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "CRM DOMAIN",
+      "database": "crm_master",
+      "table": "lead_history_master",
+      "full_name": "crm_master.lead_history_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "lead_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    },
+
+    {
+      "_comment": "MEMBERSHIP DOMAIN",
+      "database": "membership_master",
+      "table": "membership_sales_master",
+      "full_name": "membership_master.membership_sales_master",
+      "format": "parquet",
+      "estimated_size_gb": null,
+      "auto_detect_size": true,
+      "partition_column": "sale_date",
+      "is_fact": true,
+      "refresh_frequency": "daily"
+    }
+  ],
+
+  "target_tables": [
+    {
+      "database": "bd_work",
+      "table": "pps_jss_test",
+      "full_name": "bd_work.pps_jss_test",
+      "format": "parquet",
+      "location": "s3://enterprise-data/bd_work/pps_jss_test/",
+      "partition_by": ["process_year", "process_month"],
+      "write_mode": "overwrite_partitions",
+      "enable_statistics": true
+    }
+  ],
+
+  "complexity_analysis": {
+    "enabled": true,
+    "_comment": "Analyze code complexity to adjust resources",
+    "factors": {
+      "join_count": 21,
+      "join_types": ["inner", "left", "broadcast"],
+      "aggregation_count": 15,
+      "window_functions": true,
+      "udf_count": 0,
+      "estimated_shuffle_intensive": true
+    },
+    "complexity_multiplier": 1.5
+  },
+
+  "data_quality": {
+    "enabled": true,
+    "fail_on_critical": true,
+
+    "natural_language_rules": [
+      "customer_id should not be null",
+      "policy_number should not be null",
+      "effective_date should not be null",
+      "premium_amount should be positive when present"
+    ],
+
+    "sql_rules": [
+      {
+        "id": "TARGET_ROW_COUNT",
+        "description": "Target should have reasonable row count",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE process_date = current_date",
+        "threshold": 1000,
+        "severity": "warning"
+      }
+    ]
+  },
+
+  "compliance": {
+    "enabled": true,
+    "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"],
+    "pii_columns": [
+      "customer_name", "email", "phone", "ssn", "address",
+      "driver_license", "date_of_birth", "credit_card"
+    ],
+    "mask_pii": true,
+    "mask_strategy": "hash"
+  },
+
+  "learning": {
+    "enabled": true,
+    "store_history": true,
+    "detect_anomalies": true,
+    "predict_failures": true,
+    "update_baseline": true,
+    "trend_window_days": 30
+  },
+
+  "schedule": {
+    "enabled": true,
+    "cron_expression": "0 5 * * *",
+    "timezone": "America/New_York",
+    "_comment": "Runs at 5 AM ET daily"
+  },
+
+  "notifications": {
+    "slack_enabled": true,
+    "slack_channel": "#enterprise-etl",
+    "email_enabled": true,
+    "email_recipients": ["data-engineering@company.com"],
+    "on_failure": true,
+    "on_success": true,
+    "include_metrics": true
+  }
+}

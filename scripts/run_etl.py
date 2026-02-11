@@ -43,10 +43,14 @@ from framework.agents.workload_assessment_agent import WorkloadAssessmentAgent
 from framework.agents.learning_agent import LearningAgent
 from framework.agents.recommendation_agent import RecommendationAgent
 from framework.agents.resource_allocator_agent import ResourceAllocatorAgent
+from framework.agents.platform_conversion_agent import PlatformConversionAgent, Platform
 from framework.execution.aws_job_executor import AWSJobExecutor, validate_and_execute
 
 # Import local storage for agent learning
 from framework.storage import get_store, RunCollector
+
+# Import source sizing
+from framework.sizing import SourceSizeDetector
 
 
 @dataclass
@@ -971,6 +975,110 @@ class ETLOrchestrator:
         """Execute the actual ETL job using AWS Job Executor."""
         platform = self.config.get('platform', {}).get('primary', 'glue')
         ctx.platform = platform
+
+        # Source Size Detection (if enabled)
+        source_sizing_enabled = self.config.get('source_sizing', {}).get('mode') in ['auto_detect', 'hybrid']
+        auto_convert_enabled = self.config.get('platform', {}).get('auto_convert', {}).get('enabled', False)
+
+        if (source_sizing_enabled or auto_convert_enabled) and not self.dry_run:
+            print("\n  Running Source Size Detection...")
+            try:
+                size_detector = SourceSizeDetector(self.config)
+
+                # Determine if delta mode
+                delta_mode = self.config.get('source_sizing', {}).get('delta_mode', {}).get('enabled', False)
+
+                sizing_result = size_detector.detect_all_sizes(
+                    self.config,
+                    run_date=datetime.now(),
+                    delta_mode=delta_mode
+                )
+
+                # Display sizing results
+                print(f"    Total Size: {sizing_result.total_size_gb:.2f} GB")
+                if delta_mode:
+                    print(f"    Delta Size: {sizing_result.delta_size_gb:.2f} GB")
+                print(f"    Effective Size: {sizing_result.sizing_details['effective_size_gb']:.2f} GB")
+                print(f"    Weekend: {'Yes' if sizing_result.is_weekend else 'No'}")
+                print(f"    Month End: {'Yes' if sizing_result.is_month_end else 'No'}")
+                print(f"    Tables Detected: {len(sizing_result.tables)}")
+
+                # Store sizing in context
+                ctx.metrics['source_sizing'] = {
+                    'total_size_gb': sizing_result.total_size_gb,
+                    'delta_size_gb': sizing_result.delta_size_gb,
+                    'effective_size_gb': sizing_result.sizing_details['effective_size_gb'],
+                    'is_weekend': sizing_result.is_weekend
+                }
+
+                # Platform Auto-Conversion (if enabled)
+                if auto_convert_enabled:
+                    auto_convert = self.config.get('platform', {}).get('auto_convert', {})
+                    emr_threshold = auto_convert.get('convert_to_emr_threshold_gb', 100)
+                    eks_threshold = auto_convert.get('convert_to_eks_threshold_gb', 500)
+
+                    effective_size = sizing_result.sizing_details['effective_size_gb']
+
+                    if effective_size > eks_threshold:
+                        print(f"\n  🔄 AUTO-CONVERSION: Glue → EKS (size: {effective_size:.0f} GB > {eks_threshold} GB threshold)")
+                        platform = "eks"
+                        ctx.platform = "eks"
+
+                        # Run platform conversion for config
+                        converter = PlatformConversionAgent()
+                        glue_config = {
+                            "Name": ctx.job_name,
+                            "NumberOfWorkers": self.config.get('glue_config', {}).get('number_of_workers', 20),
+                            "WorkerType": self.config.get('glue_config', {}).get('worker_type', 'G.2X'),
+                            "GlueVersion": self.config.get('glue_config', {}).get('glue_version', '4.0')
+                        }
+                        conversion = converter.convert(
+                            glue_config, Platform.GLUE, Platform.EKS,
+                            auto_convert.get('optimize_for', 'cost')
+                        )
+                        if conversion.success:
+                            print(f"    ✓ Generated EKS config: {conversion.resource_mapping.target_config}")
+                            ctx.metrics['platform_conversion'] = {
+                                'from': 'glue',
+                                'to': 'eks',
+                                'reason': f'size {effective_size:.0f} GB > {eks_threshold} GB',
+                                'cost_savings': conversion.cost_comparison.get('savings', 0)
+                            }
+
+                    elif effective_size > emr_threshold:
+                        print(f"\n  🔄 AUTO-CONVERSION: Glue → EMR (size: {effective_size:.0f} GB > {emr_threshold} GB threshold)")
+                        platform = "emr"
+                        ctx.platform = "emr"
+
+                        # Run platform conversion for config
+                        converter = PlatformConversionAgent()
+                        glue_config = {
+                            "Name": ctx.job_name,
+                            "NumberOfWorkers": self.config.get('glue_config', {}).get('number_of_workers', 20),
+                            "WorkerType": self.config.get('glue_config', {}).get('worker_type', 'G.2X'),
+                            "GlueVersion": self.config.get('glue_config', {}).get('glue_version', '4.0')
+                        }
+                        conversion = converter.convert(
+                            glue_config, Platform.GLUE, Platform.EMR,
+                            auto_convert.get('optimize_for', 'cost')
+                        )
+                        if conversion.success:
+                            print(f"    ✓ Generated EMR config: {conversion.resource_mapping.target_config}")
+                            ctx.metrics['platform_conversion'] = {
+                                'from': 'glue',
+                                'to': 'emr',
+                                'reason': f'size {effective_size:.0f} GB > {emr_threshold} GB',
+                                'cost_savings': conversion.cost_comparison.get('savings', 0)
+                            }
+                    else:
+                        print(f"    ✓ Staying on Glue (size: {effective_size:.0f} GB within threshold)")
+
+                if sizing_result.warnings:
+                    for warning in sizing_result.warnings[:3]:
+                        print(f"    ⚠ {warning}")
+
+            except Exception as e:
+                print(f"    ⚠ Size detection failed: {str(e)} - using config values")
 
         # Smart Resource Allocation (if enabled)
         smart_allocation_enabled = self.config.get('smart_allocation', {}).get('enabled', True)
