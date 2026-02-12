@@ -44,6 +44,7 @@ from framework.agents.learning_agent import LearningAgent
 from framework.agents.recommendation_agent import RecommendationAgent
 from framework.agents.resource_allocator_agent import ResourceAllocatorAgent
 from framework.agents.platform_conversion_agent import PlatformConversionAgent, Platform
+from framework.agents.code_conversion_agent import CodeConversionAgent, SourcePlatform, TargetPlatform
 from framework.execution.aws_job_executor import AWSJobExecutor, validate_and_execute
 
 # Import local storage for agent learning
@@ -1079,6 +1080,86 @@ class ETLOrchestrator:
 
             except Exception as e:
                 print(f"    ⚠ Size detection failed: {str(e)} - using config values")
+
+        # Code Conversion (if enabled and platform changed)
+        code_conversion_config = self.config.get('platform', {}).get('code_conversion', {})
+        code_conversion_enabled = code_conversion_config.get('enabled') in ('Y', 'y', True, 'true', 'True')
+
+        if code_conversion_enabled and platform != 'glue' and not self.dry_run:
+            print(f"\n  Running PySpark Code Conversion (Glue → {platform.upper()})...")
+
+            try:
+                # Read the original script
+                script_path = self.config.get('script', {}).get('local_path')
+                original_code = None
+
+                if script_path:
+                    from pathlib import Path
+                    script_file = Path(script_path)
+                    if script_file.exists():
+                        original_code = script_file.read_text()
+                    else:
+                        # Try relative to config dir
+                        config_dir = Path(self.config_path).parent if hasattr(self, 'config_path') else Path('.')
+                        script_file = config_dir / script_path
+                        if script_file.exists():
+                            original_code = script_file.read_text()
+
+                if original_code:
+                    code_converter = CodeConversionAgent(self.config)
+
+                    # Map platform to target
+                    target_map = {
+                        'emr': TargetPlatform.EMR,
+                        'eks': TargetPlatform.EKS
+                    }
+
+                    conversion_result = code_converter.convert(
+                        original_code,
+                        SourcePlatform.GLUE,
+                        target_map.get(platform, TargetPlatform.EMR)
+                    )
+
+                    if conversion_result.success:
+                        print(f"    ✓ Code converted: {len(conversion_result.changes)} changes made")
+
+                        # Save converted script
+                        if code_conversion_config.get('preserve_original') in ('Y', 'y', True):
+                            output_path = code_conversion_config.get('output_converted_script_path', 'converted/')
+                            converted_filename = f"{ctx.job_name}_{platform}.py"
+
+                            # For local testing, save to local path
+                            if not output_path.startswith('s3://'):
+                                from pathlib import Path
+                                output_dir = Path(output_path)
+                                output_dir.mkdir(parents=True, exist_ok=True)
+                                output_file = output_dir / converted_filename
+                                output_file.write_text(conversion_result.converted_code)
+                                print(f"    ✓ Saved converted script: {output_file}")
+
+                        # Store conversion details in metrics
+                        ctx.metrics['code_conversion'] = {
+                            'changes_count': len(conversion_result.changes),
+                            'warnings': conversion_result.warnings[:5],
+                            'required_deps': conversion_result.required_dependencies,
+                            'config_changes': conversion_result.config_changes
+                        }
+
+                        # Log key changes
+                        for change in conversion_result.changes[:3]:
+                            print(f"      - {change.change_type}: {change.description}")
+                        if len(conversion_result.changes) > 3:
+                            print(f"      ... and {len(conversion_result.changes) - 3} more changes")
+
+                        if conversion_result.warnings:
+                            print(f"    ⚠ {len(conversion_result.warnings)} warning(s) - review recommended")
+                    else:
+                        print(f"    ⚠ Code conversion failed: {conversion_result.error_message}")
+                else:
+                    print(f"    ⚠ Script not found at {script_path} - skipping code conversion")
+
+            except Exception as e:
+                print(f"    ⚠ Code conversion error: {str(e)}")
 
         # Smart Resource Allocation (if enabled)
         smart_allocation_enabled = self.config.get('smart_allocation', {}).get('enabled', True)

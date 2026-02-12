@@ -33,6 +33,14 @@
       "convert_to_eks_threshold_gb": 500,
       "optimize_for": "cost",
       "_comment": "Auto-convert to EMR when data > 100GB, EKS when > 500GB"
+    },
+
+    "code_conversion": {
+      "enabled": "Y",
+      "convert_pyspark_code": "Y",
+      "preserve_original": "Y",
+      "output_converted_script_path": "s3://etl-framework-scripts/converted/",
+      "_comment": "Convert GlueContext/DynamicFrame code to SparkSession/DataFrame for target platform"
     }
   },
 
@@ -49,8 +57,13 @@
   },
 
   "source_sizing": {
-    "mode": "hybrid",
+    "mode": "auto_detect",
     "_modes": "auto_detect | hardcoded | hybrid (use hardcoded if provided, else auto-detect)",
+    "_auto_detect_sources": [
+      "1. Glue Catalog sizeInBytes parameter (updated by MSCK REPAIR TABLE or Glue Crawlers)",
+      "2. S3 list_objects_v2 scan (fallback if Glue Catalog unavailable)",
+      "3. estimated_size_gb from config (final fallback)"
+    ],
     "delta_mode": {
       "enabled": "Y",
       "detect_partition_size": "Y",
@@ -355,12 +368,14 @@
       "auto_detect_size": "Y"
     },
     {
+      "_example": "PURE AUTO-DETECT - no hardcoded size",
       "database": "customer_staging",
       "table": "disaster_zipcodes",
       "format": "parquet",
       "location": "s3://enterprise-data/customer_staging/disaster_zipcodes/",
-      "estimated_size_gb": 0.01,
-      "broadcast": true
+      "auto_detect_size": "Y",
+      "broadcast": true,
+      "_note": "Size will be auto-detected from Glue Catalog or S3 scan"
     },
 
     {
