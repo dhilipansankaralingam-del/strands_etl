@@ -52,21 +52,19 @@ class StrandsCodeConversionAgent(StrandsAgent):
 
         if script_path:
             try:
-                original_code = Path(script_path).read_text()
+                script_file = Path(script_path)
+                if script_file.exists():
+                    original_code = script_file.read_text()
             except Exception as e:
-                return AgentResult(
-                    agent_name=self.AGENT_NAME,
-                    agent_id=self.agent_id,
-                    status=AgentStatus.FAILED,
-                    errors=[f"Failed to read script: {e}"]
-                )
+                self.logger.warning(f"Could not read script: {e}")
 
         if not original_code:
             return AgentResult(
                 agent_name=self.AGENT_NAME,
                 agent_id=self.agent_id,
-                status=AgentStatus.FAILED,
-                errors=['No script content to convert']
+                status=AgentStatus.COMPLETED,
+                output={'skipped': True, 'reason': f'Script not found: {script_path}'},
+                warnings=[f'Script not found at {script_path} - code conversion skipped']
             )
 
         # Convert code

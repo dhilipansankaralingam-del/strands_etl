@@ -124,9 +124,16 @@ class StrandsAgent(ABC):
     def _register_tools(self) -> None:
         """Register all tools defined with @tool decorator."""
         for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if hasattr(attr, '_is_strands_tool'):
-                self.tools[attr._tool_name] = attr
+            try:
+                # Skip private attributes and properties that may not be initialized
+                if attr_name.startswith('_'):
+                    continue
+                attr = getattr(self, attr_name, None)
+                if attr and hasattr(attr, '_is_strands_tool'):
+                    self.tools[attr._tool_name] = attr
+            except (AttributeError, TypeError):
+                # Skip attributes that can't be accessed during initialization
+                continue
 
     @abstractmethod
     def execute(self, context: AgentContext) -> AgentResult:

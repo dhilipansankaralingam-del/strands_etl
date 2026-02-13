@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Strands Resource Allocator Agent - Dynamic resource allocation."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
 from ..storage import StrandsStorage
@@ -134,8 +134,8 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             return 'weekend'
 
         # Check for month end (last 3 days)
-        next_month = run_date.replace(day=28) + datetime.timedelta(days=4)
-        last_day = next_month - datetime.timedelta(days=next_month.day)
+        next_month = run_date.replace(day=28) + timedelta(days=4)
+        last_day = next_month - timedelta(days=next_month.day)
         if (last_day - run_date).days <= 2:
             if run_date.month in [3, 6, 9, 12]:
                 return 'quarter_end'
