@@ -15,6 +15,7 @@ from .code_conversion_agent import StrandsCodeConversionAgent
 from .healing_agent import StrandsHealingAgent
 from .learning_agent import StrandsLearningAgent
 from .recommendation_agent import StrandsRecommendationAgent
+from .execution_agent import ExecutionAgent
 
 __all__ = [
     'SizingAgent',
@@ -26,5 +27,6 @@ __all__ = [
     'StrandsCodeConversionAgent',
     'StrandsHealingAgent',
     'StrandsLearningAgent',
-    'StrandsRecommendationAgent'
+    'StrandsRecommendationAgent',
+    'ExecutionAgent'
 ]

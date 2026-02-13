@@ -18,8 +18,10 @@ Features:
 - Platform auto-conversion (Glue → EMR → EKS)
 - Code conversion (GlueContext → SparkSession)
 - Auto-healing for failures
-- Learning from historical runs
+- Learning from historical runs with model training
 - Pipe-delimited fallback storage
+- Actual job execution on Glue/EMR/EKS
+- CloudWatch metrics collection
 
 Agent Execution Phases:
     Phase 1 (Parallel):
@@ -36,8 +38,11 @@ Agent Execution Phases:
         - PlatformConversionAgent: Decide target platform
         - CodeConversionAgent: Convert code if needed
 
-    Phase 4 (Final):
-        - LearningAgent: Store execution history
+    Phase 4 (Execution):
+        - ExecutionAgent: Execute job on target platform, collect metrics
+
+    Phase 5 (Learning & Recommendations):
+        - LearningAgent: Train ML models from execution data
         - RecommendationAgent: Aggregate all recommendations
 """
 
@@ -68,7 +73,8 @@ from framework.strands.agents import (
     StrandsCodeConversionAgent,
     StrandsHealingAgent,
     StrandsLearningAgent,
-    StrandsRecommendationAgent
+    StrandsRecommendationAgent,
+    ExecutionAgent
 )
 
 
@@ -196,15 +202,22 @@ def create_orchestrator(config: Dict[str, Any]) -> StrandsOrchestrator:
         dependencies=['platform_conversion_agent']
     )
 
-    # Phase 4: Learning and recommendations
+    # Phase 4: Job Execution
+    orchestrator.add_agent(
+        ExecutionAgent(config),
+        priority=4,
+        dependencies=['platform_conversion_agent', 'code_conversion_agent']
+    )
+
+    # Phase 5: Learning and recommendations
     orchestrator.add_agent(
         StrandsLearningAgent(config),
-        priority=4,
-        dependencies=[]
+        priority=5,
+        dependencies=['execution_agent']  # Learn from execution metrics
     )
     orchestrator.add_agent(
         StrandsRecommendationAgent(config),
-        priority=5,
+        priority=6,
         dependencies=[
             'sizing_agent',
             'compliance_agent',
@@ -214,6 +227,7 @@ def create_orchestrator(config: Dict[str, Any]) -> StrandsOrchestrator:
             'platform_conversion_agent',
             'code_conversion_agent',
             'healing_agent',
+            'execution_agent',
             'learning_agent'
         ]
     )
