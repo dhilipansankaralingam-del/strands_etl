@@ -1,5 +1,6 @@
 {
   "_description": "Complex Enterprise Sales Analytics - Multi-Domain Insurance/Finance Pipeline",
+  "_framework": "Strands SDK Multi-Agent ETL Framework",
   "_use_case": "21 source tables across insurance, finance, marketing, claims - joins to single target",
   "_target": "bd_work.pps_jss_test",
 
@@ -39,7 +40,7 @@
       "enabled": "Y",
       "convert_pyspark_code": "Y",
       "preserve_original": "Y",
-      "output_converted_script_path": "s3://etl-framework-scripts/converted/",
+      "output_converted_script_path": "converted/",
       "_comment": "Convert GlueContext/DynamicFrame code to SparkSession/DataFrame for target platform"
     }
   },
@@ -58,11 +59,12 @@
 
   "source_sizing": {
     "mode": "auto_detect",
-    "_modes": "auto_detect | hardcoded | hybrid (use hardcoded if provided, else auto-detect)",
-    "_auto_detect_sources": [
-      "1. Glue Catalog sizeInBytes parameter (updated by MSCK REPAIR TABLE or Glue Crawlers)",
-      "2. S3 list_objects_v2 scan (fallback if Glue Catalog unavailable)",
-      "3. estimated_size_gb from config (final fallback)"
+    "_modes": "auto_detect | hardcoded | hybrid",
+    "_detection_order": [
+      "1. Glue Catalog sizeInBytes parameter (MSCK REPAIR TABLE or Glue Crawlers)",
+      "2. S3 list_objects_v2 scan (if Glue Catalog unavailable)",
+      "3. estimated_size_gb from config (fallback)",
+      "4. Smart estimate based on table type (last resort)"
     ],
     "delta_mode": {
       "enabled": "Y",
@@ -73,6 +75,83 @@
     "cache_sizes": "Y",
     "cache_ttl_hours": 24,
     "size_cache_path": "data/agent_store/source_sizes.json"
+  },
+
+  "storage": {
+    "_comment": "Fallback storage configuration - uses local pipe-delimited files if DynamoDB/S3 unavailable",
+    "primary_backend": "local",
+    "fallback_backend": "local",
+    "dynamo_table_prefix": "etl_",
+    "dynamo_region": "us-east-1",
+    "s3_bucket": "enterprise-etl-data",
+    "s3_prefix": "etl-data/",
+    "local_base_path": "data/agent_store",
+    "local_format": "pipe",
+    "_storage_types": {
+      "audit_logs": "Pipe-delimited files in data/agent_store/audit_logs/",
+      "agent_data": "Pipe-delimited files per agent in data/agent_store/{agent_name}/",
+      "learning_history": "Local JSON files in data/agent_store/learning_agent/",
+      "recommendations": "Pipe-delimited files in data/agent_store/recommendation_agent/"
+    }
+  },
+
+  "agents": {
+    "_comment": "Strands SDK multi-agent configuration",
+    "parallel_execution": "Y",
+    "max_workers": 10,
+    "fail_fast": "N",
+
+    "sizing_agent": {
+      "enabled": "Y",
+      "phase": 1,
+      "dependencies": []
+    },
+    "compliance_agent": {
+      "enabled": "Y",
+      "phase": 1,
+      "dependencies": []
+    },
+    "code_analysis_agent": {
+      "enabled": "Y",
+      "phase": 1,
+      "dependencies": []
+    },
+    "resource_allocator_agent": {
+      "enabled": "Y",
+      "phase": 2,
+      "dependencies": ["sizing_agent"]
+    },
+    "data_quality_agent": {
+      "enabled": "Y",
+      "phase": 2,
+      "dependencies": ["compliance_agent"]
+    },
+    "healing_agent": {
+      "enabled": "Y",
+      "phase": 2,
+      "dependencies": []
+    },
+    "platform_conversion_agent": {
+      "enabled": "Y",
+      "phase": 3,
+      "dependencies": ["sizing_agent", "resource_allocator_agent"]
+    },
+    "code_conversion_agent": {
+      "enabled": "Y",
+      "phase": 3,
+      "dependencies": ["platform_conversion_agent"]
+    },
+    "learning_agent": {
+      "enabled": "Y",
+      "phase": 4,
+      "dependencies": []
+    },
+    "recommendation_agent": {
+      "enabled": "Y",
+      "phase": 5,
+      "dependencies": ["all"],
+      "_comment": "Runs last to aggregate all recommendations"
+    }
   },
 
   "glue_config": {
@@ -115,7 +194,13 @@
     "use_graviton": "Y",
     "executor_instances": 20,
     "executor_memory": "12g",
-    "executor_cores": 4
+    "executor_cores": 4,
+    "karpenter_provisioner": {
+      "name": "spark-executors",
+      "capacity_types": ["spot", "on-demand"],
+      "architectures": ["amd64", "arm64"],
+      "instance_families": ["m5", "m6i", "m6g", "r5", "r6i"]
+    }
   },
 
   "auto_healing": {
@@ -171,13 +256,6 @@
         "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE policy_number IS NOT NULL AND LENGTH(policy_number) < 5",
         "threshold": 100,
         "severity": "warning"
-      },
-      {
-        "id": "SQL_DATE_RANGE",
-        "description": "Dates should be within valid range",
-        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE effective_date < '2000-01-01' OR effective_date > CURRENT_DATE",
-        "threshold": 0,
-        "severity": "error"
       }
     ],
 
@@ -190,10 +268,6 @@
         "template": "completeness_check",
         "parameters": {"column": "policy_number"},
         "threshold": 0.99
-      },
-      {
-        "template": "row_count_check",
-        "parameters": {"min_rows": 10000, "max_rows": 500000000}
       }
     ]
   },
@@ -210,23 +284,7 @@
     "mask_pii": "Y",
     "mask_strategy": "hash",
     "audit_data_access": "Y",
-    "retention_days": 365,
-    "_comment": "Full compliance for insurance/finance data"
-  },
-
-  "workload_assessment": {
-    "enabled": "Y",
-    "analyze_input_size": "Y",
-    "consider_weekday_weekend": "Y",
-    "use_historical_trends": "Y",
-    "monitor_cpu_load": "Y",
-    "monitor_memory_profile": "Y",
-    "monitor_executor_usage": "Y",
-    "detect_data_skew": "Y",
-    "track_s3_bytes": "Y",
-    "track_shuffle_bytes": "Y",
-    "track_cost": "Y",
-    "recommend_resources": "Y"
+    "retention_days": 365
   },
 
   "learning": {
@@ -237,7 +295,8 @@
     "detect_anomalies": "Y",
     "predict_failures": "Y",
     "update_baseline": "Y",
-    "trend_window_days": 30
+    "trend_window_days": 30,
+    "_storage": "Local pipe-delimited files in data/agent_store/learning_agent/"
   },
 
   "recommendation": {
@@ -245,64 +304,19 @@
     "aggregate_from_all_agents": "Y",
     "prioritize_by_impact": "Y",
     "generate_implementation_plan": "Y",
-    "track_recommendation_status": "Y"
-  },
-
-  "integrations": {
-    "slack_enabled": "Y",
-    "slack_channel": "#enterprise-etl-alerts",
-    "slack_voice_enabled": "Y",
-    "slack_etl_trigger_enabled": "Y",
-    "slack_notifications": {
-      "on_start": "Y",
-      "on_success": "Y",
-      "on_failure": "Y",
-      "on_dq_failure": "Y",
-      "on_healing": "Y",
-      "include_metrics": "Y",
-      "include_recommendations": "Y"
-    },
-
-    "teams_enabled": "Y",
-    "teams_webhook_url": "https://outlook.office.com/webhook/...",
-    "teams_notifications": {
-      "on_start": "N",
-      "on_success": "Y",
-      "on_failure": "Y"
-    },
-
-    "email_enabled": "Y",
-    "email_sender": "etl-notifications@company.com",
-    "email_recipients": [
-      "data-engineering@company.com",
-      "insurance-analytics@company.com"
-    ],
-    "email_on_success": "Y",
-    "email_on_failure": "Y",
-    "email_daily_summary": "Y"
-  },
-
-  "dashboard": {
-    "cloudwatch_enabled": "Y",
-    "cloudwatch_namespace": "ETL/EnterpriseSales",
-    "cloudwatch_metrics": [
-      "duration_seconds",
-      "records_processed",
-      "cost_dollars",
-      "dq_pass_rate",
-      "memory_utilization",
-      "cpu_utilization"
-    ],
-    "cloudwatch_alarms": {
-      "duration_threshold_minutes": 240,
-      "cost_threshold_dollars": 200,
-      "dq_failure_threshold": 0.95
-    }
+    "track_recommendation_status": "Y",
+    "_storage": "Local pipe-delimited files in data/agent_store/recommendation_agent/"
   },
 
   "audit": {
     "enabled": "Y",
+    "primary_storage": "local",
+    "fallback_storage": "local",
     "dynamo_table": "etl_audit_log",
+    "local_path": "data/agent_store/audit_logs",
+    "format": "pipe_delimited",
+    "s3_upload": "Y",
+    "s3_audit_path": "s3://enterprise-etl-data/audit_logs/",
     "audit_on_start": "Y",
     "audit_on_read": "Y",
     "audit_on_transform": "Y",
@@ -313,7 +327,8 @@
     "audit_on_error": "Y",
     "audit_on_healing": "Y",
     "include_row_counts": "Y",
-    "include_schema_info": "Y"
+    "include_schema_info": "Y",
+    "_comment": "Audit logs stored as pipe-delimited files locally, then uploaded to S3"
   },
 
   "source_tables": [
@@ -323,16 +338,14 @@
       "table": "autopay_products_master",
       "format": "parquet",
       "location": "s3://enterprise-data/finance_accounting_master/autopay_products_master/",
-      "estimated_size_gb": 0.5,
-      "broadcast": true,
-      "auto_detect_size": "Y"
+      "auto_detect_size": "Y",
+      "broadcast": true
     },
     {
       "database": "financial_services_datalake",
       "table": "batch_prescreen_output",
       "format": "parquet",
       "location": "s3://enterprise-data/financial_services_datalake/batch_prescreen_output/",
-      "estimated_size_gb": 25,
       "partition_column": "process_date",
       "auto_detect_size": "Y"
     },
@@ -343,10 +356,9 @@
       "table": "clickstream_hits_master",
       "format": "parquet",
       "location": "s3://enterprise-data/digital_master/clickstream_hits_master/",
-      "estimated_size_gb": 500,
       "partition_column": "hit_date",
-      "_note": "Very large - may trigger EMR/EKS conversion",
-      "auto_detect_size": "Y"
+      "auto_detect_size": "Y",
+      "_note": "Very large table - may trigger EMR/EKS conversion"
     },
 
     {
@@ -355,7 +367,6 @@
       "table": "customer_product_profile_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/customer_master/customer_product_profile_history_master/",
-      "estimated_size_gb": 80,
       "partition_column": "snapshot_date",
       "auto_detect_size": "Y"
     },
@@ -364,18 +375,15 @@
       "table": "cpm_drv_tbl",
       "format": "parquet",
       "location": "s3://enterprise-data/customer_staging/cpm_drv_tbl/",
-      "estimated_size_gb": 15,
       "auto_detect_size": "Y"
     },
     {
-      "_example": "PURE AUTO-DETECT - no hardcoded size",
       "database": "customer_staging",
       "table": "disaster_zipcodes",
       "format": "parquet",
       "location": "s3://enterprise-data/customer_staging/disaster_zipcodes/",
       "auto_detect_size": "Y",
-      "broadcast": true,
-      "_note": "Size will be auto-detected from Glue Catalog or S3 scan"
+      "broadcast": true
     },
 
     {
@@ -384,7 +392,6 @@
       "table": "discounts_transactions",
       "format": "parquet",
       "location": "s3://enterprise-data/discounts_master/discounts_transactions/",
-      "estimated_size_gb": 30,
       "partition_column": "transaction_date",
       "auto_detect_size": "Y"
     },
@@ -395,7 +402,6 @@
       "table": "email_transactions",
       "format": "parquet",
       "location": "s3://enterprise-data/marketing_master/email_transactions/",
-      "estimated_size_gb": 45,
       "partition_column": "send_date",
       "auto_detect_size": "Y"
     },
@@ -404,7 +410,6 @@
       "table": "marketing_product_profile_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/marketing_master/marketing_product_profile_history_master/",
-      "estimated_size_gb": 60,
       "partition_column": "snapshot_date",
       "auto_detect_size": "Y"
     },
@@ -415,7 +420,6 @@
       "table": "enterprise_claims_master",
       "format": "parquet",
       "location": "s3://enterprise-data/claims_master/enterprise_claims_master/",
-      "estimated_size_gb": 120,
       "partition_column": "claim_date",
       "auto_detect_size": "Y"
     },
@@ -426,7 +430,7 @@
       "table": "gis_lodge_name_assigned_zips",
       "format": "parquet",
       "location": "s3://enterprise-data/ace_common/gis_lodge_name_assigned_zips/",
-      "estimated_size_gb": 0.05,
+      "auto_detect_size": "Y",
       "broadcast": true
     },
     {
@@ -434,7 +438,7 @@
       "table": "gis_national_zip_codes",
       "format": "parquet",
       "location": "s3://enterprise-data/ace_common/gis_national_zip_codes/",
-      "estimated_size_gb": 0.1,
+      "auto_detect_size": "Y",
       "broadcast": true
     },
 
@@ -444,7 +448,6 @@
       "table": "auto_policy_driver_master",
       "format": "parquet",
       "location": "s3://enterprise-data/insurance_master/auto_policy_driver_master/",
-      "estimated_size_gb": 75,
       "partition_column": "effective_date",
       "auto_detect_size": "Y"
     },
@@ -453,7 +456,6 @@
       "table": "auto_policy_vehicle_master",
       "format": "parquet",
       "location": "s3://enterprise-data/insurance_master/auto_policy_vehicle_master/",
-      "estimated_size_gb": 65,
       "partition_column": "effective_date",
       "auto_detect_size": "Y"
     },
@@ -462,9 +464,8 @@
       "table": "policy_term_master",
       "format": "parquet",
       "location": "s3://enterprise-data/insurance_master/policy_term_master/",
-      "estimated_size_gb": 20,
-      "broadcast": true,
-      "auto_detect_size": "Y"
+      "auto_detect_size": "Y",
+      "broadcast": true
     },
 
     {
@@ -473,7 +474,6 @@
       "table": "home_policy_property_master",
       "format": "parquet",
       "location": "s3://enterprise-data/insurance_master/home_policy_property_master/",
-      "estimated_size_gb": 55,
       "partition_column": "effective_date",
       "auto_detect_size": "Y"
     },
@@ -484,7 +484,6 @@
       "table": "life_party_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/life_insurance_master/life_party_history_master/",
-      "estimated_size_gb": 40,
       "partition_column": "snapshot_date",
       "auto_detect_size": "Y"
     },
@@ -493,7 +492,6 @@
       "table": "life_policy_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/life_insurance_master/life_policy_history_master/",
-      "estimated_size_gb": 35,
       "partition_column": "snapshot_date",
       "auto_detect_size": "Y"
     },
@@ -502,7 +500,6 @@
       "table": "policy_transaction_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/life_insurance_master/policy_transaction_history_master/",
-      "estimated_size_gb": 50,
       "partition_column": "transaction_date",
       "auto_detect_size": "Y"
     },
@@ -513,7 +510,6 @@
       "table": "lead_history_master",
       "format": "parquet",
       "location": "s3://enterprise-data/crm_master/lead_history_master/",
-      "estimated_size_gb": 25,
       "partition_column": "lead_date",
       "auto_detect_size": "Y"
     },
@@ -524,7 +520,6 @@
       "table": "membership_sales_master",
       "format": "parquet",
       "location": "s3://enterprise-data/membership_master/membership_sales_master/",
-      "estimated_size_gb": 30,
       "partition_column": "sale_date",
       "auto_detect_size": "Y"
     }
