@@ -9,11 +9,11 @@ from ..storage import StrandsStorage
 
 @register_agent
 class StrandsResourceAllocatorAgent(StrandsAgent):
-    """Dynamically allocates resources based on data size, patterns, and history."""
+    """Dynamically allocates resources based on data size, complexity, patterns, and history."""
 
     AGENT_NAME = "resource_allocator_agent"
-    AGENT_VERSION = "2.0.0"
-    AGENT_DESCRIPTION = "Smart resource allocation based on patterns and trends"
+    AGENT_VERSION = "2.1.0"
+    AGENT_DESCRIPTION = "Smart resource allocation based on size, complexity, and patterns"
 
     DEPENDENCIES = ['sizing_agent']  # Needs sizing data
     PARALLEL_SAFE = True
@@ -53,14 +53,75 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
         config_workers = glue_config.get('number_of_workers', 10)
         config_worker_type = glue_config.get('worker_type', 'G.2X')
 
-        # Analyze patterns
+        # ============================================================
+        # DECISION: force_from_config = Y → user controls resources
+        #           force_from_config = N → agent decides
+        # ============================================================
+        force_from_config = allocation_config.get('force_from_config', 'N') in ('Y', 'y', True)
+
+        if force_from_config:
+            self.logger.info("force_from_config=Y: Using glue_config values (user-forced)")
+            recommended_workers = config_workers
+            recommended_type = config_worker_type
+            day_type = self._get_day_type(context.run_date)
+            scale_factor = 1.0
+            complexity_factor = 1.0
+
+            worker_spec = self.WORKER_SPECS.get(recommended_type, self.WORKER_SPECS['G.2X'])
+            total_memory_gb = recommended_workers * worker_spec['memory_gb']
+            estimated_cost_per_hour = recommended_workers * worker_spec['cost_per_hour']
+
+            context.set_shared('recommended_workers', recommended_workers)
+            context.set_shared('recommended_worker_type', recommended_type)
+            context.set_shared('total_memory_gb', total_memory_gb)
+
+            self.storage.store_agent_data(
+                self.AGENT_NAME, 'allocations',
+                [{'job_name': context.job_name, 'run_date': context.run_date.isoformat(),
+                  'force_from_config': True, 'workers': recommended_workers,
+                  'worker_type': recommended_type, 'total_size_gb': total_size_gb}],
+                use_pipe_delimited=True
+            )
+
+            return AgentResult(
+                agent_name=self.AGENT_NAME,
+                agent_id=self.agent_id,
+                status=AgentStatus.COMPLETED,
+                output={
+                    'recommended_workers': recommended_workers,
+                    'recommended_worker_type': recommended_type,
+                    'total_memory_gb': total_memory_gb,
+                    'estimated_cost_per_hour': estimated_cost_per_hour,
+                    'day_type': day_type,
+                    'scale_factor': scale_factor,
+                    'complexity_factor': complexity_factor,
+                    'input_size_gb': total_size_gb,
+                    'force_from_config': True
+                },
+                metrics={
+                    'workers': recommended_workers,
+                    'memory_gb': total_memory_gb,
+                    'cost_per_hour': estimated_cost_per_hour
+                },
+                recommendations=[
+                    f"User-forced: {recommended_workers} x {recommended_type} from glue_config"
+                ]
+            )
+
+        # ============================================================
+        # AGENT-DECIDED ALLOCATION (force_from_config = N)
+        # Factors: data volume + complexity + day-type
+        # ============================================================
+        self.logger.info("force_from_config=N: Agent deciding resources based on size + complexity + day-type")
+
         run_date = context.run_date
         day_type = self._get_day_type(run_date)
         scale_factor = self._get_scale_factor(run_date, allocation_config)
+        complexity_factor = self._calculate_complexity_factor(context)
 
-        # Calculate recommended workers
+        # Calculate recommended workers = base(size) * day_scale * complexity
         base_workers = self._calculate_base_workers(total_size_gb)
-        recommended_workers = max(2, int(base_workers * scale_factor))
+        recommended_workers = max(2, int(base_workers * scale_factor * complexity_factor))
 
         # Determine worker type based on memory needs
         recommended_type = self._recommend_worker_type(total_size_gb, recommended_workers)
@@ -73,7 +134,8 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
         recommendations = []
         if recommended_workers != config_workers:
             recommendations.append(
-                f"Adjust workers: {config_workers} → {recommended_workers} (based on {total_size_gb:.0f} GB data)"
+                f"Adjust workers: {config_workers} → {recommended_workers} "
+                f"(size={total_size_gb:.0f}GB, complexity={complexity_factor:.1f}x, day={day_type})"
             )
         if recommended_type != config_worker_type:
             recommendations.append(
@@ -81,14 +143,18 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             )
         if day_type == 'weekend':
             recommendations.append("Weekend detected - reduced allocation applied")
+        if complexity_factor > 1.2:
+            recommendations.append(f"High complexity detected ({complexity_factor:.1f}x) - extra resources allocated")
 
         # Store allocation
         allocation_data = {
             'job_name': context.job_name,
             'run_date': run_date.isoformat(),
+            'force_from_config': False,
             'day_type': day_type,
             'total_size_gb': total_size_gb,
             'scale_factor': scale_factor,
+            'complexity_factor': complexity_factor,
             'recommended_workers': recommended_workers,
             'recommended_type': recommended_type,
             'config_workers': config_workers,
@@ -96,10 +162,8 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
         }
 
         self.storage.store_agent_data(
-            self.AGENT_NAME,
-            'allocations',
-            [allocation_data],
-            use_pipe_delimited=True
+            self.AGENT_NAME, 'allocations',
+            [allocation_data], use_pipe_delimited=True
         )
 
         # Share with other agents
@@ -118,7 +182,9 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
                 'estimated_cost_per_hour': estimated_cost_per_hour,
                 'day_type': day_type,
                 'scale_factor': scale_factor,
-                'input_size_gb': total_size_gb
+                'complexity_factor': complexity_factor,
+                'input_size_gb': total_size_gb,
+                'force_from_config': False
             },
             metrics={
                 'workers': recommended_workers,
@@ -127,6 +193,50 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             },
             recommendations=recommendations
         )
+
+    def _calculate_complexity_factor(self, context: AgentContext) -> float:
+        """
+        Calculate complexity factor from code analysis and config.
+
+        Complexity is determined by:
+        - Number of JOINs in the script
+        - Window functions
+        - Aggregations (GROUP BY, DISTINCT)
+        - Number of source tables
+        """
+        complexity_config = context.config.get('smart_allocation', {}).get('complexity_factors', {})
+        code_analysis = context.get_shared('code_analysis', {})
+
+        factor = 1.0
+
+        # Source table count drives complexity
+        source_count = len(context.config.get('source_tables', []))
+        if source_count > 15:
+            factor *= 1.5
+        elif source_count > 10:
+            factor *= 1.3
+        elif source_count > 5:
+            factor *= 1.1
+
+        # From code analysis agent output (if available)
+        join_count = code_analysis.get('join_count', 0)
+        window_count = code_analysis.get('window_function_count', 0)
+        agg_count = code_analysis.get('aggregation_count', 0)
+
+        if join_count > 10:
+            factor *= complexity_config.get('join_count_weight', 1.5)
+        elif join_count > 5:
+            factor *= 1.2
+
+        if window_count > 3:
+            factor *= complexity_config.get('window_function_weight', 2.0)
+        elif window_count > 0:
+            factor *= 1.3
+
+        if agg_count > 5:
+            factor *= complexity_config.get('aggregation_weight', 1.2)
+
+        return round(min(factor, 3.0), 2)  # Cap at 3x
 
     def _get_day_type(self, run_date: datetime) -> str:
         """Determine day type (weekday, weekend, month_end, quarter_end)."""
@@ -158,7 +268,6 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
 
     def _calculate_base_workers(self, size_gb: float) -> int:
         """Calculate base worker count from data size."""
-        # Rule of thumb: 1 worker per 10-20 GB
         if size_gb < 10:
             return 2
         elif size_gb < 50:

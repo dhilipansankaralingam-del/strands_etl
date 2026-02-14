@@ -47,10 +47,20 @@
 
   "smart_allocation": {
     "enabled": "Y",
+    "force_from_config": "N",
+    "_force_comment": "Y = use glue_config workers/type exactly (user-forced). N = agent decides based on data size, complexity, day-type",
     "auto_apply": "Y",
     "consider_weekday_weekend": "Y",
     "consider_month_end": "Y",
     "consider_data_trends": "Y",
+    "consider_complexity": "Y",
+    "complexity_factors": {
+      "join_count_weight": 1.5,
+      "window_function_weight": 2.0,
+      "aggregation_weight": 1.2,
+      "distinct_weight": 1.3,
+      "_comment": "Multipliers applied per complexity factor found in script"
+    },
     "weekend_scale_factor": 0.6,
     "month_end_scale_factor": 1.5,
     "quarter_end_scale_factor": 2.0,
