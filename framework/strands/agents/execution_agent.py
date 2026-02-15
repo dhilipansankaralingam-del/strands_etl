@@ -9,7 +9,7 @@ Captures job metrics from CloudWatch and tracks execution history.
 
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -138,7 +138,7 @@ class ExecutionAgent(StrandsAgent):
             run_id=context.execution_id,
             platform=target_platform,
             status='STARTING',
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
             workers=recommended_workers,
             worker_type=recommended_type
         )
@@ -162,7 +162,7 @@ class ExecutionAgent(StrandsAgent):
         except Exception as e:
             execution.status = 'FAILED'
             execution.error_message = str(e)
-            execution.completed_at = datetime.utcnow()
+            execution.completed_at = datetime.now(timezone.utc)
             self.logger.error(f"Job execution failed: {e}")
 
         # Calculate final metrics
@@ -231,7 +231,7 @@ class ExecutionAgent(StrandsAgent):
         # Simulate progress
         time.sleep(0.5)  # Brief pause to simulate work
 
-        execution.completed_at = datetime.utcnow()
+        execution.completed_at = datetime.now(timezone.utc)
         execution.status = 'SUCCEEDED'
         execution.duration_seconds = estimated_time
 
@@ -280,7 +280,7 @@ class ExecutionAgent(StrandsAgent):
 
                 if state in ['SUCCEEDED', 'FAILED', 'STOPPED', 'TIMEOUT']:
                     execution.status = state
-                    execution.completed_at = job_run.get('CompletedOn', datetime.utcnow())
+                    execution.completed_at = job_run.get('CompletedOn', datetime.now(timezone.utc))
 
                     if state == 'FAILED':
                         execution.error_message = job_run.get('ErrorMessage', 'Unknown error')
@@ -297,7 +297,7 @@ class ExecutionAgent(StrandsAgent):
             self.logger.error(f"Glue execution error: {e}")
             execution.status = 'FAILED'
             execution.error_message = str(e)
-            execution.completed_at = datetime.utcnow()
+            execution.completed_at = datetime.now(timezone.utc)
 
         return execution
 
@@ -334,7 +334,7 @@ class ExecutionAgent(StrandsAgent):
             return execution
 
         try:
-            end_time = execution.completed_at or datetime.utcnow()
+            end_time = execution.completed_at or datetime.now(timezone.utc)
             start_time = execution.started_at
 
             metrics_to_fetch = [
