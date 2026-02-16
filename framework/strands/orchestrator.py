@@ -348,7 +348,8 @@ class StrandsOrchestrator:
         self,
         job_name: str,
         run_date: datetime = None,
-        platform: str = "glue"
+        platform: str = "glue",
+        use_llm: bool = False
     ) -> OrchestratorResult:
         """
         Execute all agents according to dependency order.
@@ -357,6 +358,7 @@ class StrandsOrchestrator:
             job_name: Name of the job
             run_date: Run date for the job
             platform: Target platform
+            use_llm: Enable LLM-enhanced agent analysis
 
         Returns:
             OrchestratorResult with all agent results
@@ -365,7 +367,7 @@ class StrandsOrchestrator:
         run_date = run_date or start_time
 
         self.logger.info(f"Starting orchestration: {self.execution_id}")
-        self.logger.info(f"Job: {job_name}, Platform: {platform}")
+        self.logger.info(f"Job: {job_name}, Platform: {platform}, LLM: {use_llm}")
 
         # Initialize context
         self.context = AgentContext(
@@ -373,7 +375,8 @@ class StrandsOrchestrator:
             config=self.config,
             execution_id=self.execution_id,
             run_date=run_date,
-            platform=platform
+            platform=platform,
+            use_llm=use_llm
         )
 
         # Reset state

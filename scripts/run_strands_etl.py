@@ -240,7 +240,9 @@ def run_etl(
     dry_run: bool = False,
     platform: Optional[str] = None,
     run_date: Optional[datetime] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    use_llm: bool = False,
+    model_id: Optional[str] = None
 ) -> int:
     """
     Run ETL job with multi-agent orchestration.
@@ -251,6 +253,8 @@ def run_etl(
         platform: Override platform (glue, emr, eks)
         run_date: Override run date
         verbose: Enable verbose logging
+        use_llm: Enable LLM-enhanced analysis via Bedrock
+        model_id: Bedrock model ID for LLM mode
 
     Returns:
         Exit code (0 = success, 1 = failure)
@@ -267,11 +271,22 @@ def run_etl(
         if platform:
             config.setdefault('platform', {})['force_platform'] = platform
 
+        # Configure LLM if enabled
+        if use_llm:
+            config['llm'] = {
+                'enabled': True,
+                'model_id': model_id,
+                'region': config.get('aws', {}).get('region', 'us-east-1')
+            }
+
         # Print banner
         print_banner(job_name, config)
 
         if dry_run:
             print("  [DRY RUN MODE - No actual execution]\n")
+
+        if use_llm:
+            print("  [LLM MODE - Using Amazon Bedrock for AI reasoning]\n")
 
         # Create orchestrator
         orchestrator = create_orchestrator(config)
@@ -284,7 +299,8 @@ def run_etl(
         result = orchestrator.execute(
             job_name=job_name,
             run_date=run_date,
-            platform=config.get('platform', {}).get('primary', 'glue')
+            platform=config.get('platform', {}).get('primary', 'glue'),
+            use_llm=use_llm
         )
 
         # Print results by agent
@@ -332,10 +348,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Rule-based mode (default, $0 cost)
   python scripts/run_strands_etl.py -c demo_configs/enterprise_sales_config.json
   python scripts/run_strands_etl.py -c config.json --dry-run
   python scripts/run_strands_etl.py -c config.json --platform eks
-  python scripts/run_strands_etl.py -c config.json --verbose
+
+  # LLM-enhanced mode (uses Bedrock, ~$0.02-0.10/run)
+  python scripts/run_strands_etl.py -c config.json --use-llm
+  python scripts/run_strands_etl.py -c config.json --use-llm --model anthropic.claude-3-haiku-20240307-v1:0
         """
     )
 
@@ -369,6 +389,18 @@ Examples:
         help='Enable verbose logging'
     )
 
+    parser.add_argument(
+        '--use-llm',
+        action='store_true',
+        help='Enable LLM-enhanced analysis using Amazon Bedrock (adds ~$0.02-0.10/run)'
+    )
+
+    parser.add_argument(
+        '--model',
+        default='us.anthropic.claude-3-5-sonnet-20241022-v2:0',
+        help='Bedrock model ID for LLM mode (default: Claude 3.5 Sonnet)'
+    )
+
     args = parser.parse_args()
 
     exit_code = run_etl(
@@ -376,7 +408,9 @@ Examples:
         dry_run=args.dry_run,
         platform=args.platform,
         run_date=args.date,
-        verbose=args.verbose
+        verbose=args.verbose,
+        use_llm=args.use_llm,
+        model_id=args.model
     )
 
     sys.exit(exit_code)
