@@ -2,10 +2,19 @@
 """Strands Code Analysis Agent - Analyzes PySpark code for optimizations."""
 
 import re
-from typing import Dict, List, Any
+import json
+from typing import Dict, List, Any, Tuple
 from pathlib import Path
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
 from ..storage import StrandsStorage
+
+# LLM support
+try:
+    from ..llm import ResponseParser
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
+    ResponseParser = None
 
 
 @register_agent

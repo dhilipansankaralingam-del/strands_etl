@@ -19,6 +19,16 @@ from concurrent.futures import ThreadPoolExecutor, Future
 import threading
 import json
 
+# LLM support (optional import)
+try:
+    from .llm import BedrockClient, AGENT_PROMPTS, ResponseParser
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
+    BedrockClient = None
+    AGENT_PROMPTS = {}
+    ResponseParser = None
+
 
 class AgentStatus(Enum):
     """Status of an agent execution."""
@@ -72,6 +82,8 @@ class AgentContext:
     platform: str = "glue"
     shared_state: Dict[str, Any] = field(default_factory=dict)
     agent_results: Dict[str, AgentResult] = field(default_factory=dict)
+    use_llm: bool = False  # Enable LLM-enhanced mode
+    llm_stats: Dict[str, Any] = field(default_factory=dict)  # Track LLM usage
 
     def get_agent_result(self, agent_name: str) -> Optional[AgentResult]:
         """Get result from another agent."""
@@ -120,6 +132,39 @@ class StrandsAgent(ABC):
         self.logger = logging.getLogger(f"strands.{self.AGENT_NAME}")
         self.tools: Dict[str, Callable] = {}
         self._register_tools()
+
+        # LLM client (lazy-loaded)
+        self._llm_client: Optional['BedrockClient'] = None
+
+    @property
+    def llm(self) -> Optional['BedrockClient']:
+        """Get or create LLM client for this agent."""
+        if not LLM_AVAILABLE:
+            return None
+
+        if self._llm_client is None:
+            llm_config = self.config.get('llm', {})
+            self._llm_client = BedrockClient(
+                model_id=llm_config.get('model_id'),
+                region=llm_config.get('region', 'us-east-1'),
+                max_retries=llm_config.get('max_retries', 3),
+                enable_cache=llm_config.get('enable_cache', True)
+            )
+        return self._llm_client
+
+    def get_system_prompt(self) -> str:
+        """Get the expert system prompt for this agent."""
+        if not LLM_AVAILABLE:
+            return ""
+        return AGENT_PROMPTS.get(self.AGENT_NAME, "")
+
+    def is_llm_enabled(self, context: 'AgentContext') -> bool:
+        """Check if LLM mode is enabled for this execution."""
+        return (
+            LLM_AVAILABLE and
+            context.use_llm and
+            self.llm is not None
+        )
 
     def _register_tools(self) -> None:
         """Register all tools defined with @tool decorator."""
