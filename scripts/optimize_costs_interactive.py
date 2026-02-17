@@ -884,6 +884,845 @@ for row in partitions:
         }
 
 
+class HTMLReportGenerator:
+    """Generate professional HTML reports for management."""
+
+    def __init__(self):
+        self.report_date = None
+
+    def generate_cost_analysis_report(self, result: Dict, output_path: str = None) -> str:
+        """Generate HTML report from cost analysis results."""
+        from datetime import datetime
+        self.report_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        summary = result.get('summary', {})
+        exec_summary = result.get('executive_summary', {})
+        recommendations = result.get('all_recommendations', [])
+
+        html = self._get_html_header("PySpark Cost Optimization Report")
+        html += self._generate_executive_summary(summary, exec_summary)
+        html += self._generate_cost_section(summary)
+        html += self._generate_savings_chart(summary)
+        html += self._generate_recommendations_section(recommendations)
+        html += self._generate_code_quality_section(result)
+        html += self._generate_implementation_roadmap(result)
+        html += self._generate_platform_comparison(result)
+        html += self._get_html_footer()
+
+        if output_path:
+            with open(output_path, 'w') as f:
+                f.write(html)
+            print(f"   HTML report saved to: {output_path}")
+
+        return html
+
+    def generate_s3_scan_report(self, result: Dict, output_path: str = None) -> str:
+        """Generate HTML report from S3 small files scan."""
+        from datetime import datetime
+        self.report_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        html = self._get_html_header("S3 Small Files Analysis Report")
+        html += self._generate_s3_executive_summary(result)
+        html += self._generate_s3_size_distribution(result)
+        html += self._generate_s3_recommendations(result)
+        html += self._get_html_footer()
+
+        if output_path:
+            with open(output_path, 'w') as f:
+                f.write(html)
+            print(f"   HTML report saved to: {output_path}")
+
+        return html
+
+    def generate_large_table_report(self, result: Dict, output_path: str = None) -> str:
+        """Generate HTML report from large table analysis."""
+        from datetime import datetime
+        self.report_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        html = self._get_html_header("Large Table Optimization Report")
+        html += self._generate_large_table_summary(result)
+        html += self._generate_resource_recommendations(result)
+        html += self._generate_strategies_section(result)
+        html += self._generate_anti_patterns_section(result)
+        html += self._generate_spark_configs_section(result)
+        html += self._get_html_footer()
+
+        if output_path:
+            with open(output_path, 'w') as f:
+                f.write(html)
+            print(f"   HTML report saved to: {output_path}")
+
+        return html
+
+    def _get_html_header(self, title: str) -> str:
+        """Generate HTML header with embedded CSS."""
+        return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        :root {{
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-600: #4b5563;
+            --gray-800: #1f2937;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: var(--gray-800);
+            background: var(--gray-50);
+            padding: 2rem;
+        }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .header {{
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .header h1 {{ font-size: 2rem; margin-bottom: 0.5rem; }}
+        .header .meta {{ opacity: 0.9; font-size: 0.9rem; }}
+        .card {{
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }}
+        .card h2 {{
+            font-size: 1.25rem;
+            color: var(--gray-800);
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--gray-100);
+        }}
+        .card h3 {{ font-size: 1rem; color: var(--gray-600); margin: 1rem 0 0.5rem; }}
+        .metrics {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }}
+        .metric {{
+            background: var(--gray-50);
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }}
+        .metric .value {{
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--primary);
+        }}
+        .metric .label {{ font-size: 0.85rem; color: var(--gray-600); }}
+        .metric.success .value {{ color: var(--success); }}
+        .metric.warning .value {{ color: var(--warning); }}
+        .metric.danger .value {{ color: var(--danger); }}
+        .bar-chart {{ margin: 1rem 0; }}
+        .bar-row {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }}
+        .bar-label {{ width: 150px; font-size: 0.85rem; color: var(--gray-600); }}
+        .bar-container {{
+            flex: 1;
+            height: 24px;
+            background: var(--gray-100);
+            border-radius: 4px;
+            overflow: hidden;
+        }}
+        .bar {{
+            height: 100%;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            padding-left: 8px;
+            color: white;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }}
+        .bar.primary {{ background: var(--primary); }}
+        .bar.success {{ background: var(--success); }}
+        .bar.warning {{ background: var(--warning); }}
+        .bar.danger {{ background: var(--danger); }}
+        .recommendation {{
+            background: var(--gray-50);
+            border-left: 4px solid var(--primary);
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 0 8px 8px 0;
+        }}
+        .recommendation.p0 {{ border-left-color: var(--danger); }}
+        .recommendation.p1 {{ border-left-color: var(--warning); }}
+        .recommendation.p2 {{ border-left-color: var(--primary); }}
+        .recommendation .title {{
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+        .recommendation .priority {{
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: white;
+        }}
+        .recommendation .priority.p0 {{ background: var(--danger); }}
+        .recommendation .priority.p1 {{ background: var(--warning); }}
+        .recommendation .priority.p2 {{ background: var(--primary); }}
+        .recommendation .description {{ margin-top: 0.5rem; color: var(--gray-600); font-size: 0.9rem; }}
+        .quick-win {{
+            display: inline-block;
+            background: var(--success);
+            color: white;
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 0.5rem;
+        }}
+        .comparison-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }}
+        .comparison-table th, .comparison-table td {{
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--gray-200);
+        }}
+        .comparison-table th {{ background: var(--gray-50); font-weight: 600; }}
+        .comparison-table tr:hover {{ background: var(--gray-50); }}
+        .highlight {{ background: #fef3c7; padding: 2px 4px; border-radius: 4px; }}
+        .code-block {{
+            background: var(--gray-800);
+            color: #e5e7eb;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            margin: 0.5rem 0;
+        }}
+        .roadmap {{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }}
+        .roadmap-phase {{
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+        }}
+        .phase-marker {{
+            width: 40px;
+            height: 40px;
+            background: var(--primary);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            flex-shrink: 0;
+        }}
+        .phase-content {{ flex: 1; }}
+        .phase-header {{ font-weight: 600; margin-bottom: 0.25rem; }}
+        .phase-meta {{ font-size: 0.85rem; color: var(--gray-600); }}
+        .severity-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }}
+        .severity-critical {{ background: #fef2f2; color: var(--danger); }}
+        .severity-high {{ background: #fffbeb; color: var(--warning); }}
+        .severity-medium {{ background: #fefce8; color: #ca8a04; }}
+        .severity-low {{ background: #f0fdf4; color: var(--success); }}
+        .footer {{
+            text-align: center;
+            padding: 2rem;
+            color: var(--gray-600);
+            font-size: 0.85rem;
+        }}
+        @media print {{
+            body {{ background: white; padding: 0; }}
+            .card {{ box-shadow: none; border: 1px solid var(--gray-200); }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{title}</h1>
+            <div class="meta">Generated on {self.report_date}</div>
+        </div>
+'''
+
+    def _get_html_footer(self) -> str:
+        """Generate HTML footer."""
+        return '''
+        <div class="footer">
+            <p>Generated by PySpark Cost Optimizer</p>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+    def _generate_executive_summary(self, summary: Dict, exec_summary: Dict) -> str:
+        """Generate executive summary section."""
+        savings_pct = summary.get('potential_savings_percent', 0)
+        annual_savings = summary.get('potential_annual_savings', 0)
+        current_cost = summary.get('current_cost_per_run', 0)
+        optimal_cost = summary.get('optimal_cost_per_run', 0)
+
+        return f'''
+        <div class="card">
+            <h2>Executive Summary</h2>
+            <p style="font-size: 1.1rem; margin-bottom: 1.5rem;">
+                {exec_summary.get('headline', 'Cost optimization analysis complete.')}
+            </p>
+            <div class="metrics">
+                <div class="metric success">
+                    <div class="value">{savings_pct:.0f}%</div>
+                    <div class="label">Potential Savings</div>
+                </div>
+                <div class="metric success">
+                    <div class="value">${annual_savings:,.0f}</div>
+                    <div class="label">Annual Savings</div>
+                </div>
+                <div class="metric">
+                    <div class="value">${current_cost:.2f}</div>
+                    <div class="label">Current Cost/Run</div>
+                </div>
+                <div class="metric success">
+                    <div class="value">${optimal_cost:.2f}</div>
+                    <div class="label">Optimal Cost/Run</div>
+                </div>
+            </div>
+        </div>
+'''
+
+    def _generate_cost_section(self, summary: Dict) -> str:
+        """Generate cost breakdown section."""
+        anti_patterns = summary.get('anti_patterns_found', 0)
+        critical = summary.get('critical_issues', 0)
+        recommendations = summary.get('total_recommendations', 0)
+        quick_wins = summary.get('quick_wins', 0)
+        data_size = summary.get('effective_data_size_gb', 0)
+
+        critical_class = "danger" if critical > 0 else "success"
+
+        return f'''
+        <div class="card">
+            <h2>Analysis Overview</h2>
+            <div class="metrics">
+                <div class="metric {critical_class}">
+                    <div class="value">{critical}</div>
+                    <div class="label">Critical Issues</div>
+                </div>
+                <div class="metric warning">
+                    <div class="value">{anti_patterns}</div>
+                    <div class="label">Anti-patterns Found</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{recommendations}</div>
+                    <div class="label">Recommendations</div>
+                </div>
+                <div class="metric success">
+                    <div class="value">{quick_wins}</div>
+                    <div class="label">Quick Wins</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{data_size:.1f} GB</div>
+                    <div class="label">Data Size</div>
+                </div>
+            </div>
+        </div>
+'''
+
+    def _generate_savings_chart(self, summary: Dict) -> str:
+        """Generate visual savings chart."""
+        current = summary.get('current_cost_per_run', 1)
+        optimal = summary.get('optimal_cost_per_run', 0)
+        savings = current - optimal
+        savings_pct = (savings / current * 100) if current > 0 else 0
+
+        current_width = 100
+        optimal_width = (optimal / current * 100) if current > 0 else 0
+
+        return f'''
+        <div class="card">
+            <h2>Cost Comparison</h2>
+            <div class="bar-chart">
+                <div class="bar-row">
+                    <div class="bar-label">Current Cost</div>
+                    <div class="bar-container">
+                        <div class="bar danger" style="width: {current_width}%">${current:.2f}</div>
+                    </div>
+                </div>
+                <div class="bar-row">
+                    <div class="bar-label">Optimized Cost</div>
+                    <div class="bar-container">
+                        <div class="bar success" style="width: {optimal_width}%">${optimal:.2f}</div>
+                    </div>
+                </div>
+                <div class="bar-row">
+                    <div class="bar-label">Savings</div>
+                    <div class="bar-container">
+                        <div class="bar primary" style="width: {savings_pct}%">${savings:.2f} ({savings_pct:.0f}%)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+'''
+
+    def _generate_recommendations_section(self, recommendations: List[Dict]) -> str:
+        """Generate recommendations section."""
+        if not recommendations:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Top Recommendations</h2>
+'''
+        for rec in recommendations[:10]:
+            priority = rec.get('priority', 'P3').lower()
+            title = rec.get('title', 'Recommendation')
+            description = rec.get('description', '')
+            quick_win = rec.get('quick_win', False)
+            quick_win_badge = '<span class="quick-win">Quick Win</span>' if quick_win else ''
+
+            html += f'''
+            <div class="recommendation {priority}">
+                <div class="title">
+                    <span class="priority {priority}">{rec.get('priority', 'P3')}</span>
+                    {title}{quick_win_badge}
+                </div>
+                <div class="description">{description}</div>
+            </div>
+'''
+        html += '</div>'
+        return html
+
+    def _generate_code_quality_section(self, result: Dict) -> str:
+        """Generate code quality section."""
+        code_analysis = result.get('agents', {}).get('code_analyzer', {}).get('analysis', {})
+        anti_patterns = code_analysis.get('anti_patterns', [])
+
+        if not anti_patterns:
+            return '''
+        <div class="card">
+            <h2>Code Quality</h2>
+            <p style="color: var(--success);">No anti-patterns detected in the code.</p>
+        </div>
+'''
+
+        html = '''
+        <div class="card">
+            <h2>Code Quality Issues</h2>
+'''
+        for pattern in anti_patterns[:5]:
+            severity = pattern.get('severity', 'medium')
+            name = pattern.get('pattern', 'Unknown')
+            desc = pattern.get('description', '')
+            fix = pattern.get('fix', '')
+            lines = pattern.get('line_numbers', [])
+
+            html += f'''
+            <div class="recommendation {severity}">
+                <div class="title">
+                    <span class="severity-badge severity-{severity}">{severity.upper()}</span>
+                    {name}
+                </div>
+                <div class="description">
+                    {desc}<br>
+                    <strong>Lines:</strong> {lines}<br>
+                    <strong>Fix:</strong> {fix}
+                </div>
+            </div>
+'''
+        html += '</div>'
+        return html
+
+    def _generate_implementation_roadmap(self, result: Dict) -> str:
+        """Generate implementation roadmap section."""
+        roadmap = result.get('implementation_roadmap', {})
+        if not roadmap:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Implementation Roadmap</h2>
+            <div class="roadmap">
+'''
+        phase_num = 1
+        for phase_key in ['phase_1', 'phase_2', 'phase_3', 'phase_4']:
+            phase = roadmap.get(phase_key, {})
+            if phase.get('actions'):
+                name = phase.get('name', f'Phase {phase_num}')
+                duration = phase.get('duration', 'TBD')
+                savings = phase.get('expected_savings_percent', 0)
+                actions = phase.get('actions', [])
+
+                html += f'''
+                <div class="roadmap-phase">
+                    <div class="phase-marker">{phase_num}</div>
+                    <div class="phase-content">
+                        <div class="phase-header">{name}</div>
+                        <div class="phase-meta">Duration: {duration} | Expected Savings: {savings:.0f}%</div>
+                        <ul style="margin-top: 0.5rem; padding-left: 1.5rem;">
+'''
+                for action in actions:
+                    html += f'<li>{action}</li>'
+                html += '''
+                        </ul>
+                    </div>
+                </div>
+'''
+                phase_num += 1
+
+        html += '''
+            </div>
+        </div>
+'''
+        return html
+
+    def _generate_platform_comparison(self, result: Dict) -> str:
+        """Generate platform comparison section."""
+        resource = result.get('agents', {}).get('resource_allocator', {}).get('analysis', {})
+        platforms = resource.get('platform_comparison', [])
+
+        if not platforms:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Platform Cost Comparison</h2>
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Platform</th>
+                        <th>Cost per Run</th>
+                        <th>Annual Cost</th>
+                        <th>Savings vs Current</th>
+                    </tr>
+                </thead>
+                <tbody>
+'''
+        for p in platforms:
+            name = p.get('platform', 'Unknown')
+            cost = p.get('cost_per_run', 0)
+            annual = p.get('annual_cost', 0)
+            savings = p.get('savings_vs_current_percent', 0)
+            savings_class = 'success' if savings > 0 else ''
+
+            html += f'''
+                    <tr>
+                        <td><strong>{name}</strong></td>
+                        <td>${cost:.2f}</td>
+                        <td>${annual:,.0f}</td>
+                        <td class="{savings_class}">{savings:.0f}%</td>
+                    </tr>
+'''
+        html += '''
+                </tbody>
+            </table>
+        </div>
+'''
+        return html
+
+    # S3 Scan Report Methods
+    def _generate_s3_executive_summary(self, result: Dict) -> str:
+        """Generate S3 scan executive summary."""
+        severity = result.get('severity', 'low')
+        severity_class = f"severity-{severity}"
+
+        return f'''
+        <div class="card">
+            <h2>Executive Summary</h2>
+            <p style="font-size: 1.1rem; margin-bottom: 1rem;">
+                S3 path analysis for small file detection and optimization recommendations.
+            </p>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="value">{result.get('total_files', 0):,}</div>
+                    <div class="label">Total Files</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{result.get('total_size_gb', 0):.2f} GB</div>
+                    <div class="label">Total Size</div>
+                </div>
+                <div class="metric warning">
+                    <div class="value">{result.get('kb_files_count', 0):,}</div>
+                    <div class="label">KB-sized Files</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{result.get('kb_files_percent', 0):.1f}%</div>
+                    <div class="label">Small File Ratio</div>
+                </div>
+            </div>
+            <div style="margin-top: 1rem;">
+                <span class="severity-badge {severity_class}">Severity: {severity.upper()}</span>
+            </div>
+        </div>
+'''
+
+    def _generate_s3_size_distribution(self, result: Dict) -> str:
+        """Generate S3 size distribution chart."""
+        dist = result.get('size_distribution', {})
+        total = result.get('total_files', 1)
+
+        html = '''
+        <div class="card">
+            <h2>File Size Distribution</h2>
+            <div class="bar-chart">
+'''
+        colors = {
+            'tiny_under_1kb': 'danger',
+            'very_small_1kb_128kb': 'danger',
+            'small_128kb_1mb': 'warning',
+            'optimal_1mb_128mb': 'success',
+            'large_128mb_1gb': 'primary',
+            'very_large_over_1gb': 'warning'
+        }
+        labels = {
+            'tiny_under_1kb': '< 1 KB',
+            'very_small_1kb_128kb': '1 KB - 128 KB',
+            'small_128kb_1mb': '128 KB - 1 MB',
+            'optimal_1mb_128mb': '1 MB - 128 MB (Optimal)',
+            'large_128mb_1gb': '128 MB - 1 GB',
+            'very_large_over_1gb': '> 1 GB'
+        }
+
+        for key, count in dist.items():
+            if count > 0:
+                pct = (count / total) * 100
+                color = colors.get(key, 'primary')
+                label = labels.get(key, key)
+                html += f'''
+                <div class="bar-row">
+                    <div class="bar-label">{label}</div>
+                    <div class="bar-container">
+                        <div class="bar {color}" style="width: {max(pct, 5)}%">{count:,} ({pct:.1f}%)</div>
+                    </div>
+                </div>
+'''
+
+        html += '''
+            </div>
+        </div>
+'''
+        return html
+
+    def _generate_s3_recommendations(self, result: Dict) -> str:
+        """Generate S3 recommendations section."""
+        recommendations = result.get('recommendations', [])
+        if not recommendations:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Recommendations</h2>
+'''
+        for rec in recommendations:
+            priority = rec.get('priority', 'P2').lower()
+            title = rec.get('title', '')
+            desc = rec.get('description', '')
+
+            html += f'''
+            <div class="recommendation {priority}">
+                <div class="title">
+                    <span class="priority {priority}">{rec.get('priority', 'P2')}</span>
+                    {title}
+                </div>
+                <div class="description">{desc}</div>
+'''
+            # Add solutions if present
+            if rec.get('solutions'):
+                html += '<h3 style="margin-top: 1rem;">Solutions:</h3>'
+                for sol in rec.get('solutions', [])[:2]:
+                    html += f'''
+                <div style="margin: 0.5rem 0;">
+                    <strong>{sol.get('name', '')}</strong>
+                    <div class="code-block"><pre>{sol.get('code', '')}</pre></div>
+                </div>
+'''
+            # Add spark configs if present
+            if rec.get('spark_configs'):
+                html += '<h3 style="margin-top: 1rem;">Spark Configurations:</h3>'
+                html += '<div class="code-block"><pre>'
+                for config, value in rec.get('spark_configs', {}).items():
+                    html += f'{config} = {value}\n'
+                html += '</pre></div>'
+
+            html += '</div>'
+
+        html += '</div>'
+        return html
+
+    # Large Table Report Methods
+    def _generate_large_table_summary(self, result: Dict) -> str:
+        """Generate large table summary."""
+        info = result.get('table_info', {})
+        classification = result.get('classification', {})
+
+        return f'''
+        <div class="card">
+            <h2>Table Analysis Summary</h2>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="value">{info.get('row_count_formatted', 'N/A')}</div>
+                    <div class="label">Total Rows</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{info.get('column_count', 0)}</div>
+                    <div class="label">Columns</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{info.get('estimated_size_gb', 0):.0f} GB</div>
+                    <div class="label">Estimated Size</div>
+                </div>
+                <div class="metric warning">
+                    <div class="value">{classification.get('complexity', 'N/A').upper()}</div>
+                    <div class="label">Complexity</div>
+                </div>
+            </div>
+            <div style="margin-top: 1rem;">
+                <strong>Classification:</strong> {', '.join(classification.get('classifications', []))}
+            </div>
+            <p style="margin-top: 0.5rem; color: var(--gray-600);">
+                {classification.get('description', '')}
+            </p>
+        </div>
+'''
+
+    def _generate_resource_recommendations(self, result: Dict) -> str:
+        """Generate resource recommendations."""
+        config = result.get('optimal_config', {})
+
+        return f'''
+        <div class="card">
+            <h2>Recommended Configuration</h2>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="value">{config.get('partitions', 0):,}</div>
+                    <div class="label">Partitions</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{config.get('worker_type', 'N/A')}</div>
+                    <div class="label">Worker Type</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{config.get('recommended_workers', 0)}</div>
+                    <div class="label">Workers</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{config.get('memory_per_executor', 'N/A')}</div>
+                    <div class="label">Executor Memory</div>
+                </div>
+            </div>
+        </div>
+'''
+
+    def _generate_strategies_section(self, result: Dict) -> str:
+        """Generate optimization strategies section."""
+        strategies = result.get('strategies', [])
+        if not strategies:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Optimization Strategies</h2>
+'''
+        for strategy in strategies:
+            priority = strategy.get('priority', 'P2').lower()
+            html += f'''
+            <div class="recommendation {priority}">
+                <div class="title">
+                    <span class="priority {priority}">{strategy.get('priority', 'P2')}</span>
+                    {strategy.get('name', '')}
+                </div>
+                <div class="description">
+                    {strategy.get('description', '')}<br>
+                    <strong>Impact:</strong> {strategy.get('impact', '')}
+                </div>
+            </div>
+'''
+        html += '</div>'
+        return html
+
+    def _generate_anti_patterns_section(self, result: Dict) -> str:
+        """Generate anti-patterns section."""
+        anti_patterns = result.get('anti_patterns_to_avoid', [])
+        if not anti_patterns:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Anti-patterns to Avoid</h2>
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Pattern</th>
+                        <th>Issue</th>
+                        <th>Fix</th>
+                    </tr>
+                </thead>
+                <tbody>
+'''
+        for ap in anti_patterns:
+            html += f'''
+                    <tr>
+                        <td><strong>{ap.get('pattern', '')}</strong></td>
+                        <td>{ap.get('issue', '')}</td>
+                        <td>{ap.get('fix', '')}</td>
+                    </tr>
+'''
+        html += '''
+                </tbody>
+            </table>
+        </div>
+'''
+        return html
+
+    def _generate_spark_configs_section(self, result: Dict) -> str:
+        """Generate Spark configurations section."""
+        configs = result.get('spark_configs', {})
+        if not configs:
+            return ''
+
+        html = '''
+        <div class="card">
+            <h2>Recommended Spark Configurations</h2>
+'''
+        for category, settings in configs.items():
+            category_label = category.replace('_', ' ').title()
+            html += f'''
+            <h3>{category_label}</h3>
+            <div class="code-block"><pre>'''
+            for key, value in settings.items():
+                html += f'{key} = {value}\n'
+            html += '</pre></div>'
+
+        html += '</div>'
+        return html
+
+
 class InteractiveCostOptimizer:
     """Interactive CLI for cost optimization with conversation support."""
 
@@ -1277,10 +2116,11 @@ Ready to answer questions about this analysis.
         print("   5. Scan S3 path for small files")
         print("   6. Analyze large historical table optimization")
         print("   7. Save report to JSON")
-        print("   8. Exit")
+        print("   8. Generate HTML report (for management)")
+        print("   9. Exit")
 
         while True:
-            choice = input("\n   Select [1-8]: ").strip()
+            choice = input("\n   Select [1-9]: ").strip()
 
             if choice == '1':
                 self._show_anti_patterns(result)
@@ -1297,10 +2137,34 @@ Ready to answer questions about this analysis.
             elif choice == '7':
                 self._save_report(result)
             elif choice == '8':
+                self._generate_html_report(result)
+            elif choice == '9':
                 print("\n👋 Goodbye!")
                 break
             else:
-                print("   Please select 1-8")
+                print("   Please select 1-9")
+
+    def _generate_html_report(self, result: Dict, report_type: str = 'cost_analysis'):
+        """Generate HTML report for management."""
+        default_name = f"cost_analysis_{result.get('job_name', 'report')}.html"
+        filename = input(f"   HTML filename (default: {default_name}): ").strip()
+        if not filename:
+            filename = default_name
+
+        output_path = Path('cost_optimizer/reports') / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        generator = HTMLReportGenerator()
+
+        if report_type == 'cost_analysis':
+            generator.generate_cost_analysis_report(result, str(output_path))
+        elif report_type == 's3_scan':
+            generator.generate_s3_scan_report(result, str(output_path))
+        elif report_type == 'large_table':
+            generator.generate_large_table_report(result, str(output_path))
+
+        print(f"   ✅ HTML report generated: {output_path}")
+        print(f"   📧 You can email this file to management or open in browser.")
 
     def _run_s3_small_files_scan(self):
         """Run S3 small files scanner."""
@@ -1417,6 +2281,27 @@ Ready to answer questions about this analysis.
                     print(f"      {config} = {value}")
 
         print("\n" + "="*70)
+
+        # Offer HTML export
+        export = input("\n   Generate HTML report for management? [y/N]: ").strip().lower()
+        if export == 'y':
+            self._generate_s3_html_report(result)
+
+    def _generate_s3_html_report(self, result: Dict):
+        """Generate HTML report for S3 scan results."""
+        default_name = "s3_small_files_report.html"
+        filename = input(f"   HTML filename (default: {default_name}): ").strip()
+        if not filename:
+            filename = default_name
+
+        output_path = Path('cost_optimizer/reports') / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        generator = HTMLReportGenerator()
+        generator.generate_s3_scan_report(result, str(output_path))
+
+        print(f"   ✅ HTML report generated: {output_path}")
+        print(f"   📧 You can email this file to management or open in browser.")
 
     def _run_large_table_analysis(self):
         """Run large historical table optimization analysis."""
@@ -1554,6 +2439,29 @@ Ready to answer questions about this analysis.
             print(f"   {line}")
 
         print("\n" + "="*70)
+
+        # Offer HTML export
+        export = input("\n   Generate HTML report for management? [y/N]: ").strip().lower()
+        if export == 'y':
+            self._generate_large_table_html_report(result)
+
+    def _generate_large_table_html_report(self, result: Dict):
+        """Generate HTML report for large table analysis."""
+        table_name = result.get('table_info', {}).get('name', 'table')
+        safe_name = table_name.replace('.', '_').replace('/', '_')
+        default_name = f"large_table_optimization_{safe_name}.html"
+        filename = input(f"   HTML filename (default: {default_name}): ").strip()
+        if not filename:
+            filename = default_name
+
+        output_path = Path('cost_optimizer/reports') / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        generator = HTMLReportGenerator()
+        generator.generate_large_table_report(result, str(output_path))
+
+        print(f"   ✅ HTML report generated: {output_path}")
+        print(f"   📧 You can email this file to management or open in browser.")
 
     def _show_anti_patterns(self, result: Dict):
         """Show anti-patterns with details."""
@@ -1702,7 +2610,7 @@ Ready to answer questions about this analysis.
             self._offer_followup_questions(result)
 
 
-def run_s3_scan_standalone(s3_path: str, max_files: int = 10000, output_json: str = None):
+def run_s3_scan_standalone(s3_path: str, max_files: int = 10000, output_json: str = None, output_html: str = None):
     """Run S3 small files scan as standalone operation."""
     print("\n" + "="*70)
     print(" 🔍 S3 SMALL FILES SCANNER")
@@ -1729,7 +2637,13 @@ def run_s3_scan_standalone(s3_path: str, max_files: int = 10000, output_json: st
         if output_json:
             with open(output_json, 'w') as f:
                 json.dump(result, f, indent=2, default=str)
-            print(f"\n   ✅ Results saved to: {output_json}")
+            print(f"\n   ✅ JSON saved to: {output_json}")
+
+        # Generate HTML if requested
+        if output_html:
+            generator = HTMLReportGenerator()
+            generator.generate_s3_scan_report(result, output_html)
+            print(f"   ✅ HTML report saved to: {output_html}")
 
     except Exception as e:
         print(f"\n   ❌ Error during scan: {e}")
@@ -1740,7 +2654,8 @@ def run_large_table_standalone(
     row_count: int,
     column_count: int,
     partition_columns: List[str] = None,
-    output_json: str = None
+    output_json: str = None,
+    output_html: str = None
 ):
     """Run large table analysis as standalone operation."""
     print("\n" + "="*70)
@@ -1763,7 +2678,13 @@ def run_large_table_standalone(
     if output_json:
         with open(output_json, 'w') as f:
             json.dump(result, f, indent=2, default=str)
-        print(f"\n   ✅ Results saved to: {output_json}")
+        print(f"\n   ✅ JSON saved to: {output_json}")
+
+    # Generate HTML if requested
+    if output_html:
+        generator = HTMLReportGenerator()
+        generator.generate_large_table_report(result, output_html)
+        print(f"   ✅ HTML report saved to: {output_html}")
 
 
 def main():
@@ -1781,8 +2702,14 @@ Examples:
   # Scan S3 for small files
   python scripts/optimize_costs_interactive.py --scan-s3 s3://bucket/prefix/
 
+  # Scan S3 and generate HTML report for management
+  python scripts/optimize_costs_interactive.py --scan-s3 s3://bucket/prefix/ --html report.html
+
   # Analyze large table
   python scripts/optimize_costs_interactive.py --large-table my_db.table --rows 1600000000 --cols 150
+
+  # Analyze large table with HTML output
+  python scripts/optimize_costs_interactive.py --large-table db.events --rows 1600000000 --cols 200 --html optimization_report.html
 
   # From JSON input
   python scripts/optimize_costs_interactive.py --input analysis_request.json
@@ -1812,6 +2739,8 @@ Examples:
 
     # Output
     parser.add_argument('--output', '-o', help='Output JSON file for results')
+    parser.add_argument('--html', metavar='HTML_FILE',
+                        help='Generate HTML report for management (e.g., report.html)')
 
     args = parser.parse_args()
 
@@ -1821,7 +2750,8 @@ Examples:
             run_s3_scan_standalone(
                 s3_path=args.scan_s3,
                 max_files=args.max_files,
-                output_json=args.output
+                output_json=args.output,
+                output_html=args.html
             )
             return
 
@@ -1832,7 +2762,8 @@ Examples:
                 row_count=args.rows,
                 column_count=args.cols,
                 partition_columns=args.partitions,
-                output_json=args.output
+                output_json=args.output,
+                output_html=args.html
             )
             return
 
