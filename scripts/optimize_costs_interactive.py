@@ -2049,7 +2049,11 @@ Be specific with numbers, line references, and actionable advice.
         print("   You can now ask questions about the analysis.")
         print("   Type 'exit' or 'quit' to end the conversation.")
         print("   Type 'save' to save the analysis report.")
+        print("   Type 'savechat' to save the conversation history.")
         print("-"*70)
+
+        # Reset conversation history for this session
+        self.conversation_history = []
 
         agent = self._get_chat_agent()
         if not agent:
@@ -2077,6 +2081,12 @@ Ready to answer questions about this analysis.
 
         # Initialize conversation
         agent(context_message)
+        # Store context message in history
+        self.conversation_history.append({
+            'role': 'system',
+            'content': context_message,
+            'timestamp': self._get_timestamp()
+        })
 
         while True:
             try:
@@ -2086,6 +2096,11 @@ Ready to answer questions about this analysis.
                     continue
 
                 if user_input.lower() in ('exit', 'quit', 'q'):
+                    # Offer to save conversation before exiting
+                    if self.conversation_history:
+                        save_chat = input("   Save conversation history before exiting? [Y/n]: ").strip().lower()
+                        if save_chat != 'n':
+                            self._save_conversation(result)
                     print("\n👋 Ending conversation. Goodbye!")
                     break
 
@@ -2093,16 +2108,40 @@ Ready to answer questions about this analysis.
                     self._save_report(result)
                     continue
 
+                if user_input.lower() == 'savechat':
+                    self._save_conversation(result)
+                    continue
+
                 if user_input.lower() == 'help':
                     self._show_conversation_help()
                     continue
+
+                # Store user input in history
+                self.conversation_history.append({
+                    'role': 'user',
+                    'content': user_input,
+                    'timestamp': self._get_timestamp()
+                })
 
                 # Get response from agent
                 print("\n🤖 Agent: ", end="", flush=True)
                 response = agent(user_input)
                 print(response)
 
+                # Store agent response in history
+                self.conversation_history.append({
+                    'role': 'assistant',
+                    'content': str(response),
+                    'timestamp': self._get_timestamp()
+                })
+
             except KeyboardInterrupt:
+                # Offer to save conversation before exiting
+                if self.conversation_history:
+                    print()
+                    save_chat = input("   Save conversation history before exiting? [Y/n]: ").strip().lower()
+                    if save_chat != 'n':
+                        self._save_conversation(result)
                 print("\n\n👋 Conversation ended.")
                 break
 
@@ -2548,6 +2587,50 @@ Ready to answer questions about this analysis.
 
         print(f"   ✅ Report saved to: {output_path}")
 
+    def _get_timestamp(self) -> str:
+        """Get current timestamp in ISO format."""
+        from datetime import datetime
+        return datetime.now().isoformat()
+
+    def _save_conversation(self, result: Dict = None):
+        """Save conversation history to JSON file."""
+        if not self.conversation_history:
+            print("   ❌ No conversation history to save.")
+            return
+
+        job_name = result.get('job_name', 'chat') if result else 'chat'
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        default_name = f"conversation_{job_name}_{timestamp}.json"
+        filename = input(f"   Filename (default: {default_name}): ").strip()
+        if not filename:
+            filename = default_name
+
+        output_path = Path('cost_optimizer/reports/conversations') / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build conversation data with metadata
+        conversation_data = {
+            'metadata': {
+                'job_name': job_name,
+                'timestamp': datetime.now().isoformat(),
+                'total_messages': len(self.conversation_history),
+                'user_messages': len([m for m in self.conversation_history if m['role'] == 'user']),
+                'assistant_messages': len([m for m in self.conversation_history if m['role'] == 'assistant'])
+            },
+            'analysis_summary': None,
+            'conversation': self.conversation_history
+        }
+
+        # Include analysis summary if available
+        if result and 'summary' in result:
+            conversation_data['analysis_summary'] = result['summary']
+
+        with open(output_path, 'w') as f:
+            json.dump(conversation_data, f, indent=2, default=str)
+
+        print(f"   ✅ Conversation saved to: {output_path}")
+
     def _show_conversation_help(self):
         """Show conversation help."""
         print("""
@@ -2563,9 +2646,10 @@ Ready to answer questions about this analysis.
    • "What's the ROI if I fix just the UDF issues?"
 
    Commands:
-   • 'save' - Save report to JSON
+   • 'save' - Save analysis report to JSON
+   • 'savechat' - Save conversation history to JSON
    • 'help' - Show this help
-   • 'exit' - End conversation
+   • 'exit' - End conversation (will offer to save chat)
 """)
 
     def run_from_json(self, json_path: str):
