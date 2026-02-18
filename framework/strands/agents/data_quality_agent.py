@@ -6,12 +6,17 @@ Strands Data Quality Agent
 Validates data quality rules against source and target tables.
 Supports PRE-LOAD and POST-LOAD validation phases.
 
+IMPORTANT: This agent executes ACTUAL SQL queries via Athena to validate rules.
+It does NOT simulate or generate fake data.
+
 Configuration Structure:
 ------------------------
 "data_quality": {
     "enabled": "Y",
     "fail_on_critical": "Y",
-    "sample_size": 100000,
+    "athena_workgroup": "primary",
+    "athena_output_location": "s3://my-bucket/athena-results/",
+    "query_timeout_seconds": 300,
 
     "pre_load_rules": [
         {
@@ -42,13 +47,14 @@ Configuration Structure:
 Audit Output:
 -------------
 Each validation writes to unified audit with:
-- records_scanned: Number of records checked
-- outliers_found: Number of records failing the rule
+- records_scanned: Number of records checked (from actual query)
+- outliers_found: Number of records failing the rule (from actual query)
 - pass_fail_status: "PASS" or "FAIL"
 - threshold: The threshold used
 - actual_value: The actual measured value
 """
 
+import time
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
@@ -105,6 +111,173 @@ class StrandsDataQualityAgent(StrandsAgent):
                 self.audit = get_audit_logger(config)
             except Exception:
                 pass
+
+        # Athena client for executing validation queries
+        self._athena_client = None
+        self._athena_workgroup = 'primary'
+        self._athena_output_location = None
+        self._query_timeout = 300  # seconds
+
+    @property
+    def athena_client(self):
+        """Lazy-load Athena client."""
+        if self._athena_client is None:
+            try:
+                import boto3
+                self._athena_client = boto3.client('athena')
+            except Exception as e:
+                self.logger.warning(f"Could not create Athena client: {e}")
+        return self._athena_client
+
+    def _execute_athena_query(
+        self,
+        sql: str,
+        context: AgentContext,
+        timeout_seconds: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a SQL query via Athena and return the results.
+
+        Returns:
+            {
+                'success': bool,
+                'rows': List[List[str]],  # result rows
+                'columns': List[str],     # column names
+                'row_count': int,
+                'error': str or None
+            }
+        """
+        if not self.athena_client:
+            return {
+                'success': False,
+                'rows': [],
+                'columns': [],
+                'row_count': 0,
+                'error': 'Athena client not available'
+            }
+
+        dq_config = context.config.get('data_quality', {})
+        workgroup = dq_config.get('athena_workgroup', self._athena_workgroup)
+        output_location = dq_config.get('athena_output_location', self._athena_output_location)
+        timeout = timeout_seconds or dq_config.get('query_timeout_seconds', self._query_timeout)
+
+        # Output location is required for Athena
+        if not output_location:
+            # Try to get from global config
+            output_location = context.config.get('athena', {}).get('output_location')
+            if not output_location:
+                output_location = context.config.get('s3_bucket')
+                if output_location:
+                    output_location = f"s3://{output_location}/athena-dq-results/"
+
+        if not output_location:
+            return {
+                'success': False,
+                'rows': [],
+                'columns': [],
+                'row_count': 0,
+                'error': 'athena_output_location not configured in data_quality config'
+            }
+
+        try:
+            # Start query execution
+            start_params = {
+                'QueryString': sql,
+                'WorkGroup': workgroup,
+                'ResultConfiguration': {
+                    'OutputLocation': output_location
+                }
+            }
+
+            response = self.athena_client.start_query_execution(**start_params)
+            query_execution_id = response['QueryExecutionId']
+
+            self.logger.debug(f"Started Athena query {query_execution_id}: {sql[:100]}...")
+
+            # Poll for completion
+            start_time = time.time()
+            while True:
+                status_response = self.athena_client.get_query_execution(
+                    QueryExecutionId=query_execution_id
+                )
+                state = status_response['QueryExecution']['Status']['State']
+
+                if state == 'SUCCEEDED':
+                    break
+                elif state in ('FAILED', 'CANCELLED'):
+                    error_msg = status_response['QueryExecution']['Status'].get(
+                        'StateChangeReason', f'Query {state}'
+                    )
+                    return {
+                        'success': False,
+                        'rows': [],
+                        'columns': [],
+                        'row_count': 0,
+                        'error': error_msg
+                    }
+
+                if time.time() - start_time > timeout:
+                    # Cancel the query
+                    try:
+                        self.athena_client.stop_query_execution(
+                            QueryExecutionId=query_execution_id
+                        )
+                    except Exception:
+                        pass
+                    return {
+                        'success': False,
+                        'rows': [],
+                        'columns': [],
+                        'row_count': 0,
+                        'error': f'Query timed out after {timeout}s'
+                    }
+
+                time.sleep(1)  # Poll every second
+
+            # Fetch results
+            results_response = self.athena_client.get_query_results(
+                QueryExecutionId=query_execution_id,
+                MaxResults=10000  # Should be enough for DQ queries
+            )
+
+            result_set = results_response.get('ResultSet', {})
+            rows_data = result_set.get('Rows', [])
+            columns = []
+            rows = []
+
+            if rows_data:
+                # First row is column headers
+                header_row = rows_data[0]
+                columns = [
+                    col.get('VarCharValue', '')
+                    for col in header_row.get('Data', [])
+                ]
+
+                # Remaining rows are data
+                for row in rows_data[1:]:
+                    row_values = [
+                        col.get('VarCharValue', '')
+                        for col in row.get('Data', [])
+                    ]
+                    rows.append(row_values)
+
+            return {
+                'success': True,
+                'rows': rows,
+                'columns': columns,
+                'row_count': len(rows),
+                'error': None
+            }
+
+        except Exception as e:
+            self.logger.error(f"Athena query failed: {e}")
+            return {
+                'success': False,
+                'rows': [],
+                'columns': [],
+                'row_count': 0,
+                'error': str(e)
+            }
 
     def execute(self, context: AgentContext) -> AgentResult:
         """Execute data quality validation with pre/post load phases."""
@@ -366,7 +539,8 @@ class StrandsDataQualityAgent(StrandsAgent):
         phase: str
     ) -> Dict[str, Any]:
         """
-        Validate a rule and return metrics including record counts and outliers.
+        Validate a rule by executing ACTUAL SQL via Athena.
+        Returns metrics including real record counts and outliers.
         """
         rule_type = rule.get('type')
         column = rule.get('column')
@@ -376,29 +550,182 @@ class StrandsDataQualityAgent(StrandsAgent):
         # Generate validation SQL
         sql = self._generate_validation_sql(table_name, rule)
 
-        # Simulate execution (in production, would run actual SQL)
-        # For now, generate realistic sample metrics
-        import random
-        sample_size = context.config.get('data_quality', {}).get('sample_size', 100000)
+        # Initialize result with defaults (will be updated by actual query)
+        records_scanned = 0
+        outliers_found = 0
+        actual_value = 0
+        pass_fail = 'FAIL'
+        query_error = None
 
-        # Simulated metrics
-        records_scanned = sample_size
-        outliers_found = random.randint(0, int(sample_size * 0.05))  # 0-5% outliers
+        # Execute actual query via Athena
+        if rule_type == 'row_count_check':
+            # Simple count query
+            count_sql = f"SELECT COUNT(*) as record_count FROM {table_name}"
+            query_result = self._execute_athena_query(count_sql, context)
 
-        # Determine pass/fail
-        if rule_type == 'completeness':
-            actual_value = 1 - (outliers_found / records_scanned)
-            pass_fail = 'PASS' if actual_value >= threshold else 'FAIL'
-        elif rule_type in ('not_null', 'unique', 'positive'):
-            actual_value = outliers_found
-            pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
-        elif rule_type == 'row_count_check':
-            min_rows = rule.get('min_rows', 0)
-            actual_value = records_scanned
-            pass_fail = 'PASS' if records_scanned >= min_rows else 'FAIL'
+            if query_result['success'] and query_result['rows']:
+                try:
+                    records_scanned = int(query_result['rows'][0][0])
+                    actual_value = records_scanned
+                    min_rows = rule.get('min_rows', 0)
+                    pass_fail = 'PASS' if records_scanned >= min_rows else 'FAIL'
+                    self.logger.info(
+                        f"row_count_check on {table_name}: "
+                        f"actual={records_scanned}, min_required={min_rows}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse row count: {e}"
+            else:
+                query_error = query_result.get('error', 'Query failed')
+
+        elif rule_type == 'completeness':
+            # Get total count and null count
+            completeness_sql = f"""
+                SELECT
+                    COUNT(*) as total_rows,
+                    SUM(CASE WHEN {column} IS NULL THEN 1 ELSE 0 END) as null_count
+                FROM {table_name}
+            """
+            query_result = self._execute_athena_query(completeness_sql, context)
+
+            if query_result['success'] and query_result['rows']:
+                try:
+                    row = query_result['rows'][0]
+                    records_scanned = int(row[0])
+                    outliers_found = int(row[1])  # null count
+                    if records_scanned > 0:
+                        actual_value = round(1 - (outliers_found / records_scanned), 4)
+                    else:
+                        actual_value = 0
+                    pass_fail = 'PASS' if actual_value >= threshold else 'FAIL'
+                    self.logger.info(
+                        f"completeness on {table_name}.{column}: "
+                        f"total={records_scanned}, nulls={outliers_found}, "
+                        f"completeness={actual_value:.2%}, threshold={threshold}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse completeness result: {e}"
+            else:
+                query_error = query_result.get('error', 'Query failed')
+
+        elif rule_type == 'not_null':
+            # Count nulls
+            null_sql = f"SELECT COUNT(*) as null_count FROM {table_name} WHERE {column} IS NULL"
+            count_sql = f"SELECT COUNT(*) as total FROM {table_name}"
+
+            # Execute both queries
+            null_result = self._execute_athena_query(null_sql, context)
+            count_result = self._execute_athena_query(count_sql, context)
+
+            if null_result['success'] and count_result['success']:
+                try:
+                    outliers_found = int(null_result['rows'][0][0]) if null_result['rows'] else 0
+                    records_scanned = int(count_result['rows'][0][0]) if count_result['rows'] else 0
+                    actual_value = outliers_found
+                    # For not_null, threshold is max allowed nulls (usually 0)
+                    pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                    self.logger.info(
+                        f"not_null on {table_name}.{column}: "
+                        f"total={records_scanned}, nulls={outliers_found}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse not_null result: {e}"
+            else:
+                query_error = null_result.get('error') or count_result.get('error', 'Query failed')
+
+        elif rule_type == 'positive':
+            # Count non-positive values
+            check_sql = f"""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN {column} IS NOT NULL AND {column} <= 0 THEN 1 ELSE 0 END) as outliers
+                FROM {table_name}
+            """
+            query_result = self._execute_athena_query(check_sql, context)
+
+            if query_result['success'] and query_result['rows']:
+                try:
+                    row = query_result['rows'][0]
+                    records_scanned = int(row[0])
+                    outliers_found = int(row[1])
+                    actual_value = outliers_found
+                    pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                    self.logger.info(
+                        f"positive on {table_name}.{column}: "
+                        f"total={records_scanned}, non_positive={outliers_found}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse positive result: {e}"
+            else:
+                query_error = query_result.get('error', 'Query failed')
+
+        elif rule_type == 'unique':
+            # Check for duplicates
+            unique_sql = f"""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) - COUNT(DISTINCT {column}) as duplicates
+                FROM {table_name}
+                WHERE {column} IS NOT NULL
+            """
+            query_result = self._execute_athena_query(unique_sql, context)
+
+            if query_result['success'] and query_result['rows']:
+                try:
+                    row = query_result['rows'][0]
+                    records_scanned = int(row[0])
+                    outliers_found = int(row[1])  # duplicates
+                    actual_value = outliers_found
+                    pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                    self.logger.info(
+                        f"unique on {table_name}.{column}: "
+                        f"total={records_scanned}, duplicates={outliers_found}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse unique result: {e}"
+            else:
+                query_error = query_result.get('error', 'Query failed')
+
+        elif rule_type in ('greater_than', 'less_than'):
+            value = rule.get('value', 0)
+            op = '<=' if rule_type == 'greater_than' else '>='
+            check_sql = f"""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN {column} IS NOT NULL AND {column} {op} {value} THEN 1 ELSE 0 END) as outliers
+                FROM {table_name}
+            """
+            query_result = self._execute_athena_query(check_sql, context)
+
+            if query_result['success'] and query_result['rows']:
+                try:
+                    row = query_result['rows'][0]
+                    records_scanned = int(row[0])
+                    outliers_found = int(row[1])
+                    actual_value = outliers_found
+                    pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                    self.logger.info(
+                        f"{rule_type} on {table_name}.{column}: "
+                        f"total={records_scanned}, outliers={outliers_found}, result={pass_fail}"
+                    )
+                except (ValueError, IndexError) as e:
+                    query_error = f"Failed to parse {rule_type} result: {e}"
+            else:
+                query_error = query_result.get('error', 'Query failed')
+
         else:
-            actual_value = outliers_found
-            pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+            # For unknown rule types, try to execute the generated SQL directly
+            query_result = self._execute_athena_query(sql, context)
+            if query_result['success'] and query_result['rows']:
+                try:
+                    # Assume first column is the count/outliers
+                    outliers_found = int(query_result['rows'][0][0])
+                    actual_value = outliers_found
+                    pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                except (ValueError, IndexError):
+                    query_error = "Failed to parse result"
+            else:
+                query_error = query_result.get('error', 'Query failed')
 
         result = {
             'table': table_name,
@@ -413,8 +740,16 @@ class StrandsDataQualityAgent(StrandsAgent):
             'actual_value': actual_value,
             'pass_fail_status': pass_fail,
             'validated_at': datetime.utcnow().isoformat(),
-            'table_exists': table_name in all_tables
+            'table_exists': table_name in all_tables,
+            'query_error': query_error
         }
+
+        # If query failed, log as error but don't crash
+        if query_error:
+            self.logger.error(
+                f"DQ rule validation failed for {rule_type} on {table_name}.{column}: {query_error}"
+            )
+            result['pass_fail_status'] = 'ERROR'
 
         # Log individual rule to audit
         if self.audit:
@@ -434,7 +769,8 @@ class StrandsDataQualityAgent(StrandsAgent):
                         'records_scanned': records_scanned,
                         'outliers_found': outliers_found,
                         'threshold': threshold,
-                        'actual_value': actual_value
+                        'actual_value': actual_value,
+                        'query_error': query_error
                     }
                 )
             except Exception:
@@ -447,23 +783,50 @@ class StrandsDataQualityAgent(StrandsAgent):
         sql_rule: Dict[str, Any],
         context: AgentContext
     ) -> Dict[str, Any]:
-        """Validate a SQL rule with metrics."""
+        """Validate a SQL rule by executing it via Athena."""
         rule_id = sql_rule.get('id', 'UNKNOWN')
         sql = sql_rule.get('sql', '')
         threshold = sql_rule.get('threshold', 0)
         severity = sql_rule.get('severity', 'warning')
 
-        # Extract table name from SQL
+        # Extract table name from SQL for logging
         table_match = sql.upper().split('FROM')
         table_name = table_match[1].split()[0].lower() if len(table_match) > 1 else 'unknown'
 
-        # Simulated metrics
-        import random
-        sample_size = context.config.get('data_quality', {}).get('sample_size', 100000)
-        records_scanned = sample_size
-        outliers_found = random.randint(0, int(threshold * 2) if threshold > 0 else 100)
+        # Execute actual SQL via Athena
+        records_scanned = 0
+        outliers_found = 0
+        pass_fail = 'FAIL'
+        query_error = None
 
-        pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+        query_result = self._execute_athena_query(sql, context)
+
+        if query_result['success'] and query_result['rows']:
+            try:
+                # SQL rules should return a count of violations in first column
+                # E.g., SELECT COUNT(*) FROM table WHERE some_condition
+                outliers_found = int(query_result['rows'][0][0])
+
+                # If query has second column, treat as total records for context
+                if len(query_result['rows'][0]) > 1:
+                    records_scanned = int(query_result['rows'][0][1])
+                else:
+                    # Run a count query to get total records
+                    count_result = self._execute_athena_query(
+                        f"SELECT COUNT(*) FROM {table_name}", context
+                    )
+                    if count_result['success'] and count_result['rows']:
+                        records_scanned = int(count_result['rows'][0][0])
+
+                pass_fail = 'PASS' if outliers_found <= threshold else 'FAIL'
+                self.logger.info(
+                    f"SQL rule {rule_id}: outliers={outliers_found}, "
+                    f"threshold={threshold}, result={pass_fail}"
+                )
+            except (ValueError, IndexError) as e:
+                query_error = f"Failed to parse SQL rule result: {e}"
+        else:
+            query_error = query_result.get('error', 'Query failed')
 
         result = {
             'rule_id': rule_id,
@@ -476,10 +839,14 @@ class StrandsDataQualityAgent(StrandsAgent):
             'records_scanned': records_scanned,
             'outliers_found': outliers_found,
             'actual_value': outliers_found,
-            'pass_fail_status': pass_fail,
+            'pass_fail_status': pass_fail if not query_error else 'ERROR',
             'description': sql_rule.get('description', ''),
-            'validated_at': datetime.utcnow().isoformat()
+            'validated_at': datetime.utcnow().isoformat(),
+            'query_error': query_error
         }
+
+        if query_error:
+            self.logger.error(f"SQL rule {rule_id} failed: {query_error}")
 
         # Log to audit
         if self.audit:
@@ -496,7 +863,8 @@ class StrandsDataQualityAgent(StrandsAgent):
                         'table': table_name,
                         'records_scanned': records_scanned,
                         'outliers_found': outliers_found,
-                        'threshold': threshold
+                        'threshold': threshold,
+                        'query_error': query_error
                     }
                 )
             except Exception:
