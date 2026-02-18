@@ -88,7 +88,13 @@ class StrandsLearningAgent(StrandsAgent):
     """
     Local ML training agent with model versioning and cost tracking.
 
-    Trained Models:
+    IMPORTANT: Models are trained PER JOB, not globally.
+    Each job has its own:
+    - execution_history_{job_name}.json
+    - model_registry_{job_name}.json
+    - Trained models specific to that job's patterns
+
+    Trained Models (per job):
     1. Resource Predictor - Predicts workers/memory from data size
     2. Runtime Estimator - Predicts job duration from config
     3. Cost Predictor - Predicts job cost from resources/runtime
@@ -96,8 +102,8 @@ class StrandsLearningAgent(StrandsAgent):
     """
 
     AGENT_NAME = "learning_agent"
-    AGENT_VERSION = "2.1.0"
-    AGENT_DESCRIPTION = "ML training with model versioning and cost tracking"
+    AGENT_VERSION = "2.2.0"
+    AGENT_DESCRIPTION = "Job-specific ML training with model versioning and cost tracking"
 
     DEPENDENCIES = []  # Can run in parallel
     PARALLEL_SAFE = True
@@ -112,14 +118,27 @@ class StrandsLearningAgent(StrandsAgent):
         self.models_dir = Path(config.get('models_dir', 'data/models')) if config else Path('data/models')
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        # Model registry
+        # Model registry (loaded per-job)
         self._model_registry: Dict[str, ModelMetadata] = {}
         self._loaded_models: Dict[str, Any] = {}
-        self._load_model_registry()
+        self._current_job_name: str = None
 
-    def _load_model_registry(self) -> None:
-        """Load model registry from disk."""
-        registry_file = self.models_dir / 'model_registry.json'
+    def _get_job_dir(self, job_name: str) -> Path:
+        """Get job-specific directory for models and history."""
+        # Sanitize job name for filesystem
+        safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in job_name)
+        job_dir = self.models_dir / safe_name
+        job_dir.mkdir(parents=True, exist_ok=True)
+        return job_dir
+
+    def _load_model_registry(self, job_name: str) -> None:
+        """Load job-specific model registry from disk."""
+        job_dir = self._get_job_dir(job_name)
+        registry_file = job_dir / 'model_registry.json'
+
+        self._model_registry = {}
+        self._current_job_name = job_name
+
         if registry_file.exists():
             try:
                 with open(registry_file, 'r') as f:
@@ -127,18 +146,21 @@ class StrandsLearningAgent(StrandsAgent):
                     for model_id, meta in data.items():
                         meta['created_at'] = datetime.fromisoformat(meta['created_at'])
                         self._model_registry[model_id] = ModelMetadata(**meta)
+                self.logger.info(f"Loaded {len(self._model_registry)} models for job: {job_name}")
             except Exception as e:
-                self.logger.warning(f"Could not load model registry: {e}")
+                self.logger.warning(f"Could not load model registry for {job_name}: {e}")
 
-    def _save_model_registry(self) -> None:
-        """Save model registry to disk."""
-        registry_file = self.models_dir / 'model_registry.json'
+    def _save_model_registry(self, job_name: str) -> None:
+        """Save job-specific model registry to disk."""
+        job_dir = self._get_job_dir(job_name)
+        registry_file = job_dir / 'model_registry.json'
+
         try:
             data = {k: v.to_dict() for k, v in self._model_registry.items()}
             with open(registry_file, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            self.logger.warning(f"Could not save model registry: {e}")
+            self.logger.warning(f"Could not save model registry for {job_name}: {e}")
 
     def _generate_model_id(self, model_type: str, features: List[str]) -> str:
         """Generate unique model ID based on type and features."""
@@ -147,7 +169,13 @@ class StrandsLearningAgent(StrandsAgent):
         return f"{model_type[:3].upper()}-{hash_digest}"
 
     def execute(self, context: AgentContext) -> AgentResult:
-        """Execute learning agent - collect data, train models, track costs."""
+        """Execute learning agent - collect data, train models, track costs.
+
+        IMPORTANT: All learning is JOB-SPECIFIC.
+        - Historical data is stored per job
+        - Models are trained only on that job's data
+        - Predictions use job-specific models
+        """
         learning_config = context.config.get('learning', {})
 
         if not self.is_enabled('learning.enabled'):
@@ -158,23 +186,28 @@ class StrandsLearningAgent(StrandsAgent):
                 output={'skipped': True}
             )
 
+        job_name = context.job_name
+
+        # Load job-specific model registry
+        self._load_model_registry(job_name)
+
         # Collect execution data
         execution_record = self._collect_execution_data(context)
 
-        # Store execution history
+        # Store execution history (job-specific)
         self.storage.store_agent_data(
             self.AGENT_NAME,
-            'execution_history',
+            f'execution_history_{job_name}',
             [execution_record],
             use_pipe_delimited=True
         )
 
-        # Load historical data for training
-        historical_data = self._load_historical_data()
+        # Load job-specific historical data for training
+        historical_data = self._load_historical_data(job_name)
         historical_data.append(execution_record)
 
-        # Save updated historical data
-        self._save_historical_data(historical_data)
+        # Save updated historical data (job-specific)
+        self._save_historical_data(job_name, historical_data)
 
         # Train models if we have enough data
         trained_models: List[ModelMetadata] = []
@@ -184,29 +217,29 @@ class StrandsLearningAgent(StrandsAgent):
         min_records = learning_config.get('min_training_records', 5)
 
         if len(historical_data) >= min_records:
-            # Train Resource Predictor
-            resource_model, resource_meta = self._train_resource_predictor(historical_data)
+            # Train Resource Predictor (job-specific)
+            resource_model, resource_meta = self._train_resource_predictor(historical_data, job_name)
             if resource_model and resource_meta:
                 trained_models.append(resource_meta)
                 total_training_cost += resource_meta.training_cost_usd
                 total_training_time += resource_meta.training_time_seconds
-                self._save_model(resource_meta.model_id, resource_model)
+                self._save_model(resource_meta.model_id, resource_model, job_name)
 
-            # Train Runtime Estimator
-            runtime_model, runtime_meta = self._train_runtime_estimator(historical_data)
+            # Train Runtime Estimator (job-specific)
+            runtime_model, runtime_meta = self._train_runtime_estimator(historical_data, job_name)
             if runtime_model and runtime_meta:
                 trained_models.append(runtime_meta)
                 total_training_cost += runtime_meta.training_cost_usd
                 total_training_time += runtime_meta.training_time_seconds
-                self._save_model(runtime_meta.model_id, runtime_model)
+                self._save_model(runtime_meta.model_id, runtime_model, job_name)
 
-            # Train Cost Predictor
-            cost_model, cost_meta = self._train_cost_predictor(historical_data)
+            # Train Cost Predictor (job-specific)
+            cost_model, cost_meta = self._train_cost_predictor(historical_data, job_name)
             if cost_model and cost_meta:
                 trained_models.append(cost_meta)
                 total_training_cost += cost_meta.training_cost_usd
                 total_training_time += cost_meta.training_time_seconds
-                self._save_model(cost_meta.model_id, cost_model)
+                self._save_model(cost_meta.model_id, cost_model, job_name)
 
         # Detect anomalies
         anomalies = []
@@ -245,8 +278,8 @@ class StrandsLearningAgent(StrandsAgent):
                 use_pipe_delimited=True
             )
 
-        # Save registry
-        self._save_model_registry()
+        # Save job-specific registry
+        self._save_model_registry(job_name)
 
         # Generate recommendations
         recommendations = []
@@ -329,30 +362,36 @@ class StrandsLearningAgent(StrandsAgent):
             'timestamp': datetime.utcnow().isoformat()
         }
 
-    def _load_historical_data(self) -> List[Dict]:
-        """Load historical execution data for training."""
-        history_file = self.models_dir / 'execution_history.json'
+    def _load_historical_data(self, job_name: str) -> List[Dict]:
+        """Load job-specific historical execution data for training."""
+        job_dir = self._get_job_dir(job_name)
+        history_file = job_dir / 'execution_history.json'
 
         if history_file.exists():
             try:
                 with open(history_file, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    self.logger.info(f"Loaded {len(data)} historical records for job: {job_name}")
+                    return data
             except Exception as e:
-                self.logger.warning(f"Could not load history: {e}")
+                self.logger.warning(f"Could not load history for {job_name}: {e}")
 
         return []
 
-    def _save_historical_data(self, data: List[Dict]) -> None:
-        """Save historical execution data."""
-        history_file = self.models_dir / 'execution_history.json'
+    def _save_historical_data(self, job_name: str, data: List[Dict]) -> None:
+        """Save job-specific historical execution data."""
+        job_dir = self._get_job_dir(job_name)
+        history_file = job_dir / 'execution_history.json'
+
         try:
             with open(history_file, 'w') as f:
-                json.dump(data[-1000:], f)  # Keep last 1000 records
+                json.dump(data[-500:], f, indent=2)  # Keep last 500 records per job
+            self.logger.info(f"Saved {len(data[-500:])} historical records for job: {job_name}")
         except Exception as e:
-            self.logger.warning(f"Could not save history: {e}")
+            self.logger.warning(f"Could not save history for {job_name}: {e}")
 
-    def _train_resource_predictor(self, data: List[Dict]) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
-        """Train model to predict workers from data size."""
+    def _train_resource_predictor(self, data: List[Dict], job_name: str) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
+        """Train job-specific model to predict workers from data size."""
         start_time = datetime.utcnow()
 
         # Extract features and target
@@ -410,8 +449,8 @@ class StrandsLearningAgent(StrandsAgent):
 
         return model, metadata
 
-    def _train_runtime_estimator(self, data: List[Dict]) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
-        """Train model to predict runtime from size and workers."""
+    def _train_runtime_estimator(self, data: List[Dict], job_name: str) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
+        """Train job-specific model to predict runtime from size and workers."""
         start_time = datetime.utcnow()
 
         features_list = []
@@ -467,8 +506,8 @@ class StrandsLearningAgent(StrandsAgent):
 
         return model, metadata
 
-    def _train_cost_predictor(self, data: List[Dict]) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
-        """Train model to predict cost from resources and runtime."""
+    def _train_cost_predictor(self, data: List[Dict], job_name: str) -> Tuple[Optional[SimpleLinearModel], Optional[ModelMetadata]]:
+        """Train job-specific model to predict cost from resources and runtime."""
         start_time = datetime.utcnow()
 
         features_list = []
@@ -585,21 +624,38 @@ class StrandsLearningAgent(StrandsAgent):
 
         return model
 
-    def _save_model(self, model_id: str, model: SimpleLinearModel) -> None:
-        """Save model to disk."""
-        model_file = self.models_dir / f"{model_id}.pkl"
+    def _save_model(self, model_id: str, model: SimpleLinearModel, job_name: str = None) -> None:
+        """Save model to job-specific directory."""
+        if job_name is None:
+            job_name = self._current_job_name
+
+        if job_name:
+            job_dir = self._get_job_dir(job_name)
+            model_file = job_dir / f"{model_id}.pkl"
+        else:
+            model_file = self.models_dir / f"{model_id}.pkl"
+
         try:
             with open(model_file, 'wb') as f:
                 pickle.dump(model, f)
+            self.logger.info(f"Saved model {model_id} for job: {job_name}")
         except Exception as e:
             self.logger.warning(f"Could not save model {model_id}: {e}")
 
-    def _load_model(self, model_id: str) -> Optional[SimpleLinearModel]:
-        """Load model from disk."""
+    def _load_model(self, model_id: str, job_name: str = None) -> Optional[SimpleLinearModel]:
+        """Load model from job-specific directory."""
         if model_id in self._loaded_models:
             return self._loaded_models[model_id]
 
-        model_file = self.models_dir / f"{model_id}.pkl"
+        if job_name is None:
+            job_name = self._current_job_name
+
+        if job_name:
+            job_dir = self._get_job_dir(job_name)
+            model_file = job_dir / f"{model_id}.pkl"
+        else:
+            model_file = self.models_dir / f"{model_id}.pkl"
+
         if model_file.exists():
             try:
                 with open(model_file, 'rb') as f:
