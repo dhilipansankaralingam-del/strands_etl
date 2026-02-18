@@ -37,6 +37,15 @@ class JobExecution:
     shuffle_bytes: int = 0
     cost_usd: float = 0.0
     error_message: str = ""
+    # Extended metrics for learning
+    skewness_ratio: float = 0.0          # shuffle_bytes / bytes_read - high = data skew
+    etl_throughput_mbps: float = 0.0     # bytes_read / duration in MB/s
+    avg_executor_memory_pct: float = 0.0 # avg JVM heap usage across executors
+    max_executor_memory_pct: float = 0.0 # max JVM heap usage (OOM risk indicator)
+    driver_memory_pct: float = 0.0       # driver JVM heap usage
+    glue_stage: str = ""                 # last reported stage at time of failure/completion
+    completed_stages: int = 0            # number of Spark stages completed
+    failed_stages: int = 0               # number of Spark stages that failed
 
     def to_dict(self) -> Dict:
         return {
@@ -55,7 +64,15 @@ class JobExecution:
             'bytes_written': self.bytes_written,
             'shuffle_bytes': self.shuffle_bytes,
             'cost_usd': self.cost_usd,
-            'error_message': self.error_message
+            'error_message': self.error_message,
+            'skewness_ratio': self.skewness_ratio,
+            'etl_throughput_mbps': self.etl_throughput_mbps,
+            'avg_executor_memory_pct': self.avg_executor_memory_pct,
+            'max_executor_memory_pct': self.max_executor_memory_pct,
+            'driver_memory_pct': self.driver_memory_pct,
+            'glue_stage': self.glue_stage,
+            'completed_stages': self.completed_stages,
+            'failed_stages': self.failed_stages
         }
 
 
@@ -181,7 +198,7 @@ class ExecutionAgent(StrandsAgent):
             use_pipe_delimited=True
         )
 
-        # Share execution data with learning agent
+        # Share full execution data with learning agent
         context.set_shared('job_execution', execution.to_dict())
         context.set_shared('job_metrics', {
             'duration_seconds': execution.duration_seconds,
@@ -190,28 +207,76 @@ class ExecutionAgent(StrandsAgent):
             'bytes_read': execution.bytes_read,
             'bytes_written': execution.bytes_written,
             'shuffle_bytes': execution.shuffle_bytes,
-            'cost_usd': execution.cost_usd
+            'cost_usd': execution.cost_usd,
+            # Extended metrics for learning
+            'skewness_ratio': execution.skewness_ratio,
+            'etl_throughput_mbps': execution.etl_throughput_mbps,
+            'avg_executor_memory_pct': execution.avg_executor_memory_pct,
+            'max_executor_memory_pct': execution.max_executor_memory_pct,
+            'driver_memory_pct': execution.driver_memory_pct,
+            'completed_stages': execution.completed_stages,
+            'failed_stages': execution.failed_stages,
+            'job_status': execution.status,  # pass actual Glue status for learning
         })
 
         recommendations = []
         if execution.status == 'SUCCEEDED':
             recommendations.append(
                 f"Job completed in {execution.duration_seconds:.0f}s, "
-                f"cost: ${execution.cost_usd:.2f}"
+                f"cost: ${execution.cost_usd:.2f}, "
+                f"throughput: {execution.etl_throughput_mbps:.1f} MB/s"
             )
-        elif execution.status == 'FAILED':
-            recommendations.append(f"Job failed: {execution.error_message}")
+        elif execution.status in self.GLUE_FAILURE_STATES:
+            recommendations.append(
+                f"Job ended with status={execution.status}: {execution.error_message}"
+            )
+
+        # Skewness warning (shuffle >> input bytes = partitioned skew)
+        if execution.skewness_ratio > 0.5:
+            recommendations.append(
+                f"High data skewness detected (shuffle/read ratio={execution.skewness_ratio:.2f}). "
+                "Consider repartitioning or salting join keys."
+            )
+
+        # Memory pressure warnings
+        if execution.max_executor_memory_pct > 85:
+            recommendations.append(
+                f"Executor memory pressure: max heap={execution.max_executor_memory_pct:.0f}%. "
+                "Consider larger worker type or more workers to avoid OOM."
+            )
+        if execution.driver_memory_pct > 80:
+            recommendations.append(
+                f"Driver memory pressure: heap={execution.driver_memory_pct:.0f}%. "
+                "Avoid driver-side collect() calls on large datasets."
+            )
+
+        if execution.failed_stages > 0:
+            recommendations.append(
+                f"{execution.failed_stages} Spark stage(s) failed during execution."
+            )
+
+        # Map Glue job states to AgentStatus:
+        # SUCCEEDED → COMPLETED; anything else (FAILED, STOPPED, TIMEOUT) → FAILED
+        agent_status = (
+            AgentStatus.COMPLETED
+            if execution.status == 'SUCCEEDED'
+            else AgentStatus.FAILED
+        )
 
         return AgentResult(
             agent_name=self.AGENT_NAME,
             agent_id=self.agent_id,
-            status=AgentStatus.COMPLETED if execution.status != 'FAILED' else AgentStatus.FAILED,
+            status=agent_status,
             output=execution.to_dict(),
             metrics={
                 'duration_seconds': execution.duration_seconds,
                 'records_processed': execution.records_read,
                 'cost_usd': execution.cost_usd,
-                'status': execution.status
+                'status': execution.status,
+                'skewness_ratio': execution.skewness_ratio,
+                'etl_throughput_mbps': execution.etl_throughput_mbps,
+                'avg_executor_memory_pct': execution.avg_executor_memory_pct,
+                'max_executor_memory_pct': execution.max_executor_memory_pct
             },
             recommendations=recommendations,
             errors=[execution.error_message] if execution.error_message else []
@@ -244,8 +309,19 @@ class ExecutionAgent(StrandsAgent):
 
         return execution
 
+    # Terminal states that end the polling loop
+    GLUE_TERMINAL_STATES = {'SUCCEEDED', 'FAILED', 'STOPPED', 'TIMEOUT', 'ERROR'}
+    # States that are considered failures for learning/reporting purposes
+    GLUE_FAILURE_STATES = {'FAILED', 'STOPPED', 'TIMEOUT', 'ERROR'}
+
     def _execute_glue_job(self, execution: JobExecution, context: AgentContext) -> JobExecution:
-        """Execute job on AWS Glue."""
+        """Execute job on AWS Glue.
+
+        Polls every 30 seconds until terminal state, then collects full
+        CloudWatch metrics (records, bytes, shuffle, executor loads, skewness)
+        for ALL terminal states — not only SUCCEEDED — so that learning agent
+        can learn from failures and timeouts too.
+        """
         if not self.glue_client:
             return self._simulate_execution(execution, context)
 
@@ -265,11 +341,15 @@ class ExecutionAgent(StrandsAgent):
             run_id = response['JobRunId']
             execution.run_id = run_id
             execution.status = 'RUNNING'
+            poll_count = 0
 
             self.logger.info(f"Started Glue job {job_name}, run_id: {run_id}")
 
-            # Monitor job
+            # Poll every 30 seconds until terminal state
             while True:
+                time.sleep(30)
+                poll_count += 1
+
                 status_response = self.glue_client.get_job_run(
                     JobName=job_name,
                     RunId=run_id
@@ -278,26 +358,59 @@ class ExecutionAgent(StrandsAgent):
                 job_run = status_response['JobRun']
                 state = job_run['JobRunState']
 
-                if state in ['SUCCEEDED', 'FAILED', 'STOPPED', 'TIMEOUT']:
+                # Log progress every 5 polls (~2.5 min)
+                if poll_count % 5 == 0:
+                    self.logger.info(
+                        f"Glue job {job_name} [{run_id}] state={state} "
+                        f"after {poll_count * 30}s"
+                    )
+
+                if state in self.GLUE_TERMINAL_STATES:
                     execution.status = state
-                    execution.completed_at = job_run.get('CompletedOn', datetime.now(timezone.utc))
+                    execution.completed_at = job_run.get(
+                        'CompletedOn', datetime.now(timezone.utc)
+                    )
 
-                    if state == 'FAILED':
-                        execution.error_message = job_run.get('ErrorMessage', 'Unknown error')
-
+                    # Capture error for any failure state
+                    if state in self.GLUE_FAILURE_STATES:
+                        execution.error_message = job_run.get(
+                            'ErrorMessage',
+                            f'Job ended with state: {state}'
+                        )
+                        self.logger.warning(
+                            f"Glue job {job_name} ended with state={state}: "
+                            f"{execution.error_message}"
+                        )
                     break
 
-                time.sleep(30)  # Poll every 30 seconds
+            # Always collect CloudWatch metrics regardless of terminal state —
+            # even failed/stopped runs have partial metrics useful for learning
+            execution = self._collect_glue_metrics(execution, job_name, run_id)
 
-            # Collect CloudWatch metrics
-            if execution.status == 'SUCCEEDED':
-                execution = self._collect_glue_metrics(execution, job_name, run_id)
+            # Compute derived learning metrics
+            execution = self._compute_derived_metrics(execution)
 
         except Exception as e:
             self.logger.error(f"Glue execution error: {e}")
             execution.status = 'FAILED'
             execution.error_message = str(e)
             execution.completed_at = datetime.now(timezone.utc)
+
+        return execution
+
+    def _compute_derived_metrics(self, execution: JobExecution) -> JobExecution:
+        """Compute derived metrics for learning: skewness, throughput."""
+        # Skewness ratio: high shuffle relative to bytes read signals data skew
+        if execution.bytes_read > 0:
+            execution.skewness_ratio = round(
+                execution.shuffle_bytes / execution.bytes_read, 4
+            )
+
+        # ETL throughput in MB/s
+        if execution.duration_seconds > 0 and execution.bytes_read > 0:
+            execution.etl_throughput_mbps = round(
+                (execution.bytes_read / (1024 * 1024)) / execution.duration_seconds, 2
+            )
 
         return execution
 
@@ -329,43 +442,92 @@ class ExecutionAgent(StrandsAgent):
         job_name: str,
         run_id: str
     ) -> JobExecution:
-        """Collect metrics from CloudWatch for Glue job."""
+        """Collect metrics from CloudWatch for Glue job.
+
+        Collects for ALL terminal states (not only SUCCEEDED) so learning agent
+        receives data from failed/stopped runs too.
+
+        Metrics collected:
+        - ETL movement: recordsRead/Written, bytesRead/Written
+        - Skewness indicator: shuffleBytesWritten
+        - Executor loads: ALL.jvm.heap.usage (avg + max across executors)
+        - Driver load: driver.jvm.heap.usage
+        - Stage tracking: completedStages, failedStages
+        """
         if not self.cloudwatch_client:
             return execution
 
         try:
             end_time = execution.completed_at or datetime.now(timezone.utc)
             start_time = execution.started_at
+            # Add buffer for metrics propagation delay
+            metrics_end = end_time + timedelta(minutes=5)
 
-            metrics_to_fetch = [
-                ('glue.driver.aggregate.recordsRead', 'records_read'),
-                ('glue.driver.aggregate.recordsWritten', 'records_written'),
-                ('glue.driver.aggregate.bytesRead', 'bytes_read'),
-                ('glue.driver.aggregate.bytesWritten', 'bytes_written'),
-                ('glue.driver.aggregate.shuffleBytesWritten', 'shuffle_bytes'),
+            dimensions = [
+                {'Name': 'JobName', 'Value': job_name},
+                {'Name': 'JobRunId', 'Value': run_id}
             ]
 
-            for metric_name, attr_name in metrics_to_fetch:
+            # -- ETL movement metrics (Sum) --
+            sum_metrics = [
+                ('glue.driver.aggregate.recordsRead',        'records_read'),
+                ('glue.driver.aggregate.recordsWritten',     'records_written'),
+                ('glue.driver.aggregate.bytesRead',          'bytes_read'),
+                ('glue.driver.aggregate.bytesWritten',       'bytes_written'),
+                ('glue.driver.aggregate.shuffleBytesWritten','shuffle_bytes'),
+                ('glue.driver.aggregate.numCompletedStages', 'completed_stages'),
+                ('glue.driver.aggregate.numFailedStages',    'failed_stages'),
+            ]
+
+            for metric_name, attr_name in sum_metrics:
                 try:
                     response = self.cloudwatch_client.get_metric_statistics(
                         Namespace='Glue',
                         MetricName=metric_name,
-                        Dimensions=[
-                            {'Name': 'JobName', 'Value': job_name},
-                            {'Name': 'JobRunId', 'Value': run_id}
-                        ],
+                        Dimensions=dimensions,
                         StartTime=start_time,
-                        EndTime=end_time + timedelta(minutes=5),
-                        Period=3600,
+                        EndTime=metrics_end,
+                        Period=int((metrics_end - start_time).total_seconds()) + 60,
                         Statistics=['Sum']
                     )
-
                     if response.get('Datapoints'):
                         value = int(sum(dp['Sum'] for dp in response['Datapoints']))
                         setattr(execution, attr_name, value)
-
                 except Exception as e:
                     self.logger.warning(f"Could not fetch metric {metric_name}: {e}")
+
+            # -- Executor heap usage (Average + Maximum across all executors) --
+            # glue.ALL.jvm.heap.usage covers all executor JVMs
+            avg_heap_metrics = [
+                ('glue.ALL.jvm.heap.usage',    'avg_executor_memory_pct', 'Average'),
+                ('glue.ALL.jvm.heap.usage',    'max_executor_memory_pct', 'Maximum'),
+                ('glue.driver.jvm.heap.usage', 'driver_memory_pct',       'Average'),
+            ]
+
+            for metric_name, attr_name, stat in avg_heap_metrics:
+                try:
+                    response = self.cloudwatch_client.get_metric_statistics(
+                        Namespace='Glue',
+                        MetricName=metric_name,
+                        Dimensions=dimensions,
+                        StartTime=start_time,
+                        EndTime=metrics_end,
+                        Period=60,  # 1-min resolution for heap trends
+                        Statistics=[stat]
+                    )
+                    if response.get('Datapoints'):
+                        values = [dp[stat] for dp in response['Datapoints']]
+                        # For avg_executor: take mean of all 1-min averages
+                        # For max_executor: take the peak observed
+                        if stat == 'Maximum':
+                            result = round(max(values) * 100, 2)
+                        else:
+                            result = round(
+                                sum(values) / len(values) * 100, 2
+                            )
+                        setattr(execution, attr_name, result)
+                except Exception as e:
+                    self.logger.warning(f"Could not fetch metric {metric_name}/{stat}: {e}")
 
         except Exception as e:
             self.logger.warning(f"CloudWatch metrics collection failed: {e}")

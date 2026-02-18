@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Strands Resource Allocator Agent - Dynamic resource allocation."""
 
+import json
+import pickle
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
 from ..storage import StrandsStorage
 
@@ -34,6 +37,9 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(config)
         self.storage = StrandsStorage(config)
+        self.models_dir = Path(
+            config.get('models_dir', 'data/models') if config else 'data/models'
+        )
 
     def execute(self, context: AgentContext) -> AgentResult:
         allocation_config = context.config.get('smart_allocation', {})
@@ -110,18 +116,42 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
 
         # ============================================================
         # AGENT-DECIDED ALLOCATION (force_from_config = N)
-        # Factors: data volume + complexity + day-type
+        # Factors: data volume + complexity + day-type + learning predictions
         # ============================================================
-        self.logger.info("force_from_config=N: Agent deciding resources based on size + complexity + day-type")
+        self.logger.info("force_from_config=N: Agent deciding resources based on size + complexity + day-type + learning")
 
         run_date = context.run_date
         day_type = self._get_day_type(run_date)
         scale_factor = self._get_scale_factor(run_date, allocation_config)
         complexity_factor = self._calculate_complexity_factor(context)
 
-        # Calculate recommended workers = base(size) * day_scale * complexity
+        # Calculate formula-based workers = base(size) * day_scale * complexity
         base_workers = self._calculate_base_workers(total_size_gb)
-        recommended_workers = max(2, int(base_workers * scale_factor * complexity_factor))
+        formula_workers = max(2, int(base_workers * scale_factor * complexity_factor))
+
+        # Try to load job-specific learning prediction
+        learn_features = {
+            'total_size_gb': total_size_gb,
+            'source_table_count': len(context.config.get('source_tables', [])),
+            'complexity_factor': complexity_factor,
+            'scale_factor': scale_factor,
+            'day_of_week': run_date.weekday(),
+            'is_month_end': 1.0 if day_type in ('month_end', 'quarter_end') else 0.0,
+        }
+        learned_workers, learn_confidence, learn_model_id = self._load_learning_prediction(
+            context.job_name, learn_features
+        )
+
+        # Blend formula and learning prediction based on confidence
+        # Low confidence (<30%) → use formula; high confidence (>70%) → trust learning
+        if learned_workers and learn_confidence > 0.0:
+            blend_weight = learn_confidence  # 0..0.9
+            recommended_workers = max(2, int(
+                blend_weight * learned_workers + (1 - blend_weight) * formula_workers
+            ))
+        else:
+            recommended_workers = formula_workers
+            learn_model_id = None
 
         # Determine worker type based on memory needs
         recommended_type = self._recommend_worker_type(total_size_gb, recommended_workers)
@@ -145,6 +175,18 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             recommendations.append("Weekend detected - reduced allocation applied")
         if complexity_factor > 1.2:
             recommendations.append(f"High complexity detected ({complexity_factor:.1f}x) - extra resources allocated")
+        if learned_workers and learn_confidence > 0.0:
+            recommendations.append(
+                f"Learning model {learn_model_id} prediction: {learned_workers} workers "
+                f"(confidence={learn_confidence:.0%}); formula: {formula_workers} workers; "
+                f"blended: {recommended_workers} workers"
+            )
+        else:
+            recommendations.append(
+                f"No learning model found for job '{context.job_name}' — "
+                f"using formula-based allocation ({formula_workers} workers). "
+                "Run more jobs to train the model."
+            )
 
         # Store allocation
         allocation_data = {
@@ -155,6 +197,10 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             'total_size_gb': total_size_gb,
             'scale_factor': scale_factor,
             'complexity_factor': complexity_factor,
+            'formula_workers': formula_workers,
+            'learned_workers': learned_workers,
+            'learn_confidence': learn_confidence,
+            'learn_model_id': learn_model_id,
             'recommended_workers': recommended_workers,
             'recommended_type': recommended_type,
             'config_workers': config_workers,
@@ -183,6 +229,10 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
                 'day_type': day_type,
                 'scale_factor': scale_factor,
                 'complexity_factor': complexity_factor,
+                'formula_workers': formula_workers,
+                'learned_workers': learned_workers,
+                'learn_confidence': learn_confidence,
+                'learn_model_id': learn_model_id,
                 'input_size_gb': total_size_gb,
                 'force_from_config': False
             },
@@ -193,6 +243,77 @@ class StrandsResourceAllocatorAgent(StrandsAgent):
             },
             recommendations=recommendations
         )
+
+    def _load_learning_prediction(
+        self,
+        job_name: str,
+        features: Dict[str, float]
+    ) -> Tuple[Optional[int], float, str]:
+        """Load job-specific learning model and return predicted worker count.
+
+        Returns:
+            (predicted_workers, confidence, model_id)
+            Returns (None, 0.0, '') if no model exists for this job.
+        """
+        try:
+            # Sanitize job name (same logic as learning agent)
+            safe_name = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in job_name
+            )
+            job_dir = self.models_dir / safe_name
+            registry_file = job_dir / 'model_registry.json'
+
+            if not registry_file.exists():
+                return None, 0.0, ''
+
+            with open(registry_file, 'r') as f:
+                registry = json.load(f)
+
+            # Find the most recent resource_predictor model
+            resource_models = [
+                (mid, meta)
+                for mid, meta in registry.items()
+                if meta.get('model_type') == 'resource_predictor'
+            ]
+
+            if not resource_models:
+                return None, 0.0, ''
+
+            # Pick most recent by created_at
+            resource_models.sort(key=lambda x: x[1].get('created_at', ''), reverse=True)
+            model_id, model_meta = resource_models[0]
+
+            # Load the pickle file
+            model_file = job_dir / f'{model_id}.pkl'
+            if not model_file.exists():
+                return None, 0.0, model_id
+
+            with open(model_file, 'rb') as f:
+                model = pickle.load(f)
+
+            # Use only features the model was trained on
+            trained_features = model_meta.get('features', [])
+            predict_input = {
+                k: features.get(k, 0.0)
+                for k in trained_features
+            }
+
+            predicted = model.predict(predict_input)
+            predicted_workers = max(2, int(round(predicted)))
+
+            # Confidence based on training records: 0% below 5, ramps to 90% at 50+
+            training_records = model_meta.get('training_records', 0)
+            confidence = min(0.9, max(0.0, (training_records - 5) / 50.0))
+
+            self.logger.info(
+                f"Learning model {model_id} predicts {predicted_workers} workers "
+                f"(confidence={confidence:.0%}, trained on {training_records} runs)"
+            )
+            return predicted_workers, confidence, model_id
+
+        except Exception as e:
+            self.logger.warning(f"Could not load learning prediction for {job_name}: {e}")
+            return None, 0.0, ''
 
     def _calculate_complexity_factor(self, context: AgentContext) -> float:
         """
