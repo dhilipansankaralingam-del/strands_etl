@@ -5,6 +5,14 @@ from typing import Dict, List, Any
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
 from ..storage import StrandsStorage
 
+# Unified audit logger (optional)
+try:
+    from ..unified_audit import get_audit_logger
+    AUDIT_AVAILABLE = True
+except ImportError:
+    AUDIT_AVAILABLE = False
+    get_audit_logger = None
+
 
 @register_agent
 class StrandsPlatformConversionAgent(StrandsAgent):
@@ -41,15 +49,25 @@ class StrandsPlatformConversionAgent(StrandsAgent):
         self.storage = StrandsStorage(config)
 
     def execute(self, context: AgentContext) -> AgentResult:
+        # Check if agent is enabled via agents.platform_conversion_agent.enabled
+        if not self.is_enabled('agents.platform_conversion_agent.enabled'):
+            return AgentResult(
+                agent_name=self.AGENT_NAME,
+                agent_id=self.agent_id,
+                status=AgentStatus.COMPLETED,
+                output={'skipped': True, 'reason': 'Platform conversion agent disabled'}
+            )
+
         platform_config = context.config.get('platform', {})
         auto_convert = platform_config.get('auto_convert', {})
 
+        # Also check platform.auto_convert.enabled for backwards compatibility
         if not auto_convert.get('enabled') in ('Y', 'y', True):
             return AgentResult(
                 agent_name=self.AGENT_NAME,
                 agent_id=self.agent_id,
                 status=AgentStatus.COMPLETED,
-                output={'skipped': True, 'reason': 'Auto-convert disabled'}
+                output={'skipped': True, 'reason': 'Auto-convert disabled in platform config'}
             )
 
         # Get sizing data
@@ -112,6 +130,20 @@ class StrandsPlatformConversionAgent(StrandsAgent):
         context.set_shared('target_platform', target_platform)
         context.set_shared('converted_config', converted_config)
         context.set_shared('platform_conversion_needed', target_platform != source_platform)
+
+        # Log to unified audit for dashboard
+        if AUDIT_AVAILABLE and get_audit_logger:
+            try:
+                audit = get_audit_logger(self.config)
+                audit.log_platform_conversion(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    source_platform=source_platform,
+                    target_platform=target_platform,
+                    reason=conversion_reason or 'No conversion needed'
+                )
+            except Exception:
+                pass
 
         return AgentResult(
             agent_name=self.AGENT_NAME,

@@ -5,6 +5,14 @@ from typing import Dict, List, Any
 from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, register_agent
 from ..storage import StrandsStorage
 
+# Unified audit logger (optional)
+try:
+    from ..unified_audit import get_audit_logger
+    AUDIT_AVAILABLE = True
+except ImportError:
+    AUDIT_AVAILABLE = False
+    get_audit_logger = None
+
 
 @register_agent
 class StrandsDataQualityAgent(StrandsAgent):
@@ -84,6 +92,23 @@ class StrandsDataQualityAgent(StrandsAgent):
 
         context.set_shared('dq_rules', rule_results)
         context.set_shared('dq_summary', {'passed': passed, 'failed': failed, 'warnings': warnings})
+
+        # Log to unified audit for dashboard
+        total_rules = len(rule_results)
+        score = (passed / max(total_rules, 1)) * 100
+        if AUDIT_AVAILABLE and get_audit_logger:
+            try:
+                audit = get_audit_logger(self.config)
+                audit.log_data_quality(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    score=score,
+                    rules_passed=passed,
+                    rules_failed=failed,
+                    agent_name=self.AGENT_NAME
+                )
+            except Exception:
+                pass
 
         return AgentResult(
             agent_name=self.AGENT_NAME,

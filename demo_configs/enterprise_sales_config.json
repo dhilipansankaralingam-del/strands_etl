@@ -88,8 +88,8 @@
   },
 
   "storage": {
-    "_comment": "Fallback storage configuration - uses local pipe-delimited files if DynamoDB/S3 unavailable",
-    "primary_backend": "local",
+    "_comment": "Storage configuration - S3/DynamoDB primary with local fallback",
+    "primary_backend": "s3",
     "fallback_backend": "local",
     "dynamo_table_prefix": "etl_",
     "dynamo_region": "us-east-1",
@@ -98,11 +98,13 @@
     "local_base_path": "data/agent_store",
     "local_format": "pipe",
     "_storage_types": {
+      "unified_audit": "JSONL in S3 (partitioned by date/hour) + DynamoDB for real-time queries",
       "audit_logs": "Pipe-delimited files in data/agent_store/audit_logs/",
       "agent_data": "Pipe-delimited files per agent in data/agent_store/{agent_name}/",
       "learning_history": "Local JSON files in data/agent_store/learning_agent/",
       "recommendations": "Pipe-delimited files in data/agent_store/recommendation_agent/"
-    }
+    },
+    "_dashboard_info": "Run 'python scripts/generate_dashboard.py' to generate HTML dashboard from unified audit logs"
   },
 
   "agents": {
@@ -320,13 +322,24 @@
 
   "audit": {
     "enabled": "Y",
-    "primary_storage": "local",
+    "primary_storage": "s3",
     "fallback_storage": "local",
-    "dynamo_table": "etl_audit_log",
+    "dynamo_table": "etl_unified_audit",
     "local_path": "data/agent_store/audit_logs",
     "format": "pipe_delimited",
     "s3_upload": "Y",
+    "s3_bucket": "enterprise-etl-data",
     "s3_audit_path": "s3://enterprise-etl-data/audit_logs/",
+
+    "_unified_audit_config": {
+      "enable_dynamodb": true,
+      "enable_s3": true,
+      "enable_local": true,
+      "batch_size": 100,
+      "batch_interval_seconds": 60,
+      "_comment": "Unified audit writes to DynamoDB + S3 for dashboard/Athena queries"
+    },
+
     "audit_on_start": "Y",
     "audit_on_read": "Y",
     "audit_on_transform": "Y",
@@ -338,7 +351,7 @@
     "audit_on_healing": "Y",
     "include_row_counts": "Y",
     "include_schema_info": "Y",
-    "_comment": "Audit logs stored as pipe-delimited files locally, then uploaded to S3"
+    "_comment": "All agent events now logged to S3/DynamoDB via unified_audit for dashboard"
   },
 
   "source_tables": [

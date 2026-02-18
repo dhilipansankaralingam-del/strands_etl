@@ -6,6 +6,14 @@ from ..base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, r
 from ..tools import tool
 from ..storage import StrandsStorage
 
+# Unified audit logger (optional)
+try:
+    from ..unified_audit import get_audit_logger
+    AUDIT_AVAILABLE = True
+except ImportError:
+    AUDIT_AVAILABLE = False
+    get_audit_logger = None
+
 
 @register_agent
 class StrandsComplianceAgent(StrandsAgent):
@@ -77,6 +85,23 @@ class StrandsComplianceAgent(StrandsAgent):
 
         context.set_shared('compliance_findings', findings)
         context.set_shared('compliance_frameworks', frameworks)
+
+        # Log to unified audit for dashboard
+        violations = [f.get('type') for f in findings if f.get('type') == 'VIOLATION']
+        status = 'compliant' if len(violations) == 0 else 'non_compliant'
+        if AUDIT_AVAILABLE and get_audit_logger:
+            try:
+                audit = get_audit_logger(self.config)
+                audit.log_compliance(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    status=status,
+                    pii_columns=pii_columns,
+                    violations=violations,
+                    frameworks=frameworks
+                )
+            except Exception:
+                pass
 
         return AgentResult(
             agent_name=self.AGENT_NAME,

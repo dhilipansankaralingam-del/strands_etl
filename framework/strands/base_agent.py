@@ -29,6 +29,15 @@ except ImportError:
     AGENT_PROMPTS = {}
     ResponseParser = None
 
+# Unified audit logger (optional import)
+try:
+    from .unified_audit import get_audit_logger, EventType
+    AUDIT_AVAILABLE = True
+except ImportError:
+    AUDIT_AVAILABLE = False
+    get_audit_logger = None
+    EventType = None
+
 
 class AgentStatus(Enum):
     """Status of an agent execution."""
@@ -198,23 +207,52 @@ class StrandsAgent(ABC):
         Run the agent with timing and error handling.
 
         This is the main entry point called by the orchestrator.
+        Automatically logs events to unified audit logger.
         """
         start_time = datetime.utcnow()
 
+        # Get audit logger if available
+        audit = None
+        if AUDIT_AVAILABLE and get_audit_logger:
+            try:
+                audit = get_audit_logger(self.config)
+            except Exception:
+                pass
+
         try:
             self.logger.info(f"Starting agent: {self.AGENT_NAME} (id={self.agent_id})")
+
+            # Log agent start
+            if audit:
+                audit.log_agent_start(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    agent_name=self.AGENT_NAME,
+                    agent_id=self.agent_id,
+                    platform=context.platform
+                )
 
             # Check dependencies
             for dep in self.DEPENDENCIES:
                 dep_result = context.get_agent_result(dep)
                 if not dep_result or dep_result.status != AgentStatus.COMPLETED:
-                    return AgentResult(
+                    result = AgentResult(
                         agent_name=self.AGENT_NAME,
                         agent_id=self.agent_id,
                         status=AgentStatus.WAITING,
                         errors=[f"Dependency not met: {dep}"],
                         started_at=start_time
                     )
+                    # Log waiting status
+                    if audit:
+                        audit.log_agent_skip(
+                            job_name=context.job_name,
+                            execution_id=context.execution_id,
+                            agent_name=self.AGENT_NAME,
+                            agent_id=self.agent_id,
+                            reason=f"Waiting for dependency: {dep}"
+                        )
+                    return result
 
             # Execute the agent
             result = self.execute(context)
@@ -223,10 +261,54 @@ class StrandsAgent(ABC):
             result.execution_time_ms = (result.completed_at - start_time).total_seconds() * 1000
 
             self.logger.info(f"Agent completed: {self.AGENT_NAME} in {result.execution_time_ms:.0f}ms")
+
+            # Log agent completion or skip
+            if audit:
+                if result.output.get('skipped'):
+                    audit.log_agent_skip(
+                        job_name=context.job_name,
+                        execution_id=context.execution_id,
+                        agent_name=self.AGENT_NAME,
+                        agent_id=self.agent_id,
+                        reason=result.output.get('reason', 'Agent disabled')
+                    )
+                else:
+                    audit.log_agent_complete(
+                        job_name=context.job_name,
+                        execution_id=context.execution_id,
+                        agent_name=self.AGENT_NAME,
+                        agent_id=self.agent_id,
+                        duration_ms=result.execution_time_ms,
+                        output=result.output,
+                        recommendations=result.recommendations,
+                        platform=context.platform
+                    )
+
+                    # Log recommendations as separate events
+                    for rec in result.recommendations:
+                        audit.log_recommendation(
+                            job_name=context.job_name,
+                            execution_id=context.execution_id,
+                            agent_name=self.AGENT_NAME,
+                            recommendation=rec
+                        )
+
             return result
 
         except Exception as e:
             self.logger.error(f"Agent failed: {self.AGENT_NAME} - {str(e)}")
+
+            # Log agent error
+            if audit:
+                audit.log_agent_error(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    agent_name=self.AGENT_NAME,
+                    agent_id=self.agent_id,
+                    error=str(e),
+                    error_type=type(e).__name__
+                )
+
             return AgentResult(
                 agent_name=self.AGENT_NAME,
                 agent_id=self.agent_id,
