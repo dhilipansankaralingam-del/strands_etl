@@ -219,6 +219,28 @@ class StrandsAgent(ABC):
             except Exception:
                 pass
 
+        # FIRST: Check if agent is enabled via agents.<agent_name>.enabled
+        agent_enabled_key = f"agents.{self.AGENT_NAME}.enabled"
+        if not self.is_enabled(agent_enabled_key):
+            self.logger.info(f"Agent {self.AGENT_NAME} is disabled via config '{agent_enabled_key}'")
+            result = AgentResult(
+                agent_name=self.AGENT_NAME,
+                agent_id=self.agent_id,
+                status=AgentStatus.COMPLETED,
+                output={'skipped': True, 'reason': f'Disabled via {agent_enabled_key}'},
+                started_at=start_time,
+                completed_at=datetime.utcnow()
+            )
+            if audit:
+                audit.log_agent_skip(
+                    job_name=context.job_name,
+                    execution_id=context.execution_id,
+                    agent_name=self.AGENT_NAME,
+                    agent_id=self.agent_id,
+                    reason=f'Disabled via config: {agent_enabled_key}'
+                )
+            return result
+
         try:
             self.logger.info(f"Starting agent: {self.AGENT_NAME} (id={self.agent_id})")
 
