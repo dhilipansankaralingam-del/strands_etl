@@ -23,6 +23,14 @@ from collections import defaultdict
 
 from .base_agent import StrandsAgent, AgentResult, AgentStatus, AgentContext, AgentRegistry
 
+# Run-level audit tracker (optional import)
+try:
+    from .run_audit import RunAuditTracker
+    RUN_AUDIT_AVAILABLE = True
+except ImportError:
+    RUN_AUDIT_AVAILABLE = False
+    RunAuditTracker = None
+
 
 class TaskStatus(Enum):
     """Status of an orchestrated task."""
@@ -362,6 +370,11 @@ class StrandsOrchestrator:
 
         Returns:
             OrchestratorResult with all agent results
+
+        Side effects:
+            Writes per-run audit JSONL + HTML summary to:
+              data/run_audit/<job_name>/<execution_id>.jsonl
+              data/run_audit/<job_name>/<execution_id>.html
         """
         start_time = datetime.utcnow()
         run_date = run_date or start_time
@@ -393,6 +406,28 @@ class StrandsOrchestrator:
         for i, phase in enumerate(phases):
             self.logger.info(f"Phase {i+1}/{len(phases)}: {phase}")
 
+        # ---- Run Audit Tracker ----
+        run_audit = None
+        if RUN_AUDIT_AVAILABLE and RunAuditTracker:
+            try:
+                run_audit = RunAuditTracker(
+                    config=self.config,
+                    job_name=job_name,
+                    execution_id=self.execution_id,
+                    run_date=run_date,
+                )
+                run_audit.log_job_start(
+                    platform=platform,
+                    agents=list(self.tasks.keys()),
+                    phases=[list(p) for p in phases],
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not initialize RunAuditTracker: {e}")
+                run_audit = None
+
+        # Store on self so _execute_agent can access it
+        self._run_audit = run_audit
+
         # Execute phases
         all_results: Dict[str, AgentResult] = {}
 
@@ -405,8 +440,20 @@ class StrandsOrchestrator:
                 continue
 
             self.logger.info(f"=== Phase {phase_num} ===")
+
+            if run_audit:
+                run_audit.log_phase_start(phase_num, phase)
+
+            phase_start = datetime.utcnow()
             phase_results = self._execute_phase(phase)
+            phase_ms = (datetime.utcnow() - phase_start).total_seconds() * 1000
             all_results.update(phase_results)
+
+            if run_audit:
+                run_audit.log_phase_complete(phase_num, phase, phase_ms)
+                # Log each agent result from this phase
+                for agent_name, result in phase_results.items():
+                    run_audit.log_agent_result(agent_name, result, self.context)
 
         # Aggregate recommendations
         all_recommendations: List[Dict[str, Any]] = []
@@ -438,6 +485,39 @@ class StrandsOrchestrator:
 
         self.logger.info(f"Orchestration complete: {orchestrator_result.status}")
         self.logger.info(f"Completed: {len(self.completed)}, Failed: {len(self.failed)}, Skipped: {len(self.skipped)}")
+
+        # ---- Finalize Run Audit ----
+        if run_audit:
+            try:
+                # Calculate total cost from execution agent
+                total_cost = 0.0
+                potential_savings = 0.0
+                exec_result = all_results.get('execution_agent')
+                if exec_result and exec_result.output:
+                    total_cost = exec_result.output.get('cost_usd', 0) or 0
+                # Savings from resource allocator recommendations
+                ra_result = all_results.get('resource_allocator_agent')
+                if ra_result and ra_result.output:
+                    config_workers = ra_result.output.get('config_workers', 0) or 0
+                    rec_workers = ra_result.output.get('recommended_workers', 0) or 0
+                    if config_workers > rec_workers and rec_workers > 0:
+                        cost_per_hour = ra_result.output.get('estimated_cost_per_hour', 0) or 0
+                        if cost_per_hour > 0:
+                            ratio = (config_workers - rec_workers) / max(config_workers, 1)
+                            potential_savings = cost_per_hour * ratio
+
+                run_audit.log_job_complete(
+                    orchestrator_result,
+                    total_cost_usd=total_cost,
+                    potential_savings_usd=potential_savings,
+                )
+                html_path = run_audit.generate_html()
+                s3_uri = run_audit.upload_to_s3()
+                self.logger.info(f"Run audit HTML: {html_path}")
+                if s3_uri:
+                    self.logger.info(f"Run audit S3: {s3_uri}")
+            except Exception as e:
+                self.logger.warning(f"Run audit finalization failed: {e}")
 
         return orchestrator_result
 
