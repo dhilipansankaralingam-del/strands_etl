@@ -21,148 +21,54 @@
     "--partition_date": "{{ ds }}"
   },
 
-  "platform": {
-    "primary": "glue",
-    "fallback_chain": ["emr", "eks"],
-    "force_platform": null,
-    "auto_fallback_on_error": "Y",
-    "_comment": "Full fallback chain: Glue → EMR → EKS with Karpenter",
+  "storage": {
+    "primary_backend": "s3",
+    "fallback_backend": "local",
+    "s3_bucket": "enterprise-etl-data",
+    "s3_prefix": "etl-data/",
+    "local_base_path": "data/agent_store",
+    "dynamo_table_prefix": "etl_",
+    "dynamo_region": "us-east-1"
+  },
 
-    "auto_convert": {
-      "enabled": "Y",
-      "convert_to_emr_threshold_gb": 100,
-      "convert_to_eks_threshold_gb": 500,
-      "optimize_for": "cost",
-      "_comment": "Auto-convert to EMR when data > 100GB, EKS when > 500GB"
-    },
+  "athena": {
+    "output_location": "s3://enterprise-etl-data/athena-results/",
+    "workgroup": "primary"
+  },
 
-    "code_conversion": {
+  "agents": {
+    "sizing_agent": { "enabled": "Y" },
+    "compliance_agent": { "enabled": "Y" },
+    "code_analysis_agent": { "enabled": "Y" },
+    "resource_allocator_agent": { "enabled": "Y" },
+    "data_quality_agent": { "enabled": "Y" },
+    "healing_agent": { "enabled": "Y" },
+    "platform_conversion_agent": { "enabled": "N" },
+    "code_conversion_agent": { "enabled": "N" },
+    "execution_agent": { "enabled": "Y" },
+    "learning_agent": { "enabled": "Y" },
+    "recommendation_agent": { "enabled": "Y" }
+  },
+
+  "source_sizing": {
+    "mode": "auto_detect",
+    "estimated_size_gb": 150,
+    "delta_mode": {
       "enabled": "Y",
-      "convert_pyspark_code": "Y",
-      "preserve_original": "Y",
-      "output_converted_script_path": "converted/",
-      "_comment": "Convert GlueContext/DynamicFrame code to SparkSession/DataFrame for target platform"
+      "partition_column": "process_date"
     }
   },
 
   "smart_allocation": {
     "enabled": "Y",
     "force_from_config": "N",
-    "_force_comment": "Y = use glue_config workers/type exactly (user-forced). N = agent decides based on data size, complexity, day-type",
-    "auto_apply": "Y",
-    "consider_weekday_weekend": "Y",
-    "consider_month_end": "Y",
-    "consider_data_trends": "Y",
-    "consider_complexity": "Y",
-    "complexity_factors": {
-      "join_count_weight": 1.5,
-      "window_function_weight": 2.0,
-      "aggregation_weight": 1.2,
-      "distinct_weight": 1.3,
-      "_comment": "Multipliers applied per complexity factor found in script"
-    },
     "weekend_scale_factor": 0.6,
     "month_end_scale_factor": 1.5,
     "quarter_end_scale_factor": 2.0,
-    "_comment": "Weekend runs are lighter due to no business activity"
-  },
-
-  "source_sizing": {
-    "mode": "auto_detect",
-    "_modes": "auto_detect | hardcoded | hybrid",
-    "_detection_order": [
-      "1. Glue Catalog sizeInBytes parameter (MSCK REPAIR TABLE or Glue Crawlers)",
-      "2. S3 list_objects_v2 scan (if Glue Catalog unavailable)",
-      "3. estimated_size_gb from config (fallback)",
-      "4. Smart estimate based on table type (last resort)"
-    ],
-    "delta_mode": {
-      "enabled": "Y",
-      "detect_partition_size": "Y",
-      "partition_column": "process_date",
-      "_comment": "For delta runs, only count today's partition size"
-    },
-    "cache_sizes": "Y",
-    "cache_ttl_hours": 24,
-    "size_cache_path": "data/agent_store/source_sizes.json"
-  },
-
-  "storage": {
-    "_comment": "Storage configuration - S3/DynamoDB primary with local fallback",
-    "primary_backend": "s3",
-    "fallback_backend": "local",
-    "dynamo_table_prefix": "etl_",
-    "dynamo_region": "us-east-1",
-    "s3_bucket": "enterprise-etl-data",
-    "s3_prefix": "etl-data/",
-    "local_base_path": "data/agent_store",
-    "local_format": "pipe",
-    "_storage_types": {
-      "unified_audit": "JSONL in S3 (partitioned by date/hour) + DynamoDB for real-time queries",
-      "audit_logs": "Pipe-delimited files in data/agent_store/audit_logs/",
-      "agent_data": "Pipe-delimited files per agent in data/agent_store/{agent_name}/",
-      "learning_history": "Local JSON files in data/agent_store/learning_agent/",
-      "recommendations": "Pipe-delimited files in data/agent_store/recommendation_agent/"
-    },
-    "_dashboard_info": "Run 'python scripts/generate_dashboard.py' to generate HTML dashboard from unified audit logs"
-  },
-
-  "agents": {
-    "_comment": "Strands SDK multi-agent configuration",
-    "parallel_execution": "Y",
-    "max_workers": 10,
-    "fail_fast": "N",
-
-    "sizing_agent": {
-      "enabled": "Y",
-      "phase": 1,
-      "dependencies": []
-    },
-    "compliance_agent": {
-      "enabled": "Y",
-      "phase": 1,
-      "dependencies": []
-    },
-    "code_analysis_agent": {
-      "enabled": "Y",
-      "phase": 1,
-      "dependencies": []
-    },
-    "resource_allocator_agent": {
-      "enabled": "Y",
-      "phase": 2,
-      "dependencies": ["sizing_agent"]
-    },
-    "data_quality_agent": {
-      "enabled": "Y",
-      "phase": 2,
-      "dependencies": ["compliance_agent"]
-    },
-    "healing_agent": {
-      "enabled": "Y",
-      "phase": 2,
-      "dependencies": []
-    },
-    "platform_conversion_agent": {
-      "enabled": "Y",
-      "phase": 3,
-      "dependencies": ["sizing_agent", "resource_allocator_agent"]
-    },
-    "code_conversion_agent": {
-      "enabled": "Y",
-      "phase": 3,
-      "dependencies": ["platform_conversion_agent"]
-    },
-    "learning_agent": {
-      "enabled": "Y",
-      "phase": 4,
-      "dependencies": []
-    },
-    "recommendation_agent": {
-      "enabled": "Y",
-      "phase": 5,
-      "dependencies": ["all"],
-      "_comment": "Runs last to aggregate all recommendations"
+    "complexity_factors": {
+      "join_count_weight": 1.5,
+      "window_function_weight": 2.0,
+      "aggregation_weight": 1.2
     }
   },
 
@@ -172,7 +78,6 @@
     "number_of_workers": 20,
     "timeout_minutes": 360,
     "max_retries": 2,
-    "_comment": "These values may be overridden by smart_allocation if enabled",
     "spark_configs": {
       "spark.sql.adaptive.enabled": "true",
       "spark.sql.adaptive.coalescePartitions.enabled": "true",
@@ -183,178 +88,186 @@
     }
   },
 
-  "emr_config": {
-    "release_label": "emr-6.15.0",
-    "instance_type": "m5.2xlarge",
-    "instance_count": 10,
-    "use_spot": "Y",
-    "spot_bid_percentage": 80,
-    "applications": ["Spark", "Hadoop"],
-    "spark_configs": {
-      "spark.executor.memory": "12g",
-      "spark.executor.cores": "4",
-      "spark.sql.shuffle.partitions": "400",
-      "spark.dynamicAllocation.enabled": "true"
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr", "eks"],
+    "auto_convert": {
+      "enabled": "N",
+      "convert_to_emr_threshold_gb": 100,
+      "convert_to_eks_threshold_gb": 500
     }
-  },
-
-  "eks_config": {
-    "cluster_name": "enterprise-etl-eks",
-    "namespace": "spark-jobs",
-    "use_karpenter": "Y",
-    "use_spot": "Y",
-    "use_graviton": "Y",
-    "executor_instances": 20,
-    "executor_memory": "12g",
-    "executor_cores": 4,
-    "karpenter_provisioner": {
-      "name": "spark-executors",
-      "capacity_types": ["spot", "on-demand"],
-      "architectures": ["amd64", "arm64"],
-      "instance_families": ["m5", "m6i", "m6g", "r5", "r6i"]
-    }
-  },
-
-  "auto_healing": {
-    "enabled": "Y",
-    "correct_code": "Y",
-    "auto_rerun": "Y",
-    "max_retries": 3,
-    "heal_memory_errors": "Y",
-    "heal_shuffle_errors": "Y",
-    "heal_timeout_errors": "Y",
-    "heal_connection_errors": "Y",
-    "heal_data_skew": "Y",
-    "heal_partition_errors": "Y",
-    "_comment": "Full auto-healing for complex multi-join pipeline"
-  },
-
-  "code_analysis": {
-    "enabled": "Y",
-    "check_anti_patterns": "Y",
-    "check_join_optimizations": "Y",
-    "check_window_functions": "Y",
-    "check_aggregation_patterns": "Y",
-    "recommend_aws_tools": "Y",
-    "recommend_broadcast_joins": "Y",
-    "recommend_caching": "Y"
   },
 
   "data_quality": {
     "enabled": "Y",
     "fail_on_critical": "Y",
-    "sample_size": 100000,
+    "athena_workgroup": "primary",
+    "athena_output_location": "s3://enterprise-etl-data/athena-dq-results/",
+    "query_timeout_seconds": 300,
 
-    "natural_language_rules": [
-      "customer_id should not be null",
-      "policy_number should not be null",
-      "effective_date should not be null",
-      "premium_amount should be positive when present",
-      "claim_amount should be positive when present",
-      "membership_id should not be null"
+    "pre_load_rules": [
+      {
+        "table": "life_insurance_base.life_policy",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 1000000, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "modal_premium", "threshold": 100, "severity": "warning" },
+          { "type": "completeness", "column": "product_line", "threshold": 0.95, "severity": "warning" },
+          { "type": "positive", "column": "modal_premium", "threshold": 0, "severity": "critical" }
+        ]
+      },
+      {
+        "table": "finance_accounting_master.autopay_products_master",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 1000, "severity": "warning" },
+          { "type": "not_null", "column": "product_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "product_name", "threshold": 0.99, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "customer_master.customer_product_profile_history_master",
+        "rules": [
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "email", "threshold": 0.90, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "insurance_master.auto_policy_driver_master",
+        "rules": [
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "driver_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "license_number", "threshold": 0.95, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "claims_master.enterprise_claims_master",
+        "rules": [
+          { "type": "not_null", "column": "claim_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "positive", "column": "claim_amount", "threshold": 0, "severity": "critical" }
+        ]
+      },
+      {
+        "table": "membership_master.membership_sales_master",
+        "rules": [
+          { "type": "not_null", "column": "membership_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" }
+        ]
+      }
+    ],
+
+    "post_load_rules": [
+      {
+        "table": "bd_work.pps_jss_test",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 500000, "severity": "critical" },
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "premium_amount", "threshold": 0.99, "severity": "warning" },
+          { "type": "completeness", "column": "effective_date", "threshold": 0.99, "severity": "warning" }
+        ]
+      }
     ],
 
     "sql_rules": [
       {
-        "id": "SQL_CUSTOMER_EXISTS",
-        "description": "Every record must have a valid customer",
-        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE customer_id IS NULL",
+        "id": "SQL_ORPHAN_POLICIES",
+        "description": "Policies without matching customer",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE customer_id IS NULL OR customer_id = ''",
         "threshold": 0,
         "severity": "critical"
       },
       {
-        "id": "SQL_POLICY_VALID",
-        "description": "Policy numbers should be valid format",
-        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE policy_number IS NOT NULL AND LENGTH(policy_number) < 5",
+        "id": "SQL_FUTURE_EFFECTIVE_DATE",
+        "description": "No policies with future effective dates",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE effective_date > CURRENT_DATE",
         "threshold": 100,
         "severity": "warning"
-      }
-    ],
-
-    "template_rules": [
-      {
-        "template": "null_check",
-        "parameters": {"column": "customer_id"}
       },
       {
-        "template": "completeness_check",
-        "parameters": {"column": "policy_number"},
-        "threshold": 0.99
+        "id": "SQL_NEGATIVE_PREMIUM",
+        "description": "No negative premium amounts",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE premium_amount < 0",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_DUPLICATE_POLICIES",
+        "description": "Check for duplicate policy records",
+        "sql": "SELECT COUNT(*) - COUNT(DISTINCT policy_number) FROM bd_work.pps_jss_test WHERE policy_number IS NOT NULL",
+        "threshold": 100,
+        "severity": "warning"
       }
     ]
   },
 
   "compliance": {
     "enabled": "Y",
-    "check_sources": "Y",
-    "check_targets": "Y",
     "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"],
-    "pii_columns": [
-      "customer_name", "customer_email", "phone", "address",
-      "ssn", "driver_license", "date_of_birth", "credit_card_number"
-    ],
-    "mask_pii": "Y",
-    "mask_strategy": "hash",
-    "audit_data_access": "Y",
-    "retention_days": 365
+
+    "pii_patterns": {
+      "name": ["first_name", "last_name", "full_name", "customer_name", "driver_name", "insured_name"],
+      "email": ["email", "email_address", "contact_email"],
+      "phone": ["phone", "phone_number", "mobile", "cell", "contact_phone"],
+      "address": ["address", "street", "city", "state", "zip", "postal", "mailing_address"],
+      "ssn": ["ssn", "social_security", "tax_id", "tin"],
+      "financial": ["credit_card", "card_number", "account_number", "routing", "bank_account"],
+      "id": ["customer_id", "member_id", "policy_number", "driver_license", "license_number"],
+      "health": ["diagnosis", "prescription", "medical", "health", "condition"],
+      "dob": ["date_of_birth", "dob", "birth_date", "birthdate"]
+    },
+
+    "table_scans": [
+      {
+        "table": "life_insurance_base.life_policy",
+        "check_pii": true,
+        "frameworks": ["HIPAA", "SOX"]
+      },
+      {
+        "table": "customer_master.customer_product_profile_history_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS"]
+      },
+      {
+        "table": "insurance_master.auto_policy_driver_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "SOX"]
+      },
+      {
+        "table": "claims_master.enterprise_claims_master",
+        "check_pii": true,
+        "frameworks": ["HIPAA", "SOX"]
+      },
+      {
+        "table": "membership_master.membership_sales_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS"]
+      },
+      {
+        "table": "bd_work.pps_jss_test",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"]
+      }
+    ]
   },
 
   "learning": {
     "enabled": "Y",
-    "store_history": "Y",
-    "history_table": "etl_execution_history",
-    "baseline_table": "etl_job_baselines",
-    "detect_anomalies": "Y",
-    "predict_failures": "Y",
-    "update_baseline": "Y",
-    "trend_window_days": 30,
-    "_storage": "Local pipe-delimited files in data/agent_store/learning_agent/"
-  },
-
-  "recommendation": {
-    "enabled": "Y",
-    "aggregate_from_all_agents": "Y",
-    "prioritize_by_impact": "Y",
-    "generate_implementation_plan": "Y",
-    "track_recommendation_status": "Y",
-    "_storage": "Local pipe-delimited files in data/agent_store/recommendation_agent/"
-  },
-
-  "audit": {
-    "enabled": "Y",
-    "primary_storage": "s3",
-    "fallback_storage": "local",
-    "dynamo_table": "etl_unified_audit",
-    "local_path": "data/agent_store/audit_logs",
-    "format": "pipe_delimited",
-    "s3_upload": "Y",
-    "s3_bucket": "enterprise-etl-data",
-    "s3_audit_path": "s3://enterprise-etl-data/audit_logs/",
-
-    "_unified_audit_config": {
-      "enable_dynamodb": true,
-      "enable_s3": true,
-      "enable_local": true,
-      "batch_size": 100,
-      "batch_interval_seconds": 60,
-      "_comment": "Unified audit writes to DynamoDB + S3 for dashboard/Athena queries"
-    },
-
-    "audit_on_start": "Y",
-    "audit_on_read": "Y",
-    "audit_on_transform": "Y",
-    "audit_on_dq": "Y",
-    "audit_on_compliance": "Y",
-    "audit_on_write": "Y",
-    "audit_on_complete": "Y",
-    "audit_on_error": "Y",
-    "audit_on_healing": "Y",
-    "include_row_counts": "Y",
-    "include_schema_info": "Y",
-    "_comment": "All agent events now logged to S3/DynamoDB via unified_audit for dashboard"
+    "min_training_records": 5,
+    "models_dir": "data/models",
+    "max_history_records": 500
   },
 
   "source_tables": [
+    {
+      "_domain": "LIFE INSURANCE",
+      "database": "life_insurance_base",
+      "table": "life_policy",
+      "format": "parquet",
+      "location": "s3://enterprise-data/life_insurance_base/life_policy/",
+      "partition_column": "process_date",
+      "auto_detect_size": "Y"
+    },
     {
       "_domain": "FINANCE",
       "database": "finance_accounting_master",
@@ -372,7 +285,6 @@
       "partition_column": "process_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "DIGITAL/CLICKSTREAM",
       "database": "digital_master",
@@ -380,10 +292,8 @@
       "format": "parquet",
       "location": "s3://enterprise-data/digital_master/clickstream_hits_master/",
       "partition_column": "hit_date",
-      "auto_detect_size": "Y",
-      "_note": "Very large table - may trigger EMR/EKS conversion"
+      "auto_detect_size": "Y"
     },
-
     {
       "_domain": "CUSTOMER",
       "database": "customer_master",
@@ -408,7 +318,6 @@
       "auto_detect_size": "Y",
       "broadcast": true
     },
-
     {
       "_domain": "DISCOUNTS",
       "database": "discounts_master",
@@ -418,7 +327,6 @@
       "partition_column": "transaction_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "MARKETING",
       "database": "marketing_master",
@@ -436,7 +344,6 @@
       "partition_column": "snapshot_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "CLAIMS",
       "database": "claims_master",
@@ -446,7 +353,6 @@
       "partition_column": "claim_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "GIS/REFERENCE",
       "database": "ace_common",
@@ -464,7 +370,6 @@
       "auto_detect_size": "Y",
       "broadcast": true
     },
-
     {
       "_domain": "INSURANCE - AUTO",
       "database": "insurance_master",
@@ -490,7 +395,6 @@
       "auto_detect_size": "Y",
       "broadcast": true
     },
-
     {
       "_domain": "INSURANCE - HOME",
       "database": "insurance_master",
@@ -500,7 +404,6 @@
       "partition_column": "effective_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "LIFE INSURANCE",
       "database": "life_insurance_master",
@@ -526,7 +429,6 @@
       "partition_column": "transaction_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "CRM",
       "database": "crm_master",
@@ -536,7 +438,6 @@
       "partition_column": "lead_date",
       "auto_detect_size": "Y"
     },
-
     {
       "_domain": "MEMBERSHIP",
       "database": "membership_master",
@@ -560,12 +461,13 @@
     }
   ],
 
+  "dry_run": false,
+
   "schedule": {
     "enabled": "Y",
     "cron_expression": "0 5 * * *",
     "timezone": "America/New_York",
     "retry_on_failure": "Y",
-    "max_retries": 2,
-    "_comment": "Runs at 5 AM ET daily"
+    "max_retries": 2
   }
 }
