@@ -1,0 +1,159 @@
+{
+  "orchestrator": {
+    "name": "strands_etl_orchestrator",
+    "description": "ETL Orchestration: S3 Stale Detection -> Glue Trigger -> Validation -> Audit & Dashboard Email",
+    "version": "1.0.0"
+  },
+  "s3_monitoring": {
+    "defaults": {
+      "stale_subfolder_count_threshold": 3,
+      "stale_subfolder_hours_threshold": 3,
+      "no_subfolder_hours_threshold": 5
+    },
+    "sources": [
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_ADDRESS_TB__ct/",
+        "label": "MACP Address Table",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_address_tb.json",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUST_ADDRESS__ct/",
+        "label": "MACP Customer Address",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_cust_address.json",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUSTOMER__ct/",
+        "label": "MACP Customer",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_customer.json",
+          "workers": 15,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/",
+        "label": "MACP Cust Comm Preference Channel",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_cust_comm_pref.json",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MRDP.MRD_MBR_INFO__ct/",
+        "label": "MRD Member Info",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/mrd_mbr_info.json",
+          "workers": 20,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MRDP.MRD_MBR_PRD_DTL__ct/",
+        "label": "MRD Member Product Detail",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/mrd_mbr_prd_dtl.json",
+          "workers": 20,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      }
+    ]
+  },
+  "validations": {
+    "execution_mode": "sequential",
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "query_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "landing_row_count_check",
+        "description": "Verify rows were loaded into the landing table",
+        "database": "landing_db",
+        "query": "SELECT COUNT(*) as cnt FROM landing_db.{table_name} WHERE load_date = current_date",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "duplicate_check",
+        "description": "Check for duplicate primary keys in landing",
+        "database": "landing_db",
+        "query": "SELECT primary_key, COUNT(*) as dup_cnt FROM landing_db.{table_name} GROUP BY primary_key HAVING COUNT(*) > 1 LIMIT 10",
+        "check_type": "no_rows",
+        "condition": "row_count == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "null_key_check",
+        "description": "Verify no NULL primary keys",
+        "database": "landing_db",
+        "query": "SELECT COUNT(*) as null_cnt FROM landing_db.{table_name} WHERE primary_key IS NULL",
+        "check_type": "threshold",
+        "condition": "null_cnt == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "freshness_check",
+        "description": "Verify data freshness - latest load_timestamp within expected window",
+        "database": "landing_db",
+        "query": "SELECT MAX(load_timestamp) as latest_ts, date_diff('hour', MAX(load_timestamp), current_timestamp) as hours_since FROM landing_db.{table_name}",
+        "check_type": "threshold",
+        "condition": "hours_since < 24",
+        "abort_on_failure": false
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/orchestrator/",
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands ETL Dashboard"
+  }
+}
