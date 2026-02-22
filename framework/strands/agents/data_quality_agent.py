@@ -237,7 +237,7 @@ class StrandsDataQualityAgent(StrandsAgent):
             # Fetch results
             results_response = self.athena_client.get_query_results(
                 QueryExecutionId=query_execution_id,
-                MaxResults=10000  # Should be enough for DQ queries
+                MaxResults=1000  # Athena maximum is 1000
             )
 
             result_set = results_response.get('ResultSet', {})
