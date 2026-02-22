@@ -234,32 +234,61 @@ class StrandsDataQualityAgent(StrandsAgent):
 
                 time.sleep(1)  # Poll every second
 
-            # Fetch results
-            results_response = self.athena_client.get_query_results(
-                QueryExecutionId=query_execution_id,
-                MaxResults=1000  # Athena maximum is 1000
-            )
-
-            result_set = results_response.get('ResultSet', {})
-            rows_data = result_set.get('Rows', [])
+            # Fetch results with pagination (Athena max is 1000 per request)
+            # Limit total rows to avoid memory issues with huge result sets
+            max_total_rows = 100000  # Configurable upper limit
             columns = []
             rows = []
+            next_token = None
+            is_first_page = True
 
-            if rows_data:
-                # First row is column headers
-                header_row = rows_data[0]
-                columns = [
-                    col.get('VarCharValue', '')
-                    for col in header_row.get('Data', [])
-                ]
+            while True:
+                # Build request params
+                request_params = {
+                    'QueryExecutionId': query_execution_id,
+                    'MaxResults': 1000  # Athena maximum per request
+                }
+                if next_token:
+                    request_params['NextToken'] = next_token
 
-                # Remaining rows are data
-                for row in rows_data[1:]:
-                    row_values = [
-                        col.get('VarCharValue', '')
-                        for col in row.get('Data', [])
-                    ]
-                    rows.append(row_values)
+                results_response = self.athena_client.get_query_results(**request_params)
+
+                result_set = results_response.get('ResultSet', {})
+                rows_data = result_set.get('Rows', [])
+
+                if rows_data:
+                    if is_first_page:
+                        # First row of first page is column headers
+                        header_row = rows_data[0]
+                        columns = [
+                            col.get('VarCharValue', '')
+                            for col in header_row.get('Data', [])
+                        ]
+                        # Skip header row for data
+                        data_rows = rows_data[1:]
+                        is_first_page = False
+                    else:
+                        # Subsequent pages don't have header row
+                        data_rows = rows_data
+
+                    for row in data_rows:
+                        row_values = [
+                            col.get('VarCharValue', '')
+                            for col in row.get('Data', [])
+                        ]
+                        rows.append(row_values)
+
+                        # Check if we've hit the limit
+                        if len(rows) >= max_total_rows:
+                            self.logger.warning(
+                                f"Results truncated at {max_total_rows} rows"
+                            )
+                            break
+
+                # Check for more pages
+                next_token = results_response.get('NextToken')
+                if not next_token or len(rows) >= max_total_rows:
+                    break
 
             return {
                 'success': True,
