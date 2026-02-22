@@ -171,37 +171,49 @@ def check_staleness(source, defaults):
         "prefix": prefix,
         "label": label,
         "subfolder_count": subfolder_count,
+        "stale_subfolders": [],       # prefixes of individual stale subfolders
         "status": STATUS_OK,
         "detail": "",
         "checked_at": now.isoformat(),
     }
 
     if subfolder_count > 0:
-        # Rule 1: subfolder count exceeds threshold
+        # Identify which individual subfolders are stale (>N hours old)
+        stale_sfs = []
+        stale_details = []
+        for sf in subfolders:
+            if sf["latest_modified"] is None:
+                stale_sfs.append(sf["prefix"])
+                stale_details.append(f"{sf['prefix']} (no timestamp)")
+                continue
+            hours_since = (now - sf["latest_modified"]).total_seconds() / 3600
+            if hours_since > subfolder_hours_threshold:
+                stale_sfs.append(sf["prefix"])
+                stale_details.append(f"{sf['prefix']} ({hours_since:.1f}h old)")
+
+        # Rule 1: subfolder count exceeds threshold – all subfolders are stale
         if subfolder_count > subfolder_count_threshold:
             result["status"] = STATUS_STALE
+            result["stale_subfolders"] = [sf["prefix"] for sf in subfolders]
             result["detail"] = (
                 f"Subfolder count {subfolder_count} exceeds threshold "
-                f"{subfolder_count_threshold}"
+                f"{subfolder_count_threshold} – processing all subfolders"
             )
             logger.warning("[%s] %s – %s", label, result["status"], result["detail"])
             return result
 
-        # Rule 2: any subfolder has stale data
-        for sf in subfolders:
-            if sf["latest_modified"] is None:
-                continue
-            hours_since = (now - sf["latest_modified"]).total_seconds() / 3600
-            if hours_since > subfolder_hours_threshold:
-                result["status"] = STATUS_STALE
-                result["detail"] = (
-                    f"Subfolder {sf['prefix']} last updated "
-                    f"{hours_since:.1f}h ago (threshold {subfolder_hours_threshold}h)"
-                )
-                logger.warning(
-                    "[%s] %s – %s", label, result["status"], result["detail"]
-                )
-                return result
+        # Rule 2: some subfolders have stale data
+        if stale_sfs:
+            result["status"] = STATUS_STALE
+            result["stale_subfolders"] = stale_sfs
+            result["detail"] = (
+                f"{len(stale_sfs)} stale subfolder(s): "
+                + "; ".join(stale_details)
+            )
+            logger.warning(
+                "[%s] %s – %s", label, result["status"], result["detail"]
+            )
+            return result
     else:
         # Rule 3: no subfolders – check main prefix freshness
         main_latest = get_prefix_last_modified(bucket, prefix)
@@ -228,9 +240,14 @@ def check_staleness(source, defaults):
 # ============================================================================
 # 3. GLUE JOB TRIGGER
 # ============================================================================
-def trigger_glue_job(source, run_id):
+def trigger_glue_job(source, stale_subfolders, run_id):
     """
     Start an AWS Glue job for a stale source and wait for completion.
+
+    *stale_subfolders* is the list of S3 prefixes (inside the source prefix)
+    that were detected as stale.  Only these folders will be processed and
+    subsequently archived by trigger_glue.py.
+
     Returns dict with job run details and final status.
     """
     glue_cfg = source.get("glue_trigger", {})
@@ -242,13 +259,19 @@ def trigger_glue_job(source, run_id):
             "job_run_id": None,
             "status": STATUS_SKIPPED,
             "detail": "No Glue job configured",
+            "stale_subfolders_passed": [],
             "duration_seconds": 0,
         }
+
+    # Comma-separated list of stale subfolder prefixes for the Glue job
+    stale_folders_csv = ",".join(stale_subfolders) if stale_subfolders else ""
 
     arguments = {
         "--json_file_name": glue_cfg.get("config_file_key", ""),
         "--bucket_name": glue_cfg.get("config_file_bucket", ""),
         "--orchestrator_run_id": run_id,
+        "--stale_folders": stale_folders_csv,
+        "--archive_s3_path": glue_cfg.get("archive_s3_path", ""),
     }
 
     worker_type = glue_cfg.get("worker_type", "G.1X")
@@ -315,6 +338,7 @@ def trigger_glue_job(source, run_id):
         "status": status,
         "glue_state": state,
         "detail": f"Glue state: {state}",
+        "stale_subfolders_passed": stale_subfolders,
         "duration_seconds": round(duration),
     }
 
@@ -889,7 +913,13 @@ def main():
         result = check_staleness(source, defaults)
         stale_results.append(result)
 
-    stale_sources = [s for s, r in zip(sources, stale_results) if r["status"] == STATUS_STALE]
+    # Pair each source config with its stale subfolder prefixes
+    stale_pairs = [
+        (s, r["stale_subfolders"])
+        for s, r in zip(sources, stale_results)
+        if r["status"] == STATUS_STALE
+    ]
+    stale_sources = [pair[0] for pair in stale_pairs]
     check_source_items = [r for r in stale_results if r["status"] == STATUS_CHECK_SOURCE]
 
     if check_source_items:
@@ -906,9 +936,13 @@ def main():
     logger.info("-" * 50)
 
     glue_results = {}
-    for source in stale_sources:
+    for source, stale_sfs in stale_pairs:
         label = source.get("label", source["prefix"])
-        gr = trigger_glue_job(source, run_id)
+        logger.info(
+            "[%s] Passing %d stale subfolder(s) to Glue: %s",
+            label, len(stale_sfs), stale_sfs,
+        )
+        gr = trigger_glue_job(source, stale_sfs, run_id)
         glue_results[label] = gr
         if gr["status"] == STATUS_FAIL:
             overall_status = STATUS_FAIL

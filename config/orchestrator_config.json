@@ -19,6 +19,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/macp_address_tb.json",
+          "archive_s3_path": "archive/MACP.Mac_ADDRESS_TB__ct/",
           "workers": 10,
           "worker_type": "G.1X",
           "timeout_minutes": 120
@@ -32,6 +33,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/macp_cust_address.json",
+          "archive_s3_path": "archive/MACP.Mac_CUST_ADDRESS__ct/",
           "workers": 10,
           "worker_type": "G.1X",
           "timeout_minutes": 120
@@ -45,6 +47,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/macp_customer.json",
+          "archive_s3_path": "archive/MACP.Mac_CUSTOMER__ct/",
           "workers": 15,
           "worker_type": "G.2X",
           "timeout_minutes": 180
@@ -58,6 +61,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/macp_cust_comm_pref.json",
+          "archive_s3_path": "archive/MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/",
           "workers": 10,
           "worker_type": "G.1X",
           "timeout_minutes": 120
@@ -71,6 +75,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/mrd_mbr_info.json",
+          "archive_s3_path": "archive/MRDP.MRD_MBR_INFO__ct/",
           "workers": 20,
           "worker_type": "G.2X",
           "timeout_minutes": 180
@@ -84,6 +89,7 @@
           "job_name": "trigger_glue_job",
           "config_file_bucket": "strands-etl-configs",
           "config_file_key": "configs/mrd_mbr_prd_dtl.json",
+          "archive_s3_path": "archive/MRDP.MRD_MBR_PRD_DTL__ct/",
           "workers": 20,
           "worker_type": "G.2X",
           "timeout_minutes": 180
