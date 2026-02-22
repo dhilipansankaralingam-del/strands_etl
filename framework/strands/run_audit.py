@@ -205,6 +205,183 @@ class RunAuditTracker:
             'execution_timeline': orch_dict.get('execution_timeline', []),
         })
 
+        # Also emit a consolidated run_summary event for easy querying
+        self._emit_run_summary(orch_dict, total_cost_usd, potential_savings_usd, llm_stats)
+
+    def _emit_run_summary(
+        self,
+        orch_dict: Dict[str, Any],
+        total_cost_usd: float,
+        potential_savings_usd: float,
+        llm_stats: Dict[str, Any],
+    ) -> None:
+        """
+        Emit a single 'run_summary' event with all KPIs, resource allocation,
+        execution metrics, DQ summary, and compliance findings.
+
+        This event is designed for easy Athena/table queries - all key metrics
+        in one flat/nested structure.
+        """
+        # Extract data from agent_result events
+        sizing = {}
+        resource_allocation = {}
+        execution_metrics = {}
+        dq_summary = {'pre_load': {}, 'post_load': {}}
+        compliance_summary = {}
+        learning_summary = {}
+        all_recommendations = []
+
+        for e in self.events:
+            if e.get('event_type') != 'agent_result':
+                continue
+            agent = e.get('agent_name', '')
+            output = e.get('output', {})
+            metrics = e.get('metrics', {})
+
+            # Collect recommendations from all agents
+            for rec in e.get('recommendations', []):
+                all_recommendations.append({
+                    'agent': agent,
+                    'recommendation': rec,
+                })
+
+            if agent == 'sizing_agent':
+                sizing = {
+                    'total_size_gb': e.get('sizing', {}).get('total_size_gb') or output.get('total_size_gb', 0),
+                    'source_table_count': output.get('source_count', 0),
+                    'source_record_counts': e.get('sizing', {}).get('source_record_counts', {}),
+                    'detection_method': output.get('detection_method', ''),
+                }
+
+            elif agent == 'resource_allocator_agent':
+                resource_allocation = {
+                    'input_size_gb': output.get('input_size_gb', 0),
+                    'day_type': output.get('day_type', ''),
+                    'scale_factor': output.get('scale_factor', 1.0),
+                    'complexity_factor': output.get('complexity_factor', 1.0),
+                    'formula_workers': output.get('formula_workers', 0),
+                    'learned_workers': output.get('learned_workers'),
+                    'learn_confidence': output.get('learn_confidence', 0),
+                    'learn_model_id': output.get('learn_model_id', ''),
+                    'recommended_workers': output.get('recommended_workers', 0),
+                    'recommended_worker_type': output.get('recommended_worker_type', ''),
+                    'config_workers': output.get('config_workers', 0),
+                    'config_worker_type': output.get('config_type', ''),
+                    'force_from_config': output.get('force_from_config', False),
+                    'total_memory_gb': output.get('total_memory_gb', 0),
+                    'estimated_cost_per_hour': output.get('estimated_cost_per_hour', 0),
+                }
+
+            elif agent == 'execution_agent':
+                job_exec = e.get('job_execution', {}) or output
+                job_met = e.get('job_metrics', {}) or metrics
+                execution_metrics = {
+                    'platform': job_exec.get('platform', ''),
+                    'status': job_exec.get('status', ''),
+                    'duration_seconds': job_exec.get('duration_seconds', 0),
+                    'workers': job_exec.get('workers', 0),
+                    'worker_type': job_exec.get('worker_type', ''),
+                    'records_read': job_exec.get('records_read', 0),
+                    'records_written': job_exec.get('records_written', 0),
+                    'bytes_read': job_exec.get('bytes_read', 0),
+                    'bytes_written': job_exec.get('bytes_written', 0),
+                    'shuffle_bytes': job_exec.get('shuffle_bytes', 0),
+                    'skewness_ratio': job_exec.get('skewness_ratio', 0),
+                    'etl_throughput_mbps': job_exec.get('etl_throughput_mbps', 0),
+                    'avg_executor_memory_pct': job_exec.get('avg_executor_memory_pct', 0),
+                    'max_executor_memory_pct': job_exec.get('max_executor_memory_pct', 0),
+                    'driver_memory_pct': job_exec.get('driver_memory_pct', 0),
+                    'completed_stages': job_exec.get('completed_stages', 0),
+                    'failed_stages': job_exec.get('failed_stages', 0),
+                    'cost_usd': job_exec.get('cost_usd', 0),
+                    'error_message': job_exec.get('error_message', ''),
+                }
+
+            elif agent == 'data_quality_agent':
+                for phase in ('pre_load', 'post_load'):
+                    summary = e.get(f'dq_summary_{phase}', {})
+                    if summary:
+                        dq_summary[phase] = {
+                            'total_rules': summary.get('total', 0),
+                            'passed': summary.get('passed', 0),
+                            'failed': summary.get('failed', 0),
+                            'warnings': summary.get('warnings', 0),
+                            'score': summary.get('score', 0),
+                            'records_scanned': summary.get('records_scanned', 0),
+                            'outliers_found': summary.get('outliers_found', 0),
+                        }
+                # Also capture from output if not in enriched data
+                if not dq_summary['pre_load'] and not dq_summary['post_load']:
+                    phase = output.get('phase', 'pre_load')
+                    dq_summary[phase] = {
+                        'total_rules': output.get('total_rules', 0),
+                        'passed': output.get('passed', 0),
+                        'failed': output.get('failed', 0),
+                        'warnings': output.get('warnings', 0),
+                        'score': output.get('score', 0),
+                        'records_scanned': output.get('records_scanned', 0),
+                        'outliers_found': output.get('outliers_found', 0),
+                    }
+
+            elif agent == 'compliance_agent':
+                compliance_summary = {
+                    'tables_scanned': output.get('tables_scanned', []),
+                    'total_pii_columns': output.get('total_pii_columns', 0),
+                    'frameworks_checked': output.get('frameworks_checked', []),
+                    'violations': output.get('violations', []),
+                    'compliance_score': output.get('compliance_score', 0),
+                }
+
+            elif agent == 'learning_agent':
+                learning_summary = {
+                    'models_trained': output.get('models_trained', 0),
+                    'training_records': output.get('training_records', 0),
+                    'total_training_cost_usd': output.get('total_training_cost', 0),
+                    'total_training_time_seconds': output.get('total_training_time_seconds', 0),
+                    'predictions': e.get('learning', {}).get('predictions', {}),
+                }
+
+        # Build the consolidated run_summary event
+        self._emit({
+            'event_type': 'run_summary',
+
+            # ---- KPIs ----
+            'kpi': {
+                'overall_status': orch_dict.get('status', 'unknown'),
+                'total_duration_ms': orch_dict.get('total_time_ms', 0),
+                'total_agents': orch_dict.get('total_agents', 0),
+                'completed_agents': orch_dict.get('completed_agents', 0),
+                'failed_agents': orch_dict.get('failed_agents', 0),
+                'skipped_agents': orch_dict.get('skipped_agents', 0),
+                'execution_cost_usd': total_cost_usd,
+                'potential_savings_usd': potential_savings_usd,
+                'llm_tokens_input': llm_stats.get('input_tokens', 0),
+                'llm_tokens_output': llm_stats.get('output_tokens', 0),
+                'llm_cost_usd': llm_stats.get('cost_usd', 0.0),
+            },
+
+            # ---- Sizing ----
+            'sizing': sizing,
+
+            # ---- Resource Allocation ----
+            'resource_allocation': resource_allocation,
+
+            # ---- Execution Metrics ----
+            'execution': execution_metrics,
+
+            # ---- Data Quality ----
+            'data_quality': dq_summary,
+
+            # ---- Compliance ----
+            'compliance': compliance_summary,
+
+            # ---- Learning ----
+            'learning': learning_summary,
+
+            # ---- All Recommendations ----
+            'recommendations': all_recommendations,
+        })
+
     # ------------------------------------------------------------------
     # S3 upload
     # ------------------------------------------------------------------
