@@ -244,7 +244,20 @@ for job_cfg in jobs:
         # ------------------------------------------------------------------
         # Read, enrich, and load
         # ------------------------------------------------------------------
-        df = spark.read.option("header", "true").schema(schema).csv(csv_paths)
+        # Read CSV with header=true but WITHOUT applying the schema yet.
+        # CSV files may have UPPERCASE column names while the config schema
+        # uses lowercase — Spark matches these case-sensitively which causes
+        # "Field ... not found in source schema" errors.
+        df = spark.read.option("header", "true").csv(csv_paths)
+
+        # Lowercase all column names so they match the schema definition
+        for col_name in df.columns:
+            df = df.withColumnRenamed(col_name, col_name.lower())
+
+        # Now cast to the target schema types
+        for field in schema.fields:
+            if field.name in df.columns:
+                df = df.withColumn(field.name, df[field.name].cast(field.dataType))
 
         # Add processing indicator columns
         df = df.withColumn("hourly_processed_ind", lit("N"))
