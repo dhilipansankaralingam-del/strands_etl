@@ -2,7 +2,9 @@
   "orchestrator": {
     "name": "strands_etl_orchestrator",
     "description": "ETL Orchestration: S3 Stale Detection -> Glue Trigger -> Validation -> Audit & Dashboard Email",
-    "version": "1.0.0"
+    "version": "1.1.0",
+    "run_mode": "full_pipeline",
+    "run_mode_options_doc": "full_pipeline = stale check + glue trigger + validations | validation_only = skip stale check & glue, run validations directly"
   },
   "s3_monitoring": {
     "defaults": {
@@ -98,7 +100,8 @@
     ]
   },
   "validations": {
-    "execution_mode": "sequential",
+    "execution_mode": "parallel",
+    "max_parallel": 5,
     "athena_output_bucket": "strands-etl-athena-results",
     "athena_output_prefix": "query_results/",
     "athena_workgroup": "primary",

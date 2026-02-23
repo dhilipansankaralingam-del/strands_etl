@@ -28,6 +28,7 @@ import argparse
 import logging
 from datetime import datetime, timezone, timedelta
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -425,13 +426,72 @@ def evaluate_condition(condition, rows):
         return False, None
 
 
+def _execute_single_validation(qdef, output_location, workgroup):
+    """
+    Run one Athena validation query and return a result dict.
+    Designed to be called from both sequential and parallel paths.
+    """
+    query_str = qdef["query"]
+    database = qdef.get("database", "default")
+    condition = qdef.get("condition", "")
+
+    logger.info("Running validation: %s", qdef["name"])
+
+    try:
+        athena_result = run_athena_query(
+            query_str, database, output_location, workgroup
+        )
+    except Exception as exc:
+        logger.error("Athena query failed for %s: %s", qdef["name"], exc)
+        return {
+            "name": qdef["name"],
+            "description": qdef.get("description", ""),
+            "check_type": qdef.get("check_type", ""),
+            "abort_on_failure": qdef.get("abort_on_failure", False),
+            "status": STATUS_FAIL,
+            "detail": str(exc),
+            "actual_value": None,
+            "query": query_str,
+        }
+
+    if athena_result["state"] != "SUCCEEDED":
+        status = STATUS_FAIL
+        detail = f"Athena query state: {athena_result['state']}"
+        actual = None
+    else:
+        passed, actual = evaluate_condition(condition, athena_result["rows"])
+        status = STATUS_PASS if passed else STATUS_FAIL
+        detail = f"Condition '{condition}' -> {'met' if passed else 'not met'} (actual={actual})"
+
+    logger.info("Validation %s: %s – %s", qdef["name"], status, detail)
+
+    return {
+        "name": qdef["name"],
+        "description": qdef.get("description", ""),
+        "check_type": qdef.get("check_type", ""),
+        "abort_on_failure": qdef.get("abort_on_failure", False),
+        "status": status,
+        "detail": detail,
+        "actual_value": actual,
+        "query": query_str,
+    }
+
+
 def run_validations(config, stale_results):
     """
     Execute all validation queries from config.
-    Returns list of validation result dicts.
+
+    Supports two execution modes (set in config.validations.execution_mode):
+      - "sequential": run one at a time; abort immediately on critical failure.
+      - "parallel":   submit all queries concurrently via ThreadPoolExecutor,
+                      then evaluate abort_on_failure after all finish.
+
+    Returns (list of validation result dicts, aborted: bool).
     """
     val_cfg = config.get("validations", {})
     queries = val_cfg.get("queries", [])
+    execution_mode = val_cfg.get("execution_mode", "sequential")
+    max_parallel = val_cfg.get("max_parallel", 5)
     output_bucket = val_cfg.get("athena_output_bucket", "")
     output_prefix = val_cfg.get("athena_output_prefix", "query_results/")
     workgroup = val_cfg.get("athena_workgroup", "primary")
@@ -440,79 +500,63 @@ def run_validations(config, stale_results):
     results = []
     abort = False
 
-    # Build a set of table names from stale sources that were processed
-    stale_labels = {
-        r["label"] for r in stale_results if r["status"] == STATUS_STALE
-    }
+    if execution_mode == "parallel":
+        # -- Parallel execution ------------------------------------------------
+        logger.info(
+            "Running %d validations in PARALLEL (max_parallel=%d)",
+            len(queries), max_parallel,
+        )
+        futures = {}
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            for qdef in queries:
+                future = executor.submit(
+                    _execute_single_validation, qdef, output_location, workgroup,
+                )
+                futures[future] = qdef
 
-    for qdef in queries:
-        if abort:
-            results.append({
-                "name": qdef["name"],
-                "description": qdef.get("description", ""),
-                "check_type": qdef.get("check_type", ""),
-                "status": STATUS_ABORTED,
-                "detail": "Aborted due to prior validation failure",
-                "actual_value": None,
-                "query": qdef["query"],
-            })
-            continue
+            for future in as_completed(futures):
+                vr = future.result()
+                results.append(vr)
+                if vr["status"] == STATUS_FAIL and vr.get("abort_on_failure"):
+                    abort = True
+                    logger.error(
+                        "ABORT: Validation '%s' failed and abort_on_failure=true",
+                        vr["name"],
+                    )
 
-        query_str = qdef["query"]
-        database = qdef.get("database", "default")
-        condition = qdef.get("condition", "")
-        abort_on_failure = qdef.get("abort_on_failure", False)
+        # Sort results back to config order for deterministic reporting
+        query_order = {q["name"]: i for i, q in enumerate(queries)}
+        results.sort(key=lambda r: query_order.get(r["name"], 999))
 
-        logger.info("Running validation: %s", qdef["name"])
+    else:
+        # -- Sequential execution ----------------------------------------------
+        logger.info("Running %d validations SEQUENTIALLY", len(queries))
+        for qdef in queries:
+            if abort:
+                results.append({
+                    "name": qdef["name"],
+                    "description": qdef.get("description", ""),
+                    "check_type": qdef.get("check_type", ""),
+                    "status": STATUS_ABORTED,
+                    "detail": "Aborted due to prior validation failure",
+                    "actual_value": None,
+                    "query": qdef["query"],
+                })
+                continue
 
-        try:
-            athena_result = run_athena_query(
-                query_str, database, output_location, workgroup
-            )
-        except Exception as exc:
-            logger.error("Athena query failed for %s: %s", qdef["name"], exc)
-            status = STATUS_FAIL
-            detail = str(exc)
-            actual = None
-            if abort_on_failure:
+            vr = _execute_single_validation(qdef, output_location, workgroup)
+            results.append(vr)
+
+            if vr["status"] == STATUS_FAIL and vr.get("abort_on_failure"):
                 abort = True
-            results.append({
-                "name": qdef["name"],
-                "description": qdef.get("description", ""),
-                "check_type": qdef.get("check_type", ""),
-                "status": status,
-                "detail": detail,
-                "actual_value": actual,
-                "query": query_str,
-            })
-            continue
+                logger.error(
+                    "ABORT: Validation '%s' failed and abort_on_failure=true",
+                    vr["name"],
+                )
 
-        if athena_result["state"] != "SUCCEEDED":
-            status = STATUS_FAIL
-            detail = f"Athena query state: {athena_result['state']}"
-            actual = None
-        else:
-            passed, actual = evaluate_condition(condition, athena_result["rows"])
-            status = STATUS_PASS if passed else STATUS_FAIL
-            detail = f"Condition '{condition}' -> {'met' if passed else 'not met'} (actual={actual})"
-
-        logger.info("Validation %s: %s – %s", qdef["name"], status, detail)
-
-        if status == STATUS_FAIL and abort_on_failure:
-            abort = True
-            logger.error(
-                "ABORT: Validation '%s' failed and abort_on_failure=true", qdef["name"]
-            )
-
-        results.append({
-            "name": qdef["name"],
-            "description": qdef.get("description", ""),
-            "check_type": qdef.get("check_type", ""),
-            "status": status,
-            "detail": detail,
-            "actual_value": actual,
-            "query": query_str,
-        })
+    # Strip internal key before returning
+    for r in results:
+        r.pop("abort_on_failure", None)
 
     return results, abort
 
@@ -893,60 +937,70 @@ def main():
 
     # ---- Load config ----
     config = load_config(args.config)
+    orch_cfg = config.get("orchestrator", {})
     mon_cfg = config.get("s3_monitoring", {})
     defaults = mon_cfg.get("defaults", {})
     sources = mon_cfg.get("sources", [])
     audit_cfg = config.get("audit", {})
     email_cfg = config.get("email", {})
 
+    # run_mode: "full_pipeline" (default) or "validation_only"
+    run_mode = orch_cfg.get("run_mode", "full_pipeline")
+    logger.info("Run mode: %s", run_mode)
+
     overall_status = STATUS_PASS
-
-    # ================================================================
-    # PHASE 1: S3 Stale Detection
-    # ================================================================
-    logger.info("-" * 50)
-    logger.info("PHASE 1: S3 Stale Detection")
-    logger.info("-" * 50)
-
     stale_results = []
-    for source in sources:
-        result = check_staleness(source, defaults)
-        stale_results.append(result)
-
-    # Pair each source config with its stale subfolder prefixes
-    stale_pairs = [
-        (s, r["stale_subfolders"])
-        for s, r in zip(sources, stale_results)
-        if r["status"] == STATUS_STALE
-    ]
-    stale_sources = [pair[0] for pair in stale_pairs]
-    check_source_items = [r for r in stale_results if r["status"] == STATUS_CHECK_SOURCE]
-
-    if check_source_items:
-        logger.warning(
-            "%d source(s) flagged as 'Check with Source' – email will include alert",
-            len(check_source_items),
-        )
-
-    # ================================================================
-    # PHASE 2: Trigger Glue Jobs for Stale Sources
-    # ================================================================
-    logger.info("-" * 50)
-    logger.info("PHASE 2: Trigger Glue Jobs (%d stale sources)", len(stale_sources))
-    logger.info("-" * 50)
-
+    stale_pairs = []
+    stale_sources = []
     glue_results = {}
-    for source, stale_sfs in stale_pairs:
-        label = source.get("label", source["prefix"])
-        logger.info(
-            "[%s] Passing %d stale subfolder(s) to Glue: %s",
-            label, len(stale_sfs), stale_sfs,
-        )
-        gr = trigger_glue_job(source, stale_sfs, run_id)
-        glue_results[label] = gr
-        if gr["status"] == STATUS_FAIL:
-            overall_status = STATUS_FAIL
-            logger.error("[%s] Glue job FAILED – marking overall as FAIL", label)
+
+    if run_mode == "full_pipeline":
+        # ============================================================
+        # PHASE 1: S3 Stale Detection
+        # ============================================================
+        logger.info("-" * 50)
+        logger.info("PHASE 1: S3 Stale Detection")
+        logger.info("-" * 50)
+
+        for source in sources:
+            result = check_staleness(source, defaults)
+            stale_results.append(result)
+
+        # Pair each source config with its stale subfolder prefixes
+        stale_pairs = [
+            (s, r["stale_subfolders"])
+            for s, r in zip(sources, stale_results)
+            if r["status"] == STATUS_STALE
+        ]
+        stale_sources = [pair[0] for pair in stale_pairs]
+        check_source_items = [r for r in stale_results if r["status"] == STATUS_CHECK_SOURCE]
+
+        if check_source_items:
+            logger.warning(
+                "%d source(s) flagged as 'Check with Source' – email will include alert",
+                len(check_source_items),
+            )
+
+        # ============================================================
+        # PHASE 2: Trigger Glue Jobs for Stale Sources
+        # ============================================================
+        logger.info("-" * 50)
+        logger.info("PHASE 2: Trigger Glue Jobs (%d stale sources)", len(stale_sources))
+        logger.info("-" * 50)
+
+        for source, stale_sfs in stale_pairs:
+            label = source.get("label", source["prefix"])
+            logger.info(
+                "[%s] Passing %d stale subfolder(s) to Glue: %s",
+                label, len(stale_sfs), stale_sfs,
+            )
+            gr = trigger_glue_job(source, stale_sfs, run_id)
+            glue_results[label] = gr
+            if gr["status"] == STATUS_FAIL:
+                overall_status = STATUS_FAIL
+                logger.error("[%s] Glue job FAILED – marking overall as FAIL", label)
+    else:
+        logger.info("PHASE 1 & 2 SKIPPED (run_mode=%s)", run_mode)
 
     # ================================================================
     # PHASE 3: Validation Queries
@@ -958,7 +1012,14 @@ def main():
     validation_results = []
     aborted = False
 
-    if stale_sources and overall_status != STATUS_FAIL:
+    if run_mode == "validation_only":
+        # In validation_only mode, always run all validations
+        logger.info("validation_only mode – running all configured validations")
+        validation_results, aborted = run_validations(config, stale_results)
+        if aborted:
+            overall_status = STATUS_FAIL
+            logger.error("Validation phase ABORTED due to critical failure")
+    elif stale_sources and overall_status != STATUS_FAIL:
         validation_results, aborted = run_validations(config, stale_results)
         if aborted:
             overall_status = STATUS_FAIL

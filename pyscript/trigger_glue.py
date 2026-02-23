@@ -138,6 +138,30 @@ def archive_files(bucket, keys, archive_prefix):
             raise
 
 
+def delete_subfolder(bucket, prefix):
+    """
+    Delete all remaining objects under a subfolder prefix, effectively
+    removing the subfolder from S3.  S3 has no real "directory" — once
+    all objects (including 0-byte folder markers) are gone, the folder
+    disappears.
+    """
+    paginator = s3_client.get_paginator("list_objects_v2")
+    objects_to_delete = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            objects_to_delete.append({"Key": obj["Key"]})
+
+    if not objects_to_delete:
+        print(f"  Subfolder already empty: s3://{bucket}/{prefix}")
+        return
+
+    # S3 delete_objects supports up to 1000 keys per call
+    for i in range(0, len(objects_to_delete), 1000):
+        batch = objects_to_delete[i : i + 1000]
+        s3_client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+    print(f"  Deleted subfolder ({len(objects_to_delete)} objects): s3://{bucket}/{prefix}")
+
+
 # ---------------------------------------------------------------------------
 # Read job config from S3
 # ---------------------------------------------------------------------------
@@ -245,12 +269,22 @@ for job_cfg in jobs:
     print(f"  Loaded {row_count} rows into {database_name}.{table_name}")
 
     # ------------------------------------------------------------------
-    # Archive processed files
+    # Archive processed files and delete stale subfolders
     # ------------------------------------------------------------------
     if archive_path:
         print(f"  Archiving {len(csv_keys)} file(s) to {archive_path}")
         archive_files(bucket_name1, csv_keys, archive_path)
         print(f"  Archive complete for {table_name}")
+
+        # Delete the stale subfolders themselves from the main landing prefix.
+        # This removes any leftover 0-byte folder markers and non-CSV files
+        # so the subfolder no longer appears under the main prefix.
+        if stale_folders:
+            processed_sfs = [sf for sf in stale_folders if sf.startswith(landing_loc)]
+            for sf_prefix in processed_sfs:
+                print(f"  Cleaning up stale subfolder: s3://{bucket_name1}/{sf_prefix}")
+                delete_subfolder(bucket_name1, sf_prefix)
+            print(f"  Removed {len(processed_sfs)} stale subfolder(s) from landing")
     else:
         print(f"  WARNING: No archive path configured – files left in landing")
 
