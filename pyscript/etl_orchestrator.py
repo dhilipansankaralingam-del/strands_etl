@@ -273,6 +273,7 @@ def trigger_glue_job(source, stale_subfolders, run_id):
         "--orchestrator_run_id": run_id,
         "--stale_folders": stale_folders_csv,
         "--archive_s3_path": glue_cfg.get("archive_s3_path", ""),
+        "--source_bucket": source.get("bucket", ""),
     }
 
     worker_type = glue_cfg.get("worker_type", "G.1X")

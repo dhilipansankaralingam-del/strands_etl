@@ -52,7 +52,7 @@ logger = logging.getLogger()
 args = getResolvedOptions(
     sys.argv,
     ["JOB_NAME", "json_file_name", "bucket_name", "stale_folders",
-     "archive_s3_path", "orchestrator_run_id"],
+     "archive_s3_path", "orchestrator_run_id", "source_bucket"],
 )
 
 sc = SparkContext.getOrCreate()
@@ -179,8 +179,13 @@ stale_folders = [f.strip() for f in stale_folders_arg.split(",") if f.strip()]
 # Archive path override from the orchestrator (falls back to config value)
 archive_override = args.get("archive_s3_path", "")
 
+# Source data bucket (from the orchestrator config, NOT the config-file bucket).
+# Used to delete stale subfolders after processing.
+source_bucket = args.get("source_bucket", "")
+
 print("=" * 60)
 print(f"Job: {job_name}  Run: {job_run_id}")
+print(f"Source bucket : {source_bucket if source_bucket else '(will use job config s3_bucket)'}")
 print(f"Stale folders received: {stale_folders if stale_folders else '(all – full landing)')}")
 print(f"Archive override: {archive_override if archive_override else '(use config value)'}")
 print("=" * 60)
@@ -281,19 +286,29 @@ for job_cfg in jobs:
         df.unpersist()
         loaded_successfully = True
 
-    # ------------------------------------------------------------------
-    # Delete stale subfolders from the main landing prefix.
-    # This runs ALWAYS for stale subfolders (regardless of whether CSVs
-    # were found) so that the empty/stale subfolder is removed entirely.
-    # ------------------------------------------------------------------
-    if stale_folders:
-        processed_sfs = [sf for sf in stale_folders if sf.startswith(landing_loc)]
-        if processed_sfs:
-            print(f"  Deleting {len(processed_sfs)} stale subfolder(s) from landing")
-            for sf_prefix in processed_sfs:
-                print(f"    Removing: s3://{bucket_name1}/{sf_prefix}")
-                delete_subfolder(bucket_name1, sf_prefix)
-            print(f"  Cleanup complete – {len(processed_sfs)} subfolder(s) removed")
+print("=" * 60)
+
+# ===========================================================================
+# Delete stale subfolders from the source landing bucket.
+#
+# This runs AFTER all job configs have been processed so that:
+#   1) It is independent of any landing_loc prefix matching
+#   2) It uses source_bucket (from the orchestrator) — the actual bucket
+#      where the stale subfolders live
+#   3) It always executes, even if no CSVs were found inside a subfolder
+#
+# The orchestrator already filtered the stale_folders list to belong to
+# this source, so no additional filtering is needed here.
+# ===========================================================================
+if stale_folders:
+    delete_bucket = source_bucket or bucket_name
+    print(f"Deleting {len(stale_folders)} stale subfolder(s) from s3://{delete_bucket}/")
+    for sf_prefix in stale_folders:
+        print(f"  Removing: s3://{delete_bucket}/{sf_prefix}")
+        delete_subfolder(delete_bucket, sf_prefix)
+    print(f"Cleanup complete – {len(stale_folders)} subfolder(s) removed")
+else:
+    print("No stale subfolders to delete")
 
 print("=" * 60)
 print("trigger_glue.py completed successfully")
