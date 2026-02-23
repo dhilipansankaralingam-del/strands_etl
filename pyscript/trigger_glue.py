@@ -228,68 +228,72 @@ for job_cfg in jobs:
         print(f"  Full landing scan: {len(csv_keys)} CSV file(s)")
 
     if not csv_keys:
-        print(f"  No CSV files to process for {table_name} – skipping")
-        continue
-
-    csv_paths = [f"s3://{bucket_name1}/{k}" for k in csv_keys]
-    for p in csv_paths:
-        print(f"  -> {p}")
-
-    # ------------------------------------------------------------------
-    # Read, enrich, and load
-    # ------------------------------------------------------------------
-    df = spark.read.option("header", "true").schema(schema).csv(csv_paths)
-
-    # Add processing indicator columns
-    df = df.withColumn("hourly_processed_ind", lit("N"))
-    df = df.withColumn("daily_processed_ind", lit("N"))
-
-    # Timestamps
-    pst = pytz.timezone("US/Pacific")
-    current_timestamp = datetime.now(pst).strftime("%Y-%m-%d %H:%M:%S")
-    current_timestamp_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-    df = df.withColumn("insert_timestamp", lit(current_timestamp))
-    df = df.withColumn("inserted_by", lit("Qlik Staging Lambda"))
-    df = df.withColumn("updated_timestamp", lit(current_timestamp))
-    df = df.withColumn("updated_by", lit("Qlik Staging Lambda"))
-    df = df.withColumn("load_timestamp", lit(current_timestamp_utc))
-
-    df.cache()
-    df.createOrReplaceTempView("mem_staging")
-
-    row_count = df.count()
-    print(f"  Rows to load: {row_count}")
-    df.show(5, truncate=False)
-
-    # Insert into Iceberg table
-    query = f"INSERT INTO glue_catalog.{database_name}.{table_name} SELECT * FROM mem_staging"
-    print(f"  Executing: {query}")
-    spark.sql(query)
-    print(f"  Loaded {row_count} rows into {database_name}.{table_name}")
-
-    # ------------------------------------------------------------------
-    # Archive processed files and delete stale subfolders
-    # ------------------------------------------------------------------
-    if archive_path:
-        print(f"  Archiving {len(csv_keys)} file(s) to {archive_path}")
-        archive_files(bucket_name1, csv_keys, archive_path)
-        print(f"  Archive complete for {table_name}")
-
-        # Delete the stale subfolders themselves from the main landing prefix.
-        # This removes any leftover 0-byte folder markers and non-CSV files
-        # so the subfolder no longer appears under the main prefix.
-        if stale_folders:
-            processed_sfs = [sf for sf in stale_folders if sf.startswith(landing_loc)]
-            for sf_prefix in processed_sfs:
-                print(f"  Cleaning up stale subfolder: s3://{bucket_name1}/{sf_prefix}")
-                delete_subfolder(bucket_name1, sf_prefix)
-            print(f"  Removed {len(processed_sfs)} stale subfolder(s) from landing")
+        print(f"  No CSV files to process for {table_name} – skipping load")
+        # Even with no CSVs, we still need to clean up stale subfolders below
+        loaded_successfully = False
     else:
-        print(f"  WARNING: No archive path configured – files left in landing")
+        csv_paths = [f"s3://{bucket_name1}/{k}" for k in csv_keys]
+        for p in csv_paths:
+            print(f"  -> {p}")
 
-    # Clean up cached dataframe
-    df.unpersist()
+        # ------------------------------------------------------------------
+        # Read, enrich, and load
+        # ------------------------------------------------------------------
+        df = spark.read.option("header", "true").schema(schema).csv(csv_paths)
+
+        # Add processing indicator columns
+        df = df.withColumn("hourly_processed_ind", lit("N"))
+        df = df.withColumn("daily_processed_ind", lit("N"))
+
+        # Timestamps
+        pst = pytz.timezone("US/Pacific")
+        current_timestamp = datetime.now(pst).strftime("%Y-%m-%d %H:%M:%S")
+        current_timestamp_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        df = df.withColumn("insert_timestamp", lit(current_timestamp))
+        df = df.withColumn("inserted_by", lit("Qlik Staging Lambda"))
+        df = df.withColumn("updated_timestamp", lit(current_timestamp))
+        df = df.withColumn("updated_by", lit("Qlik Staging Lambda"))
+        df = df.withColumn("load_timestamp", lit(current_timestamp_utc))
+
+        df.cache()
+        df.createOrReplaceTempView("mem_staging")
+
+        row_count = df.count()
+        print(f"  Rows to load: {row_count}")
+        df.show(5, truncate=False)
+
+        # Insert into Iceberg table
+        query = f"INSERT INTO glue_catalog.{database_name}.{table_name} SELECT * FROM mem_staging"
+        print(f"  Executing: {query}")
+        spark.sql(query)
+        print(f"  Loaded {row_count} rows into {database_name}.{table_name}")
+
+        # Archive the processed CSV files
+        if archive_path:
+            print(f"  Archiving {len(csv_keys)} file(s) to {archive_path}")
+            archive_files(bucket_name1, csv_keys, archive_path)
+            print(f"  Archive complete for {table_name}")
+        else:
+            print(f"  WARNING: No archive path configured – files left in landing")
+
+        # Clean up cached dataframe
+        df.unpersist()
+        loaded_successfully = True
+
+    # ------------------------------------------------------------------
+    # Delete stale subfolders from the main landing prefix.
+    # This runs ALWAYS for stale subfolders (regardless of whether CSVs
+    # were found) so that the empty/stale subfolder is removed entirely.
+    # ------------------------------------------------------------------
+    if stale_folders:
+        processed_sfs = [sf for sf in stale_folders if sf.startswith(landing_loc)]
+        if processed_sfs:
+            print(f"  Deleting {len(processed_sfs)} stale subfolder(s) from landing")
+            for sf_prefix in processed_sfs:
+                print(f"    Removing: s3://{bucket_name1}/{sf_prefix}")
+                delete_subfolder(bucket_name1, sf_prefix)
+            print(f"  Cleanup complete – {len(processed_sfs)} subfolder(s) removed")
 
 print("=" * 60)
 print("trigger_glue.py completed successfully")
