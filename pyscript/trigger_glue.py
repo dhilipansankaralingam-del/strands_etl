@@ -186,7 +186,7 @@ source_bucket = args.get("source_bucket", "")
 print("=" * 60)
 print(f"Job: {job_name}  Run: {job_run_id}")
 print(f"Source bucket : {source_bucket if source_bucket else '(will use job config s3_bucket)'}")
-print(f"Stale folders received: {stale_folders if stale_folders else '(all – full landing)')}")
+print(f"Stale folders received: {stale_folders if stale_folders else '(all – full landing)'}")
 print(f"Archive override: {archive_override if archive_override else '(use config value)'}")
 print("=" * 60)
 

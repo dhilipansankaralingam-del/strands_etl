@@ -4,7 +4,7 @@
     "description": "ETL Orchestration: S3 Stale Detection -> Glue Trigger -> Validation -> Audit & Dashboard Email",
     "version": "1.1.0",
     "run_mode": "full_pipeline",
-    "run_mode_options_doc": "full_pipeline = stale check + glue trigger + validations | validation_only = skip stale check & glue, run validations directly"
+    "run_mode_options_doc": "full_pipeline = stale check + glue trigger + validations | validation_only = skip stale check & glue, run validations directly | summary = run summary queries with chart generation"
   },
   "s3_monitoring": {
     "defaults": {
@@ -141,6 +141,104 @@
         "check_type": "threshold",
         "condition": "hours_since < 24",
         "abort_on_failure": false
+      }
+    ],
+    "comparison_checks": [
+      {
+        "name": "landing_vs_source_row_count",
+        "description": "Compare row count between landing table and source staging to verify complete data transfer",
+        "query_a": {
+          "label": "Landing Table",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Source Staging",
+          "database": "staging_db",
+          "query": "SELECT COUNT(*) AS cnt FROM staging_db.macp_address_tb_stg WHERE cast(load_date as date) = current_date"
+        },
+        "compare_column": "cnt",
+        "rule": "match",
+        "abort_on_failure": true
+      },
+      {
+        "name": "member_info_count_tolerance",
+        "description": "MRD Member Info row counts should be within 5% between landing and curated",
+        "query_a": {
+          "label": "Landing",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Curated",
+          "database": "curated_db",
+          "query": "SELECT COUNT(*) AS cnt FROM curated_db.mrd_mbr_info WHERE cast(update_date as date) = current_date"
+        },
+        "compare_column": "cnt",
+        "rule": "percentage_within",
+        "tolerance": 5,
+        "abort_on_failure": false
+      },
+      {
+        "name": "customer_non_zero_check",
+        "description": "Verify that the customer landing table has non-zero rows loaded today",
+        "query_a": {
+          "label": "Customer Landing",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Baseline (not used)",
+          "database": "landing_db",
+          "query": "SELECT 0 AS cnt"
+        },
+        "compare_column": "cnt",
+        "rule": "a_not_zero",
+        "abort_on_failure": true
+      }
+    ]
+  },
+  "summary": {
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "summary_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "daily_load_summary",
+        "description": "Row counts loaded today per landing table",
+        "database": "landing_db",
+        "query": "SELECT 'macp_address_tb' AS table_name, COUNT(*) AS row_count FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_address', COUNT(*) FROM landing_db.macp_cust_address WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_customer', COUNT(*) FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_comm_pref', COUNT(*) FROM landing_db.macp_cust_comm_pref WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_info', COUNT(*) FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_prd_dtl', COUNT(*) FROM landing_db.mrd_mbr_prd_dtl WHERE cast(load_timestamp as date) = current_date",
+        "chart": {
+          "type": "bar",
+          "title": "Daily Load Row Counts by Table",
+          "x_column": "table_name",
+          "y_column": "row_count"
+        }
+      },
+      {
+        "name": "source_distribution",
+        "description": "Distribution of records across source systems",
+        "database": "landing_db",
+        "query": "SELECT CASE WHEN table_name LIKE 'macp%' THEN 'MACP' ELSE 'MRD' END AS source_system, SUM(cnt) AS total_rows FROM (SELECT 'macp_address_tb' AS table_name, COUNT(*) AS cnt FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_address', COUNT(*) FROM landing_db.macp_cust_address WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_customer', COUNT(*) FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_comm_pref', COUNT(*) FROM landing_db.macp_cust_comm_pref WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_info', COUNT(*) FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_prd_dtl', COUNT(*) FROM landing_db.mrd_mbr_prd_dtl WHERE cast(load_timestamp as date) = current_date) GROUP BY 1",
+        "chart": {
+          "type": "pie",
+          "title": "Record Distribution by Source System",
+          "label_column": "source_system",
+          "value_column": "total_rows"
+        }
+      },
+      {
+        "name": "weekly_load_trend",
+        "description": "Daily row counts over the past 7 days across all landing tables",
+        "database": "landing_db",
+        "query": "SELECT cast(load_timestamp as date) AS load_date, COUNT(*) AS total_rows FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) >= date_add('day', -7, current_date) GROUP BY 1 ORDER BY 1",
+        "chart": {
+          "type": "trend",
+          "title": "Weekly Load Trend (MACP Address Table)",
+          "x_column": "load_date",
+          "y_column": "total_rows"
+        }
       }
     ]
   },
