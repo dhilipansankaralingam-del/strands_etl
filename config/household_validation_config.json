@@ -1,0 +1,157 @@
+{
+  "orchestrator": {
+    "name": "household_validation",
+    "description": "Validation suite for Household table: aew_membership.mrd_mbrshp_household__ct_20260227",
+    "version": "1.0.0",
+    "run_mode": "validation_only",
+    "run_mode_options_doc": "full_pipeline | validation_only | summary"
+  },
+  "validations": {
+    "execution_mode": "parallel",
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "query_results/household/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "household_duplicate_check",
+        "description": "Check for duplicate records on composite key (fk_acl_club_c, mbrshp_n, fk_bill_cus_sys_id, eff_d, cur_term_exp_d)",
+        "database": "aew_membership",
+        "query": "SELECT fk_acl_club_c, mbrshp_n, fk_bill_cus_sys_id, eff_d, cur_term_exp_d, COUNT(*) AS dup_cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227 GROUP BY fk_acl_club_c, mbrshp_n, fk_bill_cus_sys_id, eff_d, cur_term_exp_d HAVING COUNT(*) > 1 LIMIT 20",
+        "check_type": "no_rows",
+        "condition": "row_count == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "household_null_primary_key_check",
+        "description": "Verify no NULLs in primary key columns (fk_acl_club_c, mbrshp_n, fk_bill_cus_sys_id, eff_d, cur_term_exp_d)",
+        "database": "aew_membership",
+        "query": "SELECT SUM(CASE WHEN fk_acl_club_c IS NULL THEN 1 ELSE 0 END) AS null_fk_acl_club_c, SUM(CASE WHEN mbrshp_n IS NULL THEN 1 ELSE 0 END) AS null_mbrshp_n, SUM(CASE WHEN fk_bill_cus_sys_id IS NULL THEN 1 ELSE 0 END) AS null_fk_bill_cus_sys_id, SUM(CASE WHEN eff_d IS NULL THEN 1 ELSE 0 END) AS null_eff_d, SUM(CASE WHEN cur_term_exp_d IS NULL THEN 1 ELSE 0 END) AS null_cur_term_exp_d FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "null_fk_acl_club_c == 0 and null_mbrshp_n == 0 and null_fk_bill_cus_sys_id == 0 and null_eff_d == 0 and null_cur_term_exp_d == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "household_null_percentage_fk_bill_plan_typ_c",
+        "description": "Null percentage for fk_bill_plan_typ_c should be within 10%",
+        "database": "aew_membership",
+        "query": "SELECT ROUND(100.0 * SUM(CASE WHEN fk_bill_plan_typ_c IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS null_pct FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "null_pct <= 10",
+        "abort_on_failure": false
+      },
+      {
+        "name": "household_null_percentage_ren_term_exp_d",
+        "description": "Null percentage for ren_term_exp_d should be within 10%",
+        "database": "aew_membership",
+        "query": "SELECT ROUND(100.0 * SUM(CASE WHEN ren_term_exp_d IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS null_pct FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "null_pct <= 10",
+        "abort_on_failure": false
+      },
+      {
+        "name": "household_null_percentage_yrs_aaa_mbr_n",
+        "description": "Null percentage for yrs_aaa_mbr_n should be within 10%",
+        "database": "aew_membership",
+        "query": "SELECT ROUND(100.0 * SUM(CASE WHEN yrs_aaa_mbr_n IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS null_pct FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "null_pct <= 10",
+        "abort_on_failure": false
+      },
+      {
+        "name": "household_null_percentage_dn_clo_lodge_c",
+        "description": "Null percentage for dn_clo_lodge_c should be within 10%",
+        "database": "aew_membership",
+        "query": "SELECT ROUND(100.0 * SUM(CASE WHEN dn_clo_lodge_c IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS null_pct FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "null_pct <= 10",
+        "abort_on_failure": false
+      },
+      {
+        "name": "household_date_format_eff_d",
+        "description": "eff_d must follow YYYY-MM-DD format and must not be null",
+        "database": "aew_membership",
+        "query": "SELECT SUM(CASE WHEN eff_d IS NULL OR NOT regexp_like(cast(eff_d AS varchar), '^\\d{4}-\\d{2}-\\d{2}$') THEN 1 ELSE 0 END) AS invalid_cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "invalid_cnt == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "household_date_format_cur_term_exp_d",
+        "description": "cur_term_exp_d must follow YYYY-MM-DD format and must not be null",
+        "database": "aew_membership",
+        "query": "SELECT SUM(CASE WHEN cur_term_exp_d IS NULL OR NOT regexp_like(cast(cur_term_exp_d AS varchar), '^\\d{4}-\\d{2}-\\d{2}$') THEN 1 ELSE 0 END) AS invalid_cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "invalid_cnt == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "household_date_format_ren_term_exp_d",
+        "description": "ren_term_exp_d must follow YYYY-MM-DD format and must not be null",
+        "database": "aew_membership",
+        "query": "SELECT SUM(CASE WHEN ren_term_exp_d IS NULL OR NOT regexp_like(cast(ren_term_exp_d AS varchar), '^\\d{4}-\\d{2}-\\d{2}$') THEN 1 ELSE 0 END) AS invalid_cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227",
+        "check_type": "threshold",
+        "condition": "invalid_cnt == 0",
+        "abort_on_failure": true
+      }
+    ],
+    "comparison_checks": [
+      {
+        "name": "household_vs_source_record_count",
+        "description": "Compare distinct record count between Household target (fk_acl_club_c, mbrshp_n, fk_bill_cus_sys_id) and Source mrd_mbr_prd_dtl (fk_mhh_acl_club_c, fk_mhh_mbrshp_n, dn_cust_sys_id_n) for last 30 days",
+        "query_a": {
+          "label": "Household Target",
+          "database": "aew_membership",
+          "query": "SELECT COUNT(DISTINCT concat(cast(fk_acl_club_c AS varchar), '|', cast(mbrshp_n AS varchar), '|', cast(fk_bill_cus_sys_id AS varchar))) AS cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227 WHERE cast(load_timestamp AS date) >= date_add('day', -30, current_date)"
+        },
+        "query_b": {
+          "label": "Source mrd_mbr_prd_dtl",
+          "database": "aew_membership",
+          "query": "SELECT COUNT(DISTINCT concat(cast(fk_mhh_acl_club_c AS varchar), '|', cast(fk_mhh_mbrshp_n AS varchar), '|', cast(dn_cust_sys_id_n AS varchar))) AS cnt FROM aew_membership.mrd_mbr_prd_dtl__ct_20260226 WHERE cast(load_timestamp AS date) >= date_add('day', -30, current_date)"
+        },
+        "compare_column": "cnt",
+        "rule": "match",
+        "abort_on_failure": false
+      },
+      {
+        "name": "household_rolling_avg_check",
+        "description": "Current day record count vs 10-day rolling average – should be within 25%",
+        "query_a": {
+          "label": "Today Count",
+          "database": "aew_membership",
+          "query": "SELECT COUNT(*) AS cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227 WHERE substring(cast(load_timestamp AS varchar), 1, 10) = substring(cast(current_timestamp AS varchar), 1, 10)"
+        },
+        "query_b": {
+          "label": "10-Day Rolling Avg",
+          "database": "aew_membership",
+          "query": "SELECT ROUND(AVG(daily_cnt)) AS cnt FROM (SELECT substring(cast(load_timestamp AS varchar), 1, 10) AS load_dt, COUNT(*) AS daily_cnt FROM aew_membership.mrd_mbrshp_household__ct_20260227 WHERE cast(load_timestamp AS date) >= date_add('day', -10, current_date) AND cast(load_timestamp AS date) < current_date GROUP BY substring(cast(load_timestamp AS varchar), 1, 10))"
+        },
+        "compare_column": "cnt",
+        "rule": "percentage_within",
+        "tolerance": 25,
+        "abort_on_failure": false
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/household/",
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands ETL Dashboard - Household"
+  }
+}
