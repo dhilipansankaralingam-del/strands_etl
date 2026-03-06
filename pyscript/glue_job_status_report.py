@@ -47,7 +47,16 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-GLUE_COST_PER_DPU_HOUR = 0.44  # AWS Glue standard pricing (USD)
+# AWS Glue pricing: $0.44 per DPU-hour (universal rate for all worker types).
+# The DPUSeconds value returned by the Glue API already accounts for the
+# DPU multiplier per worker type:
+#   G.1X =  1 DPU/worker  →  10 workers × 1h = 10 DPU-hours  = $4.40
+#   G.2X =  2 DPU/worker  →  10 workers × 1h = 20 DPU-hours  = $8.80
+#   G.4X =  4 DPU/worker  →  10 workers × 1h = 40 DPU-hours  = $17.60
+#   G.8X =  8 DPU/worker  →  10 workers × 1h = 80 DPU-hours  = $35.20
+#   G.025X = 0.25 DPU/worker (Flex) → priced differently
+# Formula: cost = DPUSeconds / 3600 × $0.44
+GLUE_COST_PER_DPU_HOUR = 0.44
 
 VIBRANT_COLORS = [
     "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7",
@@ -63,16 +72,21 @@ MAX_HISTORY_RUNS = 50
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-# Each job entry: name, domain, sla_minutes (max allowed execution time)
+# Each job entry:
+#   name   – Glue job name
+#   domain – Business domain label
+#   sla    – Deadline time in HH:MM (24h format, PST). The job must COMPLETE
+#            by this time on its run date. If it finishes after this, status = BREACHED.
+#            Example: "10:00" means the job must finish by 10:00 AM PST.
 JOB_CONFIGS = [
-    {"name": "job1", "domain": "Customer Base",       "sla_minutes": 30},
-    {"name": "job2", "domain": "Customer Master",     "sla_minutes": 45},
-    {"name": "job3", "domain": "Customer Master",     "sla_minutes": 45},
-    {"name": "job4", "domain": "Membership Base",     "sla_minutes": 60},
-    {"name": "job5", "domain": "Membership Master",   "sla_minutes": 45},
-    {"name": "job6", "domain": "Life Master",         "sla_minutes": 30},
-    {"name": "job7", "domain": "Life Master",         "sla_minutes": 30},
-    {"name": "job8", "domain": "Membership Master",   "sla_minutes": 45},
+    {"name": "job1", "domain": "Customer Base",       "sla": "10:00"},
+    {"name": "job2", "domain": "Customer Master",     "sla": "11:00"},
+    {"name": "job3", "domain": "Customer Master",     "sla": "14:00"},
+    {"name": "job4", "domain": "Membership Base",     "sla": "10:00"},
+    {"name": "job5", "domain": "Membership Master",   "sla": "11:00"},
+    {"name": "job6", "domain": "Life Master",         "sla": "10:00"},
+    {"name": "job7", "domain": "Life Master",         "sla": "10:00"},
+    {"name": "job8", "domain": "Membership Master",   "sla": "11:00"},
 ]
 
 SENDER = "Job_Status@company.com"
@@ -117,6 +131,55 @@ def calc_cost(dpu_seconds):
         return 0.0
 
 
+def parse_sla_time(sla_str):
+    """Parse SLA string 'HH:MM' into (hour, minute) tuple."""
+    parts = sla_str.strip().split(":")
+    return int(parts[0]), int(parts[1])
+
+
+def check_sla_deadline(sla_str, completed_on_utc, started_on_utc=None):
+    """
+    Check if a job run met its SLA deadline.
+
+    sla_str         : deadline in "HH:MM" (24h format, PST)
+    completed_on_utc: job completion time (UTC-aware datetime).
+                      For RUNNING jobs, pass None and we compare current time.
+    started_on_utc  : job start time (UTC-aware), used to determine the run date.
+
+    Returns: ("ON TIME", detail_str) or ("BREACHED", detail_str)
+    """
+    sla_hour, sla_min = parse_sla_time(sla_str)
+
+    # Determine the "run date" in PST (based on when the job started)
+    ref_time = started_on_utc if started_on_utc else datetime.now(pytz.UTC)
+    if ref_time.tzinfo is None:
+        ref_time = pytz.UTC.localize(ref_time)
+    run_date_pst = ref_time.astimezone(PST).date()
+
+    # Build the SLA deadline as a PST-aware datetime for that run date
+    sla_deadline = PST.localize(
+        datetime(run_date_pst.year, run_date_pst.month, run_date_pst.day,
+                 sla_hour, sla_min, 0)
+    )
+
+    # For RUNNING jobs or jobs with no completion time, compare against now
+    if completed_on_utc is None:
+        now_pst = datetime.now(pytz.UTC).astimezone(PST)
+        if now_pst > sla_deadline:
+            return "BREACHED", f"Still running past {sla_str} PST"
+        return "ON TIME", f"Running, deadline {sla_str} PST"
+
+    # Convert completion time to PST and compare
+    if completed_on_utc.tzinfo is None:
+        completed_on_utc = pytz.UTC.localize(completed_on_utc)
+    completed_pst = completed_on_utc.astimezone(PST)
+    completed_str = completed_pst.strftime("%H:%M")
+
+    if completed_pst > sla_deadline:
+        return "BREACHED", f"Finished {completed_str} PST (deadline {sla_str} PST)"
+    return "ON TIME", f"Finished {completed_str} PST (deadline {sla_str} PST)"
+
+
 def _status_color(status):
     """Return color hex for a status string."""
     return {
@@ -136,7 +199,7 @@ def get_job_details(job_cfg):
     """
     job_name = job_cfg["name"]
     domain = job_cfg["domain"]
-    sla_minutes = job_cfg.get("sla_minutes", 60)
+    sla_deadline = job_cfg.get("sla", "23:59")  # default: end of day
 
     empty = {
         "job_name": job_name, "domain": domain,
@@ -145,7 +208,7 @@ def get_job_details(job_cfg):
         "execution_time_min": "N/A", "last_run_time": "Never",
         "last_run_pst": "Never", "error_message": "No job runs found",
         "is_recent": False, "is_today": False,
-        "sla_minutes": sla_minutes, "sla_status": "N/A",
+        "sla_deadline": sla_deadline, "sla_status": "N/A", "sla_detail": "",
         "runs_last_24h": 0, "avg_exec_min": "N/A", "success_rate_24h": "N/A",
         "cost_today": 0.0, "cost_7_days": 0.0,
         "history": [],  # list of per-run dicts for 7-day analysis
@@ -192,9 +255,21 @@ def get_job_details(job_cfg):
         is_today = started_on.astimezone(PST).date() == now_utc.astimezone(PST).date()
 
     # --- SLA check (latest run) ---
+    # SLA is a deadline time (HH:MM PST). Compare job completion time against it.
     sla_status = "N/A"
-    if exec_time_sec and exec_time_sec > 0:
-        sla_status = "BREACHED" if (exec_time_sec / 60.0) > sla_minutes else "ON TIME"
+    sla_detail = ""
+    completed_on = latest.get("CompletedOn")
+    if status == "RUNNING":
+        # Job still running — check if we've already passed the deadline
+        sla_status, sla_detail = check_sla_deadline(sla_deadline, None, started_on)
+    elif completed_on is not None:
+        if completed_on.tzinfo is None:
+            completed_on = pytz.UTC.localize(completed_on)
+        sla_status, sla_detail = check_sla_deadline(sla_deadline, completed_on, started_on)
+    elif started_on and exec_time_sec:
+        # No CompletedOn field — estimate from StartedOn + ExecutionTime
+        est_completed = started_on + timedelta(seconds=exec_time_sec)
+        sla_status, sla_detail = check_sla_deadline(sla_deadline, est_completed, started_on)
 
     # --- Historical metrics (all runs within last 7 days) ---
     runs_24h = 0
@@ -216,7 +291,18 @@ def get_job_details(job_cfg):
         run_exec_sec = run.get("ExecutionTime") or 0
         run_status = run.get("JobRunState", "UNKNOWN")
         run_cost = calc_cost(run_dpu_sec)
-        run_sla = "BREACHED" if (run_exec_sec / 60.0) > sla_minutes else "ON TIME"
+
+        # SLA check for historical run
+        run_completed = run.get("CompletedOn")
+        if run_completed is not None:
+            if run_completed.tzinfo is None:
+                run_completed = pytz.UTC.localize(run_completed)
+            run_sla, _ = check_sla_deadline(sla_deadline, run_completed, run_start)
+        elif run_exec_sec:
+            est = run_start + timedelta(seconds=run_exec_sec)
+            run_sla, _ = check_sla_deadline(sla_deadline, est, run_start)
+        else:
+            run_sla = "N/A"
 
         run_date_pst = run_start.astimezone(PST).strftime("%Y-%m-%d")
 
@@ -260,7 +346,8 @@ def get_job_details(job_cfg):
         "last_run_time": last_run_display, "last_run_pst": last_run_pst,
         "error_message": error_message,
         "is_recent": is_recent, "is_today": is_today,
-        "sla_minutes": sla_minutes, "sla_status": sla_status,
+        "sla_deadline": sla_deadline, "sla_status": sla_status,
+        "sla_detail": sla_detail,
         "runs_last_24h": runs_24h, "avg_exec_min": avg_exec_min,
         "success_rate_24h": success_rate,
         "cost_today": round(cost_today, 2), "cost_7_days": round(cost_7_days, 2),
@@ -680,7 +767,7 @@ def generate_html(job_statuses, days, daily, projections):
     <table>
      <thead><tr>
       <th>#</th><th>Job Name</th><th>Domain</th><th>Status</th>
-      <th>SLA Limit</th><th>Exec Time</th><th>SLA Status</th>
+      <th>SLA Deadline</th><th>Exec Time</th><th>SLA Status</th>
       <th>Last Run (PST)</th><th>Worker</th><th>Workers</th>
       <th>Cost (Today)</th><th>Runs (24h)</th><th>Avg Exec (24h)</th>
       <th>Success Rate</th><th>Health</th>
@@ -700,9 +787,9 @@ def generate_html(job_statuses, days, daily, projections):
          <td><b>{j['job_name']}</b></td>
          <td>{j['domain']}</td>
          <td><span class="badge" style="background:{status_color};">{j['status']}</span></td>
-         <td>{j['sla_minutes']} min</td>
+         <td>{j['sla_deadline']} PST</td>
          <td>{j['execution_time_min']}</td>
-         <td><span class="badge" style="background:{sla_color};">{j['sla_status']}</span></td>
+         <td title="{j['sla_detail']}"><span class="badge" style="background:{sla_color};">{j['sla_status']}</span></td>
          <td style="font-size:11px;">{j['last_run_pst']}</td>
          <td>{j['worker_type']}</td>
          <td>{j['num_workers']}</td>
@@ -838,7 +925,7 @@ def generate_html(job_statuses, days, daily, projections):
         for j in attention_jobs:
             issues = []
             if j["sla_status"] == "BREACHED":
-                issues.append(f"SLA Breached (took {j['execution_time_min']}, limit {j['sla_minutes']} min)")
+                issues.append(f"SLA Breached — {j['sla_detail']}")
             if j["status"] in ("FAILED", "ERROR", "TIMEOUT"):
                 issues.append(f"Status: {j['status']}")
             if j["health_score"] < 60:
