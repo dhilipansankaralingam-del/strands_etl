@@ -719,8 +719,9 @@ def generate_html(job_statuses, days, daily, projections):
                         border-radius: 8px; color: white; font-size: 13px;
                         font-weight: bold; text-align: center; min-width: 100px; }}
         table {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 12px; }}
-        th {{ background: linear-gradient(135deg, #2c3e50, #34495e); color: white;
-              padding: 9px 10px; text-align: left; white-space: nowrap; }}
+        th {{ background-color: #4285f4; color: #1a1a2e;
+              padding: 9px 10px; text-align: left; white-space: nowrap;
+              font-size: 12px; font-weight: bold; letter-spacing: 0.3px; }}
         td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
         tr:nth-child(even) {{ background-color: #f8f9fa; }}
         .badge {{ display: inline-block; padding: 3px 8px; border-radius: 4px;

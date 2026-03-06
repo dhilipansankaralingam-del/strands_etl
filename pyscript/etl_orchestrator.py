@@ -1098,8 +1098,9 @@ def generate_dashboard_html(
                         border-radius: 8px; color: white; font-size: 14px;
                         font-weight: bold; text-align: center; min-width: 110px; }}
         table {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }}
-        th {{ background: linear-gradient(135deg, #2c3e50, #34495e); color: white;
-              padding: 10px 12px; text-align: left; }}
+        th {{ background-color: #4285f4; color: #1a1a2e;
+              padding: 10px 12px; text-align: left;
+              font-size: 12px; font-weight: bold; letter-spacing: 0.3px; }}
         td {{ padding: 8px 12px; border-bottom: 1px solid #eee; }}
         tr:nth-child(even) {{ background-color: #f8f9fa; }}
         .badge {{ display: inline-block; padding: 4px 10px; border-radius: 4px;
