@@ -1,0 +1,103 @@
+{
+  "orchestrator": {
+    "name": "summary_dashboard",
+    "description": "Summary Dashboard: 7-day and 30-day data quality overview with charts",
+    "version": "1.0.0",
+    "run_mode": "summary"
+  },
+  "summary": {
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "summary_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "daily_validation_summary_7d",
+        "description": "Daily pass/fail/warn counts for the past 7 days",
+        "database": "audit_db",
+        "query": "SELECT run_date, SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) AS passed, SUM(CASE WHEN status='FAIL' THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN status='WARN' THEN 1 ELSE 0 END) AS warnings, SUM(CASE WHEN status='NOT_EXECUTED' THEN 1 ELSE 0 END) AS not_executed, COUNT(*) AS total FROM audit_db.etl_orchestrator_audit WHERE event_type IN ('VALIDATION','COMPARISON') AND run_date >= date_format(date_add('day', -7, current_date), '%Y-%m-%d') GROUP BY run_date ORDER BY run_date",
+        "chart": {
+          "type": "bar",
+          "title": "Daily Validation Results (Past 7 Days)",
+          "x_column": "run_date",
+          "y_column": "passed"
+        }
+      },
+      {
+        "name": "pass_rate_by_layer_7d",
+        "description": "Pass rate breakdown by ETL layer for the past 7 days",
+        "database": "audit_db",
+        "query": "SELECT CASE WHEN source_label LIKE '%staging%' OR source_label LIKE '%stg%' THEN 'Staging' WHEN source_label LIKE '%datalake%' OR source_label LIKE '%dl%' THEN 'DataLake' WHEN source_label LIKE '%base%' THEN 'Base' WHEN source_label LIKE '%master%' THEN 'Master' ELSE 'Other' END AS layer, COUNT(*) AS total_checks, SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) AS passed, ROUND(100.0 * SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pass_rate FROM audit_db.etl_orchestrator_audit WHERE event_type IN ('VALIDATION','COMPARISON') AND run_date >= date_format(date_add('day', -7, current_date), '%Y-%m-%d') GROUP BY 1 ORDER BY pass_rate",
+        "chart": {
+          "type": "bar",
+          "title": "Pass Rate by Layer (Past 7 Days)",
+          "x_column": "layer",
+          "y_column": "pass_rate"
+        }
+      },
+      {
+        "name": "top_failing_checks_7d",
+        "description": "Top 10 most frequently failing checks in the past 7 days",
+        "database": "audit_db",
+        "query": "SELECT validation_name, check_type, COUNT(*) AS failure_count, MAX(run_date) AS last_failure FROM audit_db.etl_orchestrator_audit WHERE event_type IN ('VALIDATION','COMPARISON') AND status IN ('FAIL','NOT_EXECUTED') AND run_date >= date_format(date_add('day', -7, current_date), '%Y-%m-%d') GROUP BY validation_name, check_type ORDER BY failure_count DESC LIMIT 10"
+      },
+      {
+        "name": "quality_dimensions_7d",
+        "description": "Quality dimension breakdown for the past 7 days",
+        "database": "audit_db",
+        "query": "SELECT CASE WHEN check_type LIKE '%row_count%' OR check_type LIKE '%completeness%' THEN 'Completeness' WHEN check_type LIKE '%comparison%' OR check_type LIKE '%accuracy%' THEN 'Accuracy' WHEN check_type LIKE '%date%' OR check_type LIKE '%format%' OR check_type LIKE '%validity%' THEN 'Validity' WHEN check_type LIKE '%fresh%' THEN 'Freshness' WHEN check_type LIKE '%volume%' OR check_type LIKE '%rolling%' THEN 'Volume' WHEN check_type LIKE '%no_rows%' OR check_type LIKE '%duplicate%' OR check_type LIKE '%null%' OR check_type LIKE '%unique%' THEN 'Uniqueness' ELSE 'Other' END AS dimension, COUNT(*) AS total_checks, SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) AS passed, ROUND(100.0 * SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pass_rate FROM audit_db.etl_orchestrator_audit WHERE event_type IN ('VALIDATION','COMPARISON') AND run_date >= date_format(date_add('day', -7, current_date), '%Y-%m-%d') GROUP BY 1 ORDER BY pass_rate",
+        "chart": {
+          "type": "bar",
+          "title": "Quality Dimensions (Past 7 Days)",
+          "x_column": "dimension",
+          "y_column": "pass_rate"
+        }
+      },
+      {
+        "name": "daily_validation_summary_30d",
+        "description": "Daily pass/fail counts aggregated for the past 30 days",
+        "database": "audit_db",
+        "query": "SELECT run_date, SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) AS passed, SUM(CASE WHEN status='FAIL' THEN 1 ELSE 0 END) AS failed, COUNT(*) AS total, ROUND(100.0 * SUM(CASE WHEN status='PASS' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pass_rate FROM audit_db.etl_orchestrator_audit WHERE event_type IN ('VALIDATION','COMPARISON') AND run_date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d') GROUP BY run_date ORDER BY run_date",
+        "chart": {
+          "type": "trend",
+          "title": "Pass Rate Trend (Past 30 Days)",
+          "x_column": "run_date",
+          "y_column": "pass_rate"
+        }
+      },
+      {
+        "name": "cost_trend_30d",
+        "description": "Daily Athena query cost for the past 30 days",
+        "database": "audit_db",
+        "query": "SELECT run_date, ROUND(SUM(CAST(COALESCE(NULLIF(cost_usd, ''), '0') AS DOUBLE)), 4) AS daily_cost FROM audit_db.etl_orchestrator_audit WHERE run_date >= date_format(date_add('day', -30, current_date), '%Y-%m-%d') GROUP BY run_date ORDER BY run_date",
+        "chart": {
+          "type": "bar",
+          "title": "Daily Athena Cost (Past 30 Days)",
+          "x_column": "run_date",
+          "y_column": "daily_cost"
+        }
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/orchestrator/",
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands ETL Summary Dashboard"
+  }
+}

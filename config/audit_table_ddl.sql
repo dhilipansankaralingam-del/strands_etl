@@ -21,7 +21,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS audit_db.etl_orchestrator_audit (
     source_bucket         STRING    COMMENT 'S3 bucket of the monitored source',
     source_prefix         STRING    COMMENT 'S3 prefix of the monitored source',
     subfolder_count       STRING    COMMENT 'Number of subfolders found under the prefix',
-    status                STRING    COMMENT 'OK | Stale | Check with Source | PASS | FAIL | SKIPPED | ABORTED',
+    status                STRING    COMMENT 'OK | Stale | Check with Source | PASS | FAIL | WARN | NOT_EXECUTED | SKIPPED | ABORTED',
     detail                STRING    COMMENT 'Human-readable detail message',
     glue_job_name         STRING    COMMENT 'Name of the triggered Glue job (if applicable)',
     glue_job_run_id       STRING    COMMENT 'Glue job run ID (if applicable)',
@@ -30,6 +30,8 @@ CREATE EXTERNAL TABLE IF NOT EXISTS audit_db.etl_orchestrator_audit (
     check_type            STRING    COMMENT 'Validation check type: row_count | no_rows | threshold',
     actual_value          STRING    COMMENT 'Actual value returned by the validation query',
     query                 STRING    COMMENT 'The Athena SQL query executed (if applicable)',
+    cost_usd              STRING    COMMENT 'Athena query cost in USD (based on $5/TB scanned)',
+    failure_reason        STRING    COMMENT 'Reason for failure or NOT_EXECUTED status',
     overall_status        STRING    COMMENT 'Overall orchestrator run status at time of logging'
 )
 PARTITIONED BY (

@@ -17,7 +17,8 @@
 # DATE          BY              MODIFICATION LOG
 # ----------    -----------     ------------------------------------------
 # 01/2026       Dhilipan        Initial version
-# 02/2026       Dhilipan        Cross-query comparisons, summary mode, chart generation
+# 03/2026       Dhilipan        Cross-query comparisons, summary mode, chart generation
+# 03/2026       Dhilipan        Athena retry, cost tracking, summary dashboard, streamlit
 #
 #=================================================================================================
 ###################################################################################################
@@ -72,6 +73,11 @@ STATUS_SKIPPED = "SKIPPED"
 STATUS_ABORTED = "ABORTED"
 GLUE_TERMINAL_STATES = ("SUCCEEDED", "FAILED", "STOPPED", "TIMEOUT", "ERROR")
 GLUE_POLL_INTERVAL_SECONDS = 30
+ATHENA_RETRY_ATTEMPTS = 1  # retry once on failure
+# Athena pricing: $5.00 per TB of data scanned (USD)
+ATHENA_COST_PER_TB_SCANNED = 5.00
+STATUS_WARN = "WARN"
+STATUS_NOT_EXECUTED = "NOT_EXECUTED"
 
 # Vibrant color palettes for charts
 VIBRANT_COLORS = [
@@ -324,8 +330,8 @@ def trigger_glue_job(source, stale_subfolders, run_id):
 # ============================================================================
 # 4. ATHENA QUERY HELPERS
 # ============================================================================
-def run_athena_query(query, database, output_location, workgroup="primary"):
-    """Execute a single Athena query and return the query execution result."""
+def _run_athena_query_once(query, database, output_location, workgroup="primary"):
+    """Execute a single Athena query attempt and return result with cost info."""
     client = athena_client()
     start_resp = client.start_query_execution(
         QueryString=query,
@@ -338,11 +344,28 @@ def run_athena_query(query, database, output_location, workgroup="primary"):
     while True:
         time.sleep(5)
         status_resp = client.get_query_execution(QueryExecutionId=query_id)
-        state = status_resp["QueryExecution"]["Status"]["State"]
+        qe = status_resp["QueryExecution"]
+        state = qe["Status"]["State"]
         if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
             break
 
-    result = {"query_id": query_id, "state": state, "rows": []}
+    # Extract cost info (data scanned)
+    stats = qe.get("Statistics", {})
+    data_scanned_bytes = stats.get("DataScannedInBytes", 0)
+    exec_time_ms = stats.get("EngineExecutionTimeInMillis", 0)
+    cost_usd = (data_scanned_bytes / (1024 ** 4)) * ATHENA_COST_PER_TB_SCANNED
+
+    failure_reason = ""
+    if state != "SUCCEEDED":
+        failure_reason = qe.get("Status", {}).get("StateChangeReason", "Unknown")
+
+    result = {
+        "query_id": query_id, "state": state, "rows": [],
+        "data_scanned_bytes": data_scanned_bytes,
+        "exec_time_ms": exec_time_ms,
+        "cost_usd": round(cost_usd, 6),
+        "failure_reason": failure_reason,
+    }
 
     if state == "SUCCEEDED":
         try:
@@ -351,6 +374,40 @@ def run_athena_query(query, database, output_location, workgroup="primary"):
             result["rows"] = rows
         except Exception as exc:
             logger.warning("Could not fetch results for query %s: %s", query_id, exc)
+
+    return result
+
+
+def run_athena_query(query, database, output_location, workgroup="primary"):
+    """
+    Execute an Athena query with retry logic.
+    Retries once on failure. Returns result dict with cost info.
+    """
+    result = _run_athena_query_once(query, database, output_location, workgroup)
+
+    if result["state"] != "SUCCEEDED" and ATHENA_RETRY_ATTEMPTS > 0:
+        logger.warning(
+            "Athena query %s failed (state=%s, reason=%s). Retrying once...",
+            result["query_id"], result["state"], result["failure_reason"],
+        )
+        time.sleep(3)
+        retry_result = _run_athena_query_once(query, database, output_location, workgroup)
+
+        # Accumulate cost from both attempts
+        retry_result["cost_usd"] = round(
+            result.get("cost_usd", 0) + retry_result.get("cost_usd", 0), 6
+        )
+        retry_result["retry"] = True
+        retry_result["original_failure"] = result["failure_reason"]
+
+        if retry_result["state"] != "SUCCEEDED":
+            logger.error(
+                "Athena query RETRY also failed (id=%s, reason=%s). "
+                "Recording as NOT_EXECUTED.",
+                retry_result["query_id"], retry_result["failure_reason"],
+            )
+
+        return retry_result
 
     return result
 
@@ -418,7 +475,7 @@ def evaluate_condition(condition, rows):
 # 5. VALIDATIONS (single-query + cross-query comparisons)
 # ============================================================================
 def _execute_single_validation(qdef, output_location, workgroup):
-    """Run one Athena validation query and return a result dict."""
+    """Run one Athena validation query with retry and return a result dict."""
     query_str = qdef["query"]
     database = qdef.get("database", "default")
     condition = qdef.get("condition", "")
@@ -433,18 +490,28 @@ def _execute_single_validation(qdef, output_location, workgroup):
             "name": qdef["name"], "description": qdef.get("description", ""),
             "check_type": qdef.get("check_type", ""),
             "abort_on_failure": qdef.get("abort_on_failure", False),
-            "status": STATUS_FAIL, "detail": str(exc),
+            "status": STATUS_NOT_EXECUTED,
+            "detail": f"Query execution error: {exc}",
             "actual_value": None, "query": query_str,
+            "cost_usd": 0, "retried": False, "failure_reason": str(exc),
         }
 
+    retried = athena_result.get("retry", False)
+    cost_usd = athena_result.get("cost_usd", 0)
+
     if athena_result["state"] != "SUCCEEDED":
-        status = STATUS_FAIL
-        detail = f"Athena query state: {athena_result['state']}"
+        failure_reason = athena_result.get("failure_reason", "Unknown")
+        status = STATUS_NOT_EXECUTED
+        detail = (f"Query not executed successfully after retry. "
+                  f"Reason: {failure_reason}")
         actual = None
     else:
         passed, actual = evaluate_condition(condition, athena_result["rows"])
         status = STATUS_PASS if passed else STATUS_FAIL
         detail = f"Condition '{condition}' -> {'met' if passed else 'not met'} (actual={actual})"
+        if retried:
+            detail += " [succeeded on retry]"
+        failure_reason = ""
 
     logger.info("Validation %s: %s – %s", qdef["name"], status, detail)
 
@@ -454,6 +521,8 @@ def _execute_single_validation(qdef, output_location, workgroup):
         "abort_on_failure": qdef.get("abort_on_failure", False),
         "status": status, "detail": detail,
         "actual_value": actual, "query": query_str,
+        "cost_usd": cost_usd, "retried": retried,
+        "failure_reason": failure_reason,
     }
 
 
@@ -984,15 +1053,20 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
         ]))
 
     for vr in validation_results:
+        retry_info = " [retried]" if vr.get("retried") else ""
+        fail_reason = vr.get("failure_reason", "")
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
             ("event_type", "VALIDATION"), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
-            ("status", vr["status"]), ("detail", vr["detail"]),
+            ("status", vr["status"]),
+            ("detail", vr["detail"] + retry_info),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
             ("validation_name", vr["name"]), ("check_type", vr.get("check_type", "")),
             ("actual_value", str(vr.get("actual_value", ""))),
             ("query", vr.get("query", "")), ("overall_status", overall_status),
+            ("cost_usd", str(vr.get("cost_usd", 0))),
+            ("failure_reason", fail_reason),
         ]))
 
     for cr in comparison_results:
@@ -1067,22 +1141,33 @@ def _status_color(status):
         STATUS_OK: "#28a745", STATUS_STALE: "#dc3545",
         STATUS_CHECK_SOURCE: "#fd7e14", STATUS_PASS: "#28a745",
         STATUS_FAIL: "#dc3545", STATUS_SKIPPED: "#6c757d",
-        STATUS_ABORTED: "#6c757d",
+        STATUS_ABORTED: "#6c757d", STATUS_WARN: "#fd7e14",
+        STATUS_NOT_EXECUTED: "#6c757d",
     }.get(status, "#333333")
 
 
 def generate_dashboard_html(
     run_id, run_date, run_mode, stale_results, glue_results,
     validation_results, comparison_results, summary_results,
-    overall_status, audit_s3_path
+    overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0
 ):
-    """Generate a full dashboard HTML email body with charts."""
+    """Generate a full dashboard HTML email body with charts and KPI scorecards."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     overall_color = "#28a745" if overall_status == STATUS_PASS else "#dc3545"
 
     total_sources = len(stale_results)
     stale_count = sum(1 for r in stale_results if r["status"] == STATUS_STALE)
     check_source_count = sum(1 for r in stale_results if r["status"] == STATUS_CHECK_SOURCE)
+
+    # KPI calculations
+    all_checks = validation_results + comparison_results
+    total_checks = len(all_checks)
+    passed_count = sum(1 for c in all_checks if c["status"] == STATUS_PASS)
+    failed_count = sum(1 for c in all_checks if c["status"] == STATUS_FAIL)
+    warn_count = sum(1 for c in all_checks if c["status"] == STATUS_WARN)
+    not_exec_count = sum(1 for c in all_checks if c["status"] == STATUS_NOT_EXECUTED)
+    pass_rate = (passed_count / total_checks * 100) if total_checks > 0 else 0
+    duration_str = f"{int(run_duration_sec // 60)}m {int(run_duration_sec % 60)}s"
 
     html = f"""
     <html><head><style>
@@ -1149,6 +1234,66 @@ def generate_dashboard_html(
 
     html += "</div>"
 
+    # ---- KPI Scorecard (shown when validations exist) ----
+    if total_checks > 0:
+        pass_color = "#28a745" if pass_rate >= 80 else ("#fd7e14" if pass_rate >= 60 else "#dc3545")
+        html += f"""
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin:20px 0;">
+      <div style="flex:1;min-width:140px;background:#f0fff0;border-left:4px solid #28a745;
+                  border-radius:8px;padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">PASSED</div>
+        <div style="color:#28a745;font-size:28px;font-weight:bold;">{passed_count}</div>
+        <div style="color:#888;font-size:11px;">{pass_rate:.1f}% of total</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#fff8e1;border-left:4px solid #fd7e14;
+                  border-radius:8px;padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">WARNINGS</div>
+        <div style="color:#fd7e14;font-size:28px;font-weight:bold;">{warn_count}</div>
+        <div style="color:#888;font-size:11px;">{(warn_count/total_checks*100):.1f}% of total</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#fff0f0;border-left:4px solid #dc3545;
+                  border-radius:8px;padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">FAILURES</div>
+        <div style="color:#dc3545;font-size:28px;font-weight:bold;">{failed_count}</div>
+        <div style="color:#888;font-size:11px;">{(failed_count/total_checks*100):.1f}% of total</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#f5f5f5;border-left:4px solid #6c757d;
+                  border-radius:8px;padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">NOT EXECUTED</div>
+        <div style="color:#6c757d;font-size:28px;font-weight:bold;">{not_exec_count}</div>
+        <div style="color:#888;font-size:11px;">{(not_exec_count/total_checks*100):.1f}% of total</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#f0f4ff;border-left:4px solid #3498db;
+                  border-radius:8px;padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">TOTAL CHECKS</div>
+        <div style="color:#2c3e50;font-size:28px;font-weight:bold;">{total_checks}</div>
+        <div style="color:#888;font-size:11px;">Duration: {duration_str}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:15px;margin-bottom:20px;">
+      <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+                  padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">PASS RATE</div>
+        <div style="margin:8px 0;">
+          <div style="background:#e9ecef;border-radius:10px;height:20px;overflow:hidden;">
+            <div style="background:{pass_color};height:100%;width:{pass_rate:.0f}%;
+                        border-radius:10px;transition:width 0.3s;"></div>
+          </div>
+        </div>
+        <div style="color:{pass_color};font-size:22px;font-weight:bold;">{pass_rate:.1f}%</div>
+      </div>
+      <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+                  padding:15px;text-align:center;">
+        <div style="color:#666;font-size:11px;font-weight:bold;">ATHENA QUERY COST</div>
+        <div style="color:#8e44ad;font-size:22px;font-weight:bold;margin-top:12px;">
+          ${total_cost_usd:.4f}</div>
+        <div style="color:#888;font-size:11px;margin-top:4px;">
+          $5.00 per TB scanned</div>
+      </div>
+    </div>
+    """
+
     # ---- Section: Stale Detection (full_pipeline only) ----
     if run_mode == "full_pipeline" and stale_results:
         html += """<h2>1. S3 Stale File Detection</h2>
@@ -1187,14 +1332,19 @@ def generate_dashboard_html(
     if validation_results:
         html += f"<h2>{section_num}. Post-Load Validations</h2>"
         html += """<table><thead><tr><th>#</th><th>Validation</th><th>Check Type</th>
-            <th>Status</th><th>Actual</th><th>Detail</th></tr></thead><tbody>"""
+            <th>Status</th><th>Actual</th><th>Cost</th><th>Detail</th></tr></thead><tbody>"""
         for i, vr in enumerate(validation_results, 1):
             color = _status_color(vr["status"])
-            html += f"""<tr><td>{i}</td>
-                <td><b>{vr['name']}</b><br><small>{vr.get('description', '')}</small></td>
+            retry_badge = ' <span style="color:#fd7e14;font-size:10px;">[retried]</span>' if vr.get("retried") else ""
+            cost_str = f"${vr.get('cost_usd', 0):.4f}" if vr.get("cost_usd") else "-"
+            row_style = ' style="background:#f5f5f5;"' if vr["status"] == STATUS_NOT_EXECUTED else ""
+            html += f"""<tr{row_style}><td>{i}</td>
+                <td><b>{vr['name']}</b>{retry_badge}<br>
+                    <small>{vr.get('description', '')}</small></td>
                 <td>{vr.get('check_type', '-')}</td>
                 <td><span class="badge" style="background-color:{color};">{vr['status']}</span></td>
                 <td>{vr.get('actual_value', '-')}</td>
+                <td style="font-size:11px;">{cost_str}</td>
                 <td>{vr.get('detail', '-')}</td></tr>"""
         html += "</tbody></table>"
         section_num += 1
@@ -1309,10 +1459,17 @@ def main():
         "--config", required=True,
         help="Path to orchestrator_config.json (local or s3://...)",
     )
+    parser.add_argument(
+        "--summary-config", required=False, default=None,
+        help="Optional: separate summary config JSON (local or s3://). "
+             "If provided, summary queries and charts are generated from this config. "
+             "If not provided and run_mode=summary, summary section from --config is used.",
+    )
     args = parser.parse_args()
 
     run_id = uuid.uuid4().hex[:12]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    run_start_time = time.time()
 
     logger.info("=" * 70)
     logger.info("STRANDS ETL ORCHESTRATOR – Run ID: %s  Date: %s", run_id, run_date)
@@ -1326,7 +1483,37 @@ def main():
     audit_cfg = config.get("audit", {})
     email_cfg = config.get("email", {})
 
+    # Load separate summary config if provided
+    summary_config = None
+    if args.summary_config:
+        logger.info("Loading separate summary config: %s", args.summary_config)
+        summary_config = load_config(args.summary_config)
+
     run_mode = orch_cfg.get("run_mode", "full_pipeline")
+
+    # If summary config is not defined anywhere, fall back to non-summary mode
+    has_summary = bool(
+        (summary_config and summary_config.get("summary", {}).get("queries"))
+        or config.get("summary", {}).get("queries")
+    )
+    if run_mode == "summary" and not has_summary:
+        has_validations = bool(
+            config.get("validations", {}).get("queries")
+            or config.get("validations", {}).get("comparison_checks")
+        )
+        if has_validations:
+            logger.warning(
+                "run_mode=summary but no summary queries defined. "
+                "Falling back to validation_only mode."
+            )
+            run_mode = "validation_only"
+        else:
+            logger.warning(
+                "run_mode=summary but no summary or validation queries defined. "
+                "Falling back to full_pipeline mode."
+            )
+            run_mode = "full_pipeline"
+
     logger.info("Run mode: %s", run_mode)
     logger.info("Matplotlib available: %s", HAS_MATPLOTLIB)
 
@@ -1402,7 +1589,9 @@ def main():
         logger.info("-" * 50)
         logger.info("SUMMARY MODE: Parallel queries + chart generation")
         logger.info("-" * 50)
-        summary_results = run_summary_queries(config)
+        # Use separate summary config if provided, else fall back to main config
+        effective_summary_config = summary_config if summary_config else config
+        summary_results = run_summary_queries(effective_summary_config)
 
         # Also run validations if configured
         val_cfg = config.get("validations", {})
@@ -1443,23 +1632,32 @@ def main():
     logger.info("-" * 50)
     logger.info("DASHBOARD EMAIL")
     logger.info("-" * 50)
+    # Calculate total Athena query cost
+    total_cost_usd = sum(vr.get("cost_usd", 0) for vr in validation_results)
+    total_cost_usd += sum(cr.get("cost_usd", 0) for cr in comparison_results)
+    run_duration_sec = time.time() - run_start_time
+
     html = generate_dashboard_html(
         run_id, run_date, run_mode, stale_results, glue_results,
         validation_results, comparison_results, summary_results,
-        overall_status, audit_s3_path)
+        overall_status, audit_s3_path,
+        run_duration_sec=run_duration_sec,
+        total_cost_usd=total_cost_usd)
     send_email(html, email_cfg, overall_status, run_mode)
 
     # ---- Final Summary ----
     logger.info("=" * 70)
     logger.info(
-        "COMPLETE – Mode: %s | Overall: %s | Validations: %d pass/%d fail | "
-        "Comparisons: %d pass/%d fail | Summary queries: %d",
+        "COMPLETE – Mode: %s | Overall: %s | Validations: %d pass/%d fail/%d not_exec | "
+        "Comparisons: %d pass/%d fail | Summary queries: %d | "
+        "Duration: %.0fs | Athena Cost: $%.4f",
         run_mode, overall_status,
         sum(1 for v in validation_results if v["status"] == STATUS_PASS),
         sum(1 for v in validation_results if v["status"] == STATUS_FAIL),
+        sum(1 for v in validation_results if v["status"] == STATUS_NOT_EXECUTED),
         sum(1 for c in comparison_results if c["status"] == STATUS_PASS),
         sum(1 for c in comparison_results if c["status"] == STATUS_FAIL),
-        len(summary_results),
+        len(summary_results), run_duration_sec, total_cost_usd,
     )
     logger.info("=" * 70)
 
