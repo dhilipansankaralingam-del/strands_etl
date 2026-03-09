@@ -32,6 +32,12 @@ CREATE EXTERNAL TABLE IF NOT EXISTS audit_db.etl_orchestrator_audit (
     query                 STRING    COMMENT 'The Athena SQL query executed (if applicable)',
     cost_usd              STRING    COMMENT 'Athena query cost in USD (based on $5/TB scanned)',
     failure_reason        STRING    COMMENT 'Reason for failure or NOT_EXECUTED status',
+    today_count           STRING    COMMENT 'Rolling avg: current day record count',
+    baseline_count        STRING    COMMENT 'Rolling avg: N-day baseline average count',
+    variance_pct          STRING    COMMENT 'Rolling avg: percentage variance from baseline',
+    tolerance             STRING    COMMENT 'Rolling avg: configured tolerance percentage',
+    window_start          STRING    COMMENT 'Rolling avg: baseline window start (UTC)',
+    window_end            STRING    COMMENT 'Rolling avg: baseline window end (UTC)',
     overall_status        STRING    COMMENT 'Overall orchestrator run status at time of logging'
 )
 PARTITIONED BY (

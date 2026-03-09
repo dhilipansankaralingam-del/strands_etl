@@ -479,6 +479,7 @@ def _execute_single_validation(qdef, output_location, workgroup):
     query_str = qdef["query"]
     database = qdef.get("database", "default")
     condition = qdef.get("condition", "")
+    check_type = qdef.get("check_type", "")
 
     logger.info("Running validation: %s", qdef["name"])
 
@@ -488,7 +489,7 @@ def _execute_single_validation(qdef, output_location, workgroup):
         logger.error("Athena query failed for %s: %s", qdef["name"], exc)
         return {
             "name": qdef["name"], "description": qdef.get("description", ""),
-            "check_type": qdef.get("check_type", ""),
+            "check_type": check_type,
             "abort_on_failure": qdef.get("abort_on_failure", False),
             "status": STATUS_NOT_EXECUTED,
             "detail": f"Query execution error: {exc}",
@@ -505,25 +506,143 @@ def _execute_single_validation(qdef, output_location, workgroup):
         detail = (f"Query not executed successfully after retry. "
                   f"Reason: {failure_reason}")
         actual = None
-    else:
-        passed, actual = evaluate_condition(condition, athena_result["rows"])
+        return {
+            "name": qdef["name"], "description": qdef.get("description", ""),
+            "check_type": check_type,
+            "abort_on_failure": qdef.get("abort_on_failure", False),
+            "status": status, "detail": detail,
+            "actual_value": actual, "query": query_str,
+            "cost_usd": cost_usd, "retried": retried,
+            "failure_reason": failure_reason,
+        }
+
+    # ----- rolling_average check type -----
+    # Expects query to return one row with columns:
+    #   today_cnt, avg_Nday_cnt (or baseline_cnt), variance_pct,
+    #   and optionally: window_start_utc, window_end_utc, status
+    # Pass/fail is determined by comparing abs(variance_pct) against tolerance
+    if check_type == "rolling_average":
+        header, data = parse_athena_rows(athena_result["rows"])
+        if not data:
+            logger.warning("Rolling average query %s returned no rows", qdef["name"])
+            return {
+                "name": qdef["name"], "description": qdef.get("description", ""),
+                "check_type": check_type,
+                "abort_on_failure": qdef.get("abort_on_failure", False),
+                "status": STATUS_WARN,
+                "detail": "Rolling average query returned no rows",
+                "actual_value": None, "query": query_str,
+                "cost_usd": cost_usd, "retried": retried,
+                "failure_reason": "No data returned",
+            }
+
+        row = data[0]  # first row has the result
+        tolerance = qdef.get("tolerance", 25)
+
+        # Map columns flexibly — support various naming conventions
+        today_cnt = _to_float(row, "today_cnt")
+        # Detect baseline column: avg_14day_cnt, avg_10day_cnt, baseline_cnt, etc.
+        baseline_cnt = None
+        baseline_col = None
+        for col in header:
+            if col.startswith("avg_") and col.endswith("_cnt"):
+                baseline_cnt = _to_float(row, col)
+                baseline_col = col
+                break
+            if col in ("baseline_cnt", "avg_cnt"):
+                baseline_cnt = _to_float(row, col)
+                baseline_col = col
+                break
+        if baseline_cnt is None:
+            baseline_col = "baseline_cnt"
+            baseline_cnt = _to_float(row, "baseline_cnt")
+
+        variance_pct = _to_float(row, "variance_pct")
+        window_start = row.get("window_start_utc", "")
+        window_end = row.get("window_end_utc", "")
+        query_status = row.get("status", row.get("Status", ""))
+
+        # Calculate variance_pct if not returned by query
+        if variance_pct is None and today_cnt is not None and baseline_cnt is not None:
+            if baseline_cnt != 0:
+                variance_pct = round(
+                    abs(today_cnt - baseline_cnt) / baseline_cnt * 100, 2
+                )
+            else:
+                variance_pct = 100.0 if today_cnt > 0 else 0.0
+
+        # Determine pass/fail
+        if variance_pct is not None:
+            passed = abs(variance_pct) <= tolerance
+        elif condition:
+            # Fallback to generic condition evaluation
+            passed, _ = evaluate_condition(condition, athena_result["rows"])
+        else:
+            passed = query_status.upper() in ("PASS", "OK", "") if query_status else True
+
         status = STATUS_PASS if passed else STATUS_FAIL
-        detail = f"Condition '{condition}' -> {'met' if passed else 'not met'} (actual={actual})"
+        if not passed and not qdef.get("abort_on_failure", False):
+            # Non-critical rolling average breach → WARN instead of FAIL
+            status = STATUS_WARN if qdef.get("warn_only", False) else STATUS_FAIL
+
+        detail = (
+            f"today={today_cnt}, {baseline_col}={baseline_cnt}, "
+            f"variance={variance_pct}%, tolerance={tolerance}%, "
+            f"window=[{window_start} → {window_end}]"
+        )
         if retried:
             detail += " [succeeded on retry]"
-        failure_reason = ""
+
+        logger.info("Validation %s: %s – %s", qdef["name"], status, detail)
+
+        return {
+            "name": qdef["name"], "description": qdef.get("description", ""),
+            "check_type": check_type,
+            "abort_on_failure": qdef.get("abort_on_failure", False),
+            "status": status, "detail": detail,
+            "actual_value": variance_pct,
+            "query": query_str,
+            "cost_usd": cost_usd, "retried": retried,
+            "failure_reason": "",
+            # Rolling average specific fields
+            "today_count": today_cnt,
+            "baseline_count": baseline_cnt,
+            "variance_pct": variance_pct,
+            "tolerance": tolerance,
+            "window_start": window_start,
+            "window_end": window_end,
+        }
+
+    # ----- Standard check types (row_count, no_rows, threshold, etc.) -----
+    passed, actual = evaluate_condition(condition, athena_result["rows"])
+    status = STATUS_PASS if passed else STATUS_FAIL
+    detail = f"Condition '{condition}' -> {'met' if passed else 'not met'} (actual={actual})"
+    if retried:
+        detail += " [succeeded on retry]"
+    failure_reason = ""
 
     logger.info("Validation %s: %s – %s", qdef["name"], status, detail)
 
     return {
         "name": qdef["name"], "description": qdef.get("description", ""),
-        "check_type": qdef.get("check_type", ""),
+        "check_type": check_type,
         "abort_on_failure": qdef.get("abort_on_failure", False),
         "status": status, "detail": detail,
         "actual_value": actual, "query": query_str,
         "cost_usd": cost_usd, "retried": retried,
         "failure_reason": failure_reason,
     }
+
+
+def _to_float(row, col):
+    """Safely extract a float value from a result row dict."""
+    val = row.get(col)
+    if val is None or val == "":
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
 
 
 def _execute_comparison_check(cdef, output_location, workgroup):
@@ -1067,6 +1186,12 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("query", vr.get("query", "")), ("overall_status", overall_status),
             ("cost_usd", str(vr.get("cost_usd", 0))),
             ("failure_reason", fail_reason),
+            ("today_count", str(vr.get("today_count", ""))),
+            ("baseline_count", str(vr.get("baseline_count", ""))),
+            ("variance_pct", str(vr.get("variance_pct", ""))),
+            ("tolerance", str(vr.get("tolerance", ""))),
+            ("window_start", vr.get("window_start", "")),
+            ("window_end", vr.get("window_end", "")),
         ]))
 
     for cr in comparison_results:
@@ -1330,6 +1455,10 @@ def generate_dashboard_html(
     # ---- Section: Validations ----
     section_num = 3 if run_mode == "full_pipeline" else 1
     if validation_results:
+        # Separate rolling_average checks from standard checks
+        standard_checks = [v for v in validation_results if v.get("check_type") != "rolling_average"]
+        rolling_checks = [v for v in validation_results if v.get("check_type") == "rolling_average"]
+
         html += f"<h2>{section_num}. Post-Load Validations</h2>"
         html += """<table><thead><tr><th>#</th><th>Validation</th><th>Check Type</th>
             <th>Status</th><th>Actual</th><th>Cost</th><th>Detail</th></tr></thead><tbody>"""
@@ -1347,6 +1476,68 @@ def generate_dashboard_html(
                 <td style="font-size:11px;">{cost_str}</td>
                 <td>{vr.get('detail', '-')}</td></tr>"""
         html += "</tbody></table>"
+
+        # ---- Rolling Average Visual Cards ----
+        if rolling_checks:
+            html += f"""<h2 style="margin-top:25px;">{section_num}.1 Rolling Average Checks</h2>"""
+            html += '<div style="display:flex;flex-wrap:wrap;gap:15px;margin:15px 0;">'
+            for ra in rolling_checks:
+                ra_color = _status_color(ra["status"])
+                today_cnt = ra.get("today_count")
+                baseline_cnt = ra.get("baseline_count")
+                variance = ra.get("variance_pct")
+                tolerance = ra.get("tolerance", 25)
+                window_start = ra.get("window_start", "")
+                window_end = ra.get("window_end", "")
+
+                today_str = f"{today_cnt:,.0f}" if today_cnt is not None else "N/A"
+                baseline_str = f"{baseline_cnt:,.0f}" if baseline_cnt is not None else "N/A"
+                variance_str = f"{variance:.1f}%" if variance is not None else "N/A"
+
+                # Variance gauge: fill proportional to variance/tolerance
+                gauge_pct = min(abs(variance or 0) / max(tolerance, 1) * 100, 100)
+                gauge_color = "#28a745" if gauge_pct <= 60 else ("#fd7e14" if gauge_pct <= 100 else "#dc3545")
+
+                html += f"""
+                <div style="flex:1;min-width:280px;max-width:450px;background:#fafbfc;
+                            border:1px solid #eee;border-radius:10px;padding:18px;
+                            border-top:4px solid {ra_color};">
+                  <div style="display:flex;justify-content:space-between;align-items:center;
+                              margin-bottom:12px;">
+                    <div style="font-weight:bold;color:#2c3e50;font-size:14px;">
+                        {ra['name'].replace('_', ' ').title()}</div>
+                    <span class="badge" style="background-color:{ra_color};">{ra['status']}</span>
+                  </div>
+                  <p style="color:#888;font-size:11px;margin:0 0 12px 0;">
+                    {ra.get('description', '')}</p>
+                  <div style="display:flex;gap:12px;margin-bottom:12px;">
+                    <div style="flex:1;text-align:center;background:white;border-radius:8px;
+                                padding:10px;border:1px solid #eef;">
+                      <div style="color:#666;font-size:10px;font-weight:bold;">TODAY</div>
+                      <div style="color:#2c3e50;font-size:22px;font-weight:bold;">{today_str}</div>
+                    </div>
+                    <div style="flex:1;text-align:center;background:white;border-radius:8px;
+                                padding:10px;border:1px solid #eef;">
+                      <div style="color:#666;font-size:10px;font-weight:bold;">BASELINE AVG</div>
+                      <div style="color:#3498db;font-size:22px;font-weight:bold;">{baseline_str}</div>
+                    </div>
+                  </div>
+                  <div style="margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;font-size:11px;
+                                color:#666;margin-bottom:4px;">
+                      <span>Variance: <b style="color:{ra_color};">{variance_str}</b></span>
+                      <span>Tolerance: {tolerance}%</span>
+                    </div>
+                    <div style="background:#e9ecef;border-radius:6px;height:14px;overflow:hidden;">
+                      <div style="background:{gauge_color};height:100%;width:{gauge_pct:.0f}%;
+                                  border-radius:6px;transition:width 0.3s;"></div>
+                    </div>
+                  </div>
+                  <div style="font-size:10px;color:#aaa;">
+                    Window: {window_start} → {window_end}</div>
+                </div>"""
+            html += "</div>"
+
         section_num += 1
 
     # ---- Section: Comparison Checks ----
