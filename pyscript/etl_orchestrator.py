@@ -613,6 +613,85 @@ def _execute_single_validation(qdef, output_location, workgroup):
             "window_end": window_end,
         }
 
+    # ----- source_reconciliation check type -----
+    # Expects query to return rows from a reconciliation table with columns like:
+    #   count_source, count_aws_datalake, (optionally: extract_date, table_name)
+    # Checks if ABS(count_source - count_aws_datalake) >= deviation_threshold
+    # Any deviating rows → FAIL.  No deviating rows → PASS.
+    if check_type == "source_reconciliation":
+        header, data = parse_athena_rows(athena_result["rows"])
+        if not data:
+            logger.info("Reconciliation %s: no data rows returned → PASS", qdef["name"])
+            return {
+                "name": qdef["name"], "description": qdef.get("description", ""),
+                "check_type": check_type,
+                "abort_on_failure": qdef.get("abort_on_failure", False),
+                "status": STATUS_PASS,
+                "detail": "No deviating rows found – reconciliation passed",
+                "actual_value": 0, "query": query_str,
+                "cost_usd": cost_usd, "retried": retried,
+                "failure_reason": "",
+                "recon_deviations": [],
+            }
+
+        deviation_threshold = qdef.get("deviation_threshold", 0)
+        source_col = qdef.get("source_column", "count_source")
+        target_col = qdef.get("target_column", "count_aws_datalake")
+
+        deviations = []
+        for row in data:
+            src_val = _to_float(row, source_col)
+            tgt_val = _to_float(row, target_col)
+            if src_val is None or tgt_val is None:
+                continue
+            diff = abs(src_val - tgt_val)
+            if diff >= deviation_threshold:
+                # Collect identifying columns for the deviation
+                table_name = (row.get("table_name") or row.get("source_table")
+                              or row.get("entity") or "")
+                extract_date = (row.get("extract_date") or row.get("run_date")
+                                or row.get("load_date") or "")
+                deviations.append({
+                    "table_name": table_name,
+                    "extract_date": extract_date,
+                    "count_source": src_val,
+                    "count_target": tgt_val,
+                    "deviation": diff,
+                })
+
+        if deviations:
+            status = STATUS_FAIL
+            dev_summary = "; ".join(
+                f"{d.get('table_name', 'row')}:src={d['count_source']:.0f},"
+                f"tgt={d['count_target']:.0f},dev={d['deviation']:.0f}"
+                for d in deviations[:5]  # limit to 5 in summary
+            )
+            if len(deviations) > 5:
+                dev_summary += f" ...and {len(deviations) - 5} more"
+            detail = (f"FAILED: {len(deviations)} row(s) with deviation >= "
+                      f"{deviation_threshold}. [{dev_summary}]")
+        else:
+            status = STATUS_PASS
+            detail = (f"All {len(data)} row(s) within tolerance "
+                      f"(deviation < {deviation_threshold})")
+
+        if retried:
+            detail += " [succeeded on retry]"
+
+        logger.info("Reconciliation %s: %s – %s", qdef["name"], status, detail)
+
+        return {
+            "name": qdef["name"], "description": qdef.get("description", ""),
+            "check_type": check_type,
+            "abort_on_failure": qdef.get("abort_on_failure", False),
+            "status": status, "detail": detail,
+            "actual_value": len(deviations),
+            "query": query_str,
+            "cost_usd": cost_usd, "retried": retried,
+            "failure_reason": detail if deviations else "",
+            "recon_deviations": deviations,
+        }
+
     # ----- Standard check types (row_count, no_rows, threshold, etc.) -----
     passed, actual = evaluate_condition(condition, athena_result["rows"])
     status = STATUS_PASS if passed else STATUS_FAIL
@@ -673,11 +752,13 @@ def _execute_comparison_check(cdef, output_location, workgroup):
     logger.info("Running comparison: %s (rule=%s)", name, rule)
 
     # Execute both queries (can be parallelised later)
+    cost_usd = 0.0
     try:
         result_a = run_athena_query(qa["query"], qa.get("database", "default"),
                                     output_location, workgroup)
         result_b = run_athena_query(qb["query"], qb.get("database", "default"),
                                     output_location, workgroup)
+        cost_usd = result_a.get("cost_usd", 0) + result_b.get("cost_usd", 0)
     except Exception as exc:
         logger.error("Comparison query failed for %s: %s", name, exc)
         return {
@@ -688,7 +769,10 @@ def _execute_comparison_check(cdef, output_location, workgroup):
             "value_a": None, "value_b": None,
             "label_a": qa.get("label", "Query A"),
             "label_b": qb.get("label", "Query B"),
+            "cost_usd": cost_usd,
         }
+
+    cost_usd = result_a.get("cost_usd", 0) + result_b.get("cost_usd", 0)
 
     if result_a["state"] != "SUCCEEDED" or result_b["state"] != "SUCCEEDED":
         return {
@@ -700,6 +784,7 @@ def _execute_comparison_check(cdef, output_location, workgroup):
             "value_a": None, "value_b": None,
             "label_a": qa.get("label", "Query A"),
             "label_b": qb.get("label", "Query B"),
+            "cost_usd": cost_usd,
         }
 
     # Extract scalar values
@@ -804,6 +889,7 @@ def _execute_comparison_check(cdef, output_location, workgroup):
         "value_a": a_val, "value_b": b_val,
         "label_a": qa.get("label", "Query A"),
         "label_b": qb.get("label", "Query B"),
+        "cost_usd": cost_usd,
     }
 
 
@@ -1156,6 +1242,10 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
             ("validation_name", ""), ("check_type", ""),
             ("actual_value", ""), ("query", ""), ("overall_status", overall_status),
+            ("cost_usd", ""), ("failure_reason", ""),
+            ("today_count", ""), ("baseline_count", ""),
+            ("variance_pct", ""), ("tolerance", ""),
+            ("window_start", ""), ("window_end", ""),
         ]))
 
     for label, gr in glue_results.items():
@@ -1169,6 +1259,10 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("glue_duration_sec", str(gr.get("duration_seconds", ""))),
             ("validation_name", ""), ("check_type", ""),
             ("actual_value", ""), ("query", ""), ("overall_status", overall_status),
+            ("cost_usd", ""), ("failure_reason", ""),
+            ("today_count", ""), ("baseline_count", ""),
+            ("variance_pct", ""), ("tolerance", ""),
+            ("window_start", ""), ("window_end", ""),
         ]))
 
     for vr in validation_results:
@@ -1204,6 +1298,11 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("validation_name", cr["name"]), ("check_type", f"comparison:{cr.get('rule', '')}"),
             ("actual_value", f"A={cr.get('value_a')},B={cr.get('value_b')}"),
             ("query", ""), ("overall_status", overall_status),
+            ("cost_usd", str(cr.get("cost_usd", 0))),
+            ("failure_reason", ""),
+            ("today_count", ""), ("baseline_count", ""),
+            ("variance_pct", ""), ("tolerance", ""),
+            ("window_start", ""), ("window_end", ""),
         ]))
 
     for sr in summary_results:
@@ -1215,6 +1314,10 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
             ("validation_name", sr["name"]), ("check_type", "summary"),
             ("actual_value", ""), ("query", ""), ("overall_status", overall_status),
+            ("cost_usd", ""), ("failure_reason", ""),
+            ("today_count", ""), ("baseline_count", ""),
+            ("variance_pct", ""), ("tolerance", ""),
+            ("window_start", ""), ("window_end", ""),
         ]))
 
     return records
@@ -1537,6 +1640,47 @@ def generate_dashboard_html(
                     Window: {window_start} → {window_end}</div>
                 </div>"""
             html += "</div>"
+
+        # ---- Source Reconciliation Visual Cards ----
+        recon_checks = [v for v in validation_results if v.get("check_type") == "source_reconciliation"]
+        if recon_checks:
+            html += f"""<h2 style="margin-top:25px;">{section_num}.2 Source Reconciliation</h2>"""
+            for rc in recon_checks:
+                rc_color = _status_color(rc["status"])
+                devs = rc.get("recon_deviations", [])
+                html += f"""
+                <div style="margin:15px 0;padding:18px;background:#fafbfc;
+                            border-radius:10px;border:1px solid #eee;
+                            border-left:4px solid {rc_color};">
+                  <div style="display:flex;justify-content:space-between;align-items:center;
+                              margin-bottom:10px;">
+                    <div style="font-weight:bold;color:#2c3e50;font-size:14px;">
+                        {rc['name'].replace('_', ' ').title()}</div>
+                    <span class="badge" style="background-color:{rc_color};">{rc['status']}</span>
+                  </div>
+                  <p style="color:#888;font-size:11px;margin:0 0 12px 0;">
+                    {rc.get('description', '')}</p>"""
+
+                if devs:
+                    html += """<table style="margin-bottom:10px;">
+                        <thead><tr><th>Table/Entity</th><th>Date</th>
+                        <th>Source Count</th><th>Target Count</th>
+                        <th>Deviation</th></tr></thead><tbody>"""
+                    for d in devs[:20]:
+                        html += f"""<tr>
+                            <td><b>{d.get('table_name', '-')}</b></td>
+                            <td>{d.get('extract_date', '-')}</td>
+                            <td style="text-align:right;">{d['count_source']:,.0f}</td>
+                            <td style="text-align:right;">{d['count_target']:,.0f}</td>
+                            <td style="text-align:right;color:#dc3545;font-weight:bold;">
+                                {d['deviation']:,.0f}</td></tr>"""
+                    html += "</tbody></table>"
+                    if len(devs) > 20:
+                        html += f'<p style="color:#888;font-size:11px;">...and {len(devs) - 20} more rows</p>'
+                else:
+                    html += '<p style="color:#28a745;font-weight:bold;">All counts reconciled – no deviations found.</p>'
+
+                html += "</div>"
 
         section_num += 1
 

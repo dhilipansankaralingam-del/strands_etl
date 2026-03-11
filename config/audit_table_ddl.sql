@@ -27,7 +27,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS audit_db.etl_orchestrator_audit (
     glue_job_run_id       STRING    COMMENT 'Glue job run ID (if applicable)',
     glue_duration_sec     STRING    COMMENT 'Glue job duration in seconds (if applicable)',
     validation_name       STRING    COMMENT 'Validation query name (if applicable)',
-    check_type            STRING    COMMENT 'Validation check type: row_count | no_rows | threshold',
+    check_type            STRING    COMMENT 'Validation check type: row_count | no_rows | threshold | rolling_average | source_reconciliation | comparison:*',
     actual_value          STRING    COMMENT 'Actual value returned by the validation query',
     query                 STRING    COMMENT 'The Athena SQL query executed (if applicable)',
     cost_usd              STRING    COMMENT 'Athena query cost in USD (based on $5/TB scanned)',
