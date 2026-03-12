@@ -1,0 +1,383 @@
+{
+  "job": {
+    "name": "INFORCE_DQ_DASHBOARD",
+    "description": "Inforce Membership Monthly Movement – Data Quality Dashboard",
+    "version": "2.0.0",
+    "layer": "membership_mart",
+    "source_database": "membership_mart",
+    "source_table": "membership_inforce_monthly_movement_hist",
+    "target_database": "aew_membership",
+    "target_table": "member_product_movement_master_inc",
+    "source_query": "SELECT * FROM \"membership_mart\".\"membership_mart\".\"membership_inforce_monthly_movement_hist\" WHERE load_date > '2024-01-01'",
+    "temp_view_name": "monthly_movement_hist"
+  },
+
+  "validations": [
+    {
+      "name": "net_gain_balance",
+      "display_name": "Net Gain Balance",
+      "category": "balance",
+      "sql_file": "membership_mart/inforce_query/inforce_net_gain_balance_test.sql",
+      "description": "Validates that inforce member counts match movement calculations for all states and products",
+      "logic": "Compares net gain from inforce counts vs ADD/DEDUCT movements for Classic, Plus, and Premier products",
+      "expected_result": "All balance flags should be 'Y' (balanced)",
+      "failure_implication": "Indicates data inconsistency between inforce and movement tracking",
+      "failure_check": {
+        "type": "column_value",
+        "columns_pattern": "balanced",
+        "fail_value": "N"
+      },
+      "abort_on_failure": true
+    },
+    {
+      "name": "interstate_transfer_balance",
+      "display_name": "Interstate Transfer Balance Check",
+      "category": "balance",
+      "sql_file": "membership_mart/inforce_query/inforce_interstate_transfer_test.sql",
+      "description": "Ensures interstate transfers are properly balanced between ADD and DEDUCT operations",
+      "logic": "Compares count of ADD interstate transfers vs DEDUCT interstate transfers",
+      "expected_result": "Balance flag should be 'Y' (equal counts)",
+      "failure_implication": "Indicates missing or incomplete interstate transfer records",
+      "failure_check": {
+        "type": "column_value",
+        "columns_pattern": "interstate_transfer_balance",
+        "fail_value": "N"
+      },
+      "abort_on_failure": true
+    },
+    {
+      "name": "movement_anomaly_detection",
+      "display_name": "Movement Subcategory Anomaly Detection",
+      "category": "anomaly",
+      "sql_file": "membership_mart/inforce_query/inforce_movement_anomaly_test.sql",
+      "description": "Detects unusual patterns in movement subcategories using statistical analysis",
+      "logic": "Compares current counts against 12-month moving average for specific subcategories",
+      "expected_result": "Most records should be 'NORMAL' with occasional 'ANOMALY' flags",
+      "failure_implication": "Indicates potential data quality issues or business process changes",
+      "failure_check": {
+        "type": "column_value",
+        "columns_pattern": "anomaly_flag",
+        "fail_value": "ANOMALY"
+      },
+      "abort_on_failure": false
+    },
+    {
+      "name": "movement_summary",
+      "display_name": "Movement Sub-Category Summary",
+      "category": "informational",
+      "sql_file": "membership_mart/inforce_query/inforce_movement_summary_test.sql",
+      "description": "Provides summary counts of movement categories and subcategories",
+      "logic": "Aggregates counts by movement_category and movement_subcategory for Classic product",
+      "expected_result": "Reference data for understanding movement patterns",
+      "failure_implication": "N/A - informational only",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "movement_decay_rolling_avg",
+      "display_name": "Movement Decay Rolling Avg.",
+      "category": "rolling_average",
+      "sql_file": "membership_mart/inforce_query/inforce_decay_cat.sql",
+      "description": "Calculate 10-month rolling average of count(*) grouped by movement_category and flag rows deviating by more than 10%",
+      "logic": "Aggregates counts by movement_category by decay for Classic product",
+      "expected_result": "Reference data for understanding movement patterns",
+      "failure_implication": "N/A - informational only",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "movement_add_deducts_rolling_avg",
+      "display_name": "Movement ADD - DEDUCTS Rolling Avg.",
+      "category": "rolling_average",
+      "sql_file": "membership_mart/inforce_query/inforce_add_deduct.sql",
+      "description": "Calculate 10-month rolling average of count(*) grouped by movement_category and flag rows deviating by more than 10%",
+      "logic": "Aggregates counts by movement_category Adds/Deducts for Classic product",
+      "expected_result": "Reference data for understanding movement patterns",
+      "failure_implication": "Movements Tracking",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "movement_subcategory_completeness",
+      "display_name": "Movement Sub-Categories Check - Completeness",
+      "category": "completeness",
+      "sql_file": "membership_mart/inforce_query/inforce_subcat.sql",
+      "description": "Validate completeness: for a given load_date and movement_category, check if all expected movement_subcategories are present",
+      "logic": "movement_subcategory Adds/Deducts for Classic product",
+      "expected_result": "Reference data for understanding movement patterns",
+      "failure_implication": "Movements Tracking",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "nne_counts_check",
+      "display_name": "NNE Counts Check",
+      "category": "count_check",
+      "sql_file": "membership_mart/inforce_query/NNE_Check.sql",
+      "description": "Validate NNE (Non-New-Enrollment) counts are within expected range",
+      "logic": "Checks NNE count patterns across load dates",
+      "expected_result": "Counts within expected thresholds",
+      "failure_implication": "NNE data may be missing or duplicated",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "statewise_add_check",
+      "display_name": "Statewise ADD Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/statewise_add_std_dev.sql",
+      "description": "Standard deviation check on ADD movements by state",
+      "logic": "Computes std dev for state-level ADD counts and flags outliers",
+      "expected_result": "All states within expected deviation range",
+      "failure_implication": "Indicates unusual ADD activity in specific states",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "statewise_add_movement_sub",
+      "display_name": "Statewise ADD with Movement Sub-Categories Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/statewise_add_std_dev_move_sub1.sql",
+      "description": "Standard deviation check on ADD movements by state with sub-category breakdown",
+      "logic": "Computes std dev at state + movement_subcategory level for ADD",
+      "expected_result": "All combinations within expected deviation",
+      "failure_implication": "Indicates unusual ADD sub-category activity in specific states",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "statewise_deduct_movement_sub",
+      "display_name": "Statewise Deduct with Movement Sub-Categories Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/statewise_deduct_std_dev_move_sub1.sql",
+      "description": "Standard deviation check on DEDUCT movements by state with sub-category breakdown",
+      "logic": "Computes std dev at state + movement_subcategory level for DEDUCT",
+      "expected_result": "All combinations within expected deviation",
+      "failure_implication": "Indicates unusual DEDUCT sub-category activity in specific states",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "inactive_reason_check",
+      "display_name": "Inactive Reason Check",
+      "category": "completeness",
+      "sql_file": "membership_mart/inforce_query/inactive_reason_check.sql",
+      "description": "Validates inactive reason codes are properly populated",
+      "logic": "Checks that all inactive members have valid reason codes",
+      "expected_result": "All inactive records should have reason codes",
+      "failure_implication": "Incomplete inactive reason tracking",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "add_new_seasonality",
+      "display_name": "ADD-NEW Seasonality Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/add_new_decay_stddev.sql",
+      "description": "Seasonality and standard deviation analysis for ADD-NEW movement category",
+      "logic": "Computes decay-based std dev for new member additions",
+      "expected_result": "Values within seasonal expectations",
+      "failure_implication": "Unusual new member addition patterns detected",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "add_arrears_seasonality",
+      "display_name": "ADD-ARREARS Seasonality Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/add_arrears_decay_stddev.sql",
+      "description": "Seasonality and standard deviation analysis for ADD-ARREARS movement category",
+      "logic": "Computes decay-based std dev for arrears additions",
+      "expected_result": "Values within seasonal expectations",
+      "failure_implication": "Unusual arrears reinstatement patterns detected",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "deduct_cancel_seasonality",
+      "display_name": "DEDUCT-CANCEL Seasonality Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/deduct_cancel_decay_stddev.sql",
+      "description": "Seasonality and standard deviation analysis for DEDUCT-CANCEL movement category",
+      "logic": "Computes decay-based std dev for cancellation deductions",
+      "expected_result": "Values within seasonal expectations",
+      "failure_implication": "Unusual cancellation patterns detected",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "deduct_arrears_seasonality",
+      "display_name": "DEDUCT-ARREARS Seasonality Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/deduct_arr_decay_stddev.sql",
+      "description": "Seasonality and standard deviation analysis for DEDUCT-ARREARS movement category",
+      "logic": "Computes decay-based std dev for arrears deductions",
+      "expected_result": "Values within seasonal expectations",
+      "failure_implication": "Unusual arrears deduction patterns detected",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "statewise_decay_add_sub1",
+      "display_name": "Statewise ADD - NEW with Movement Sub-Categories Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/statewise_decay_add_std_dev_move_sub1.sql",
+      "description": "State-level decay analysis for ADD-NEW movement sub-category",
+      "logic": "Computes decay std dev at state level for new additions",
+      "expected_result": "All states within expected deviation",
+      "failure_implication": "Unusual ADD-NEW patterns in specific states",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    },
+    {
+      "name": "statewise_decay_add_sub2",
+      "display_name": "Statewise ADD - ARREARS with Movement Sub-Categories Check",
+      "category": "statistical",
+      "sql_file": "membership_mart/inforce_query/statewise_decay_add_std_dev_move_sub2.sql",
+      "description": "State-level decay analysis for ADD-ARREARS movement sub-category",
+      "logic": "Computes decay std dev at state level for arrears additions",
+      "expected_result": "All states within expected deviation",
+      "failure_implication": "Unusual ADD-ARREARS patterns in specific states",
+      "failure_check": { "type": "none" },
+      "abort_on_failure": false
+    }
+  ],
+
+  "trends": {
+    "_comment": "Queries for membership count trend tracking. Results are charted as trend lines.",
+    "queries": [
+      {
+        "name": "monthly_inforce_trend",
+        "display_name": "Monthly Inforce Membership Count",
+        "query": "SELECT load_date, product_type, COUNT(*) AS member_count FROM monthly_movement_hist WHERE movement_category = 'INFORCE' GROUP BY load_date, product_type ORDER BY load_date",
+        "chart": {
+          "type": "trend",
+          "title": "Monthly Inforce Count by Product",
+          "x_column": "load_date",
+          "y_column": "member_count",
+          "group_by": "product_type"
+        }
+      },
+      {
+        "name": "monthly_add_vs_deduct_trend",
+        "display_name": "Monthly ADDs vs DEDUCTs",
+        "query": "SELECT load_date, movement_category, COUNT(*) AS cnt FROM monthly_movement_hist WHERE movement_category IN ('ADD', 'DEDUCT') GROUP BY load_date, movement_category ORDER BY load_date",
+        "chart": {
+          "type": "grouped_bar",
+          "title": "Monthly ADDs vs DEDUCTs",
+          "x_column": "load_date",
+          "y_column": "cnt",
+          "group_by": "movement_category"
+        }
+      },
+      {
+        "name": "net_gain_trend",
+        "display_name": "Monthly Net Gain Trend",
+        "query": "SELECT load_date, SUM(CASE WHEN movement_category='ADD' THEN 1 ELSE 0 END) - SUM(CASE WHEN movement_category='DEDUCT' THEN 1 ELSE 0 END) AS net_gain FROM monthly_movement_hist GROUP BY load_date ORDER BY load_date",
+        "chart": {
+          "type": "trend",
+          "title": "Net Membership Gain/Loss by Month",
+          "x_column": "load_date",
+          "y_column": "net_gain"
+        }
+      },
+      {
+        "name": "statewise_inforce_trend",
+        "display_name": "Statewise Inforce Count (Top 10)",
+        "query": "SELECT club_code, load_date, COUNT(*) AS member_count FROM monthly_movement_hist WHERE movement_category='INFORCE' GROUP BY club_code, load_date ORDER BY load_date, member_count DESC",
+        "chart": {
+          "type": "stacked_bar",
+          "title": "Inforce Members by State (Top 10)",
+          "x_column": "load_date",
+          "y_column": "member_count",
+          "group_by": "club_code",
+          "top_n": 10
+        }
+      }
+    ]
+  },
+
+  "kpis": {
+    "_comment": "KPI queries that produce single-value metrics for the scorecard section.",
+    "queries": [
+      {
+        "name": "total_inforce_current",
+        "display_name": "Total Inforce Members",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='INFORCE' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='INFORCE')",
+        "format": "number",
+        "icon": "members",
+        "color": "#3498db"
+      },
+      {
+        "name": "total_adds_current",
+        "display_name": "Total ADDs (Current Month)",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='ADD' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='ADD')",
+        "format": "number",
+        "icon": "add",
+        "color": "#28a745"
+      },
+      {
+        "name": "total_deducts_current",
+        "display_name": "Total DEDUCTs (Current Month)",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='DEDUCT' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='DEDUCT')",
+        "format": "number",
+        "icon": "deduct",
+        "color": "#dc3545"
+      },
+      {
+        "name": "net_gain_current",
+        "display_name": "Net Gain (Current Month)",
+        "query": "SELECT (SUM(CASE WHEN movement_category='ADD' THEN 1 ELSE 0 END) - SUM(CASE WHEN movement_category='DEDUCT' THEN 1 ELSE 0 END)) AS value FROM monthly_movement_hist WHERE load_date = (SELECT MAX(load_date) FROM monthly_movement_hist)",
+        "format": "number",
+        "icon": "net",
+        "color": "#8e44ad"
+      },
+      {
+        "name": "classic_inforce",
+        "display_name": "Classic Inforce",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='INFORCE' AND product_type='CLASSIC' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='INFORCE')",
+        "format": "number",
+        "icon": "product",
+        "color": "#e67e22"
+      },
+      {
+        "name": "plus_inforce",
+        "display_name": "Plus Inforce",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='INFORCE' AND product_type='PLUS' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='INFORCE')",
+        "format": "number",
+        "icon": "product",
+        "color": "#2980b9"
+      },
+      {
+        "name": "premier_inforce",
+        "display_name": "Premier Inforce",
+        "query": "SELECT COUNT(*) AS value FROM monthly_movement_hist WHERE movement_category='INFORCE' AND product_type='PREMIER' AND load_date = (SELECT MAX(load_date) FROM monthly_movement_hist WHERE movement_category='INFORCE')",
+        "format": "number",
+        "icon": "product",
+        "color": "#16a085"
+      },
+      {
+        "name": "retention_rate",
+        "display_name": "Retention Rate",
+        "query": "SELECT ROUND(100.0 * (1.0 - (CAST(SUM(CASE WHEN movement_category='DEDUCT' THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(SUM(CASE WHEN movement_category='INFORCE' THEN 1 ELSE 0 END), 0))), 2) AS value FROM monthly_movement_hist WHERE load_date = (SELECT MAX(load_date) FROM monthly_movement_hist)",
+        "format": "percentage",
+        "icon": "retention",
+        "color": "#27ae60"
+      }
+    ]
+  },
+
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "INFORCE-MONTHLY_VALIDATIONS.comm",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Inforce Membership DQ Dashboard"
+  }
+}
