@@ -75,6 +75,43 @@ CATEGORY_COLORS = {
     "informational": "#95a5a6",
 }
 
+# Unicode pictorial icons for sections and KPIs
+SECTION_ICONS = {
+    "kpi": "&#x1F4CA;",          # bar chart
+    "summary": "&#x1F3AF;",      # target / bullseye
+    "validations": "&#x1F50D;",  # magnifying glass
+    "trends": "&#x1F4C8;",       # chart increasing
+    "dictionary": "&#x1F4D6;",   # open book
+}
+
+KPI_ICONS = {
+    "members": "&#x1F465;",      # busts in silhouette
+    "add": "&#x2795;",           # heavy plus sign
+    "deduct": "&#x2796;",        # heavy minus sign
+    "net": "&#x1F4B9;",          # chart with upwards trend and yen
+    "product": "&#x1F4E6;",      # package
+    "retention": "&#x1F6E1;",    # shield
+    "default": "&#x2B50;",       # star
+}
+
+STATUS_ICONS = {
+    STATUS_PASS: "&#x2705;",     # white check mark
+    STATUS_FAIL: "&#x274C;",     # cross mark
+    STATUS_WARN: "&#x26A0;",     # warning sign
+    STATUS_ERROR: "&#x1F6A8;",   # rotating light
+    STATUS_INFO: "&#x2139;",     # information source
+}
+
+CATEGORY_ICONS = {
+    "balance": "&#x2696;",       # scales
+    "anomaly": "&#x1F50E;",      # magnifying glass right
+    "completeness": "&#x2611;",  # ballot box with check
+    "rolling_average": "&#x1F4CA;",  # bar chart
+    "statistical": "&#x1F4D0;",  # triangular ruler
+    "count_check": "&#x1F522;",  # input numbers
+    "informational": "&#x1F4AC;", # speech balloon
+}
+
 
 # ============================================================================
 # AWS + SPARK SETUP
@@ -624,103 +661,178 @@ def generate_dashboard_html(
     pass_rate = (passed / actionable * 100) if actionable > 0 else 0
     pass_color = "#28a745" if pass_rate >= 80 else ("#fd7e14" if pass_rate >= 60 else "#dc3545")
 
+    # Build status pill data for the banner
+    status_pills = [
+        (overall_color, STATUS_ICONS.get(overall_status, ""), f"Overall: {overall_status}"),
+        ("#17a2b8", "&#x1F4CB;", f"Total Checks: {total}"),
+        ("#28a745", "&#x2705;", f"Passed: {passed}"),
+    ]
+    if failed > 0:
+        status_pills.append(("#dc3545", "&#x274C;", f"Failed: {failed}"))
+    if warned > 0:
+        status_pills.append(("#fd7e14", "&#x26A0;", f"Warnings: {warned}"))
+    if errored > 0:
+        status_pills.append(("#6c757d", "&#x1F6A8;", f"Errors: {errored}"))
+    if info_count > 0:
+        status_pills.append(("#17a2b8", "&#x2139;", f"Info: {info_count}"))
+
     html = f"""
     <html><head><style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; color: #333;
-               background-color: #f5f6fa; }}
-        .container {{ max-width: 1050px; margin: 0 auto; background: white;
-                      border-radius: 0; overflow: hidden;
-                      box-shadow: 0 2px 12px rgba(0,0,0,0.08); }}
-        .header {{ background: linear-gradient(135deg, #2c3e50 0%, #8e44ad 50%, #3498db 100%);
-                   padding: 28px 30px; color: white; }}
-        .header h1 {{ margin: 0 0 6px 0; font-size: 22px; letter-spacing: 0.5px; }}
-        .header p {{ margin: 0; font-size: 12px; opacity: 0.85; }}
-        .content {{ padding: 25px 30px; }}
-        h2 {{ color: #2c3e50; margin-top: 30px; font-size: 17px;
-              border-left: 4px solid #8e44ad; padding-left: 12px; }}
-        h3 {{ color: #2c3e50; font-size: 15px; margin-top: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 12px; }}
-        th {{ background-color: #4285f4; color: #1a1a2e;
-              padding: 9px 10px; text-align: left;
-              font-size: 11px; font-weight: bold; letter-spacing: 0.3px; }}
-        td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
-        tr:nth-child(even) {{ background-color: #f8f9fa; }}
-        .badge {{ display: inline-block; padding: 3px 9px; border-radius: 4px;
-                  color: white; font-weight: bold; font-size: 10px; }}
-        .summary-box {{ display: inline-block; padding: 10px 18px; margin: 3px 5px 3px 0;
-                        border-radius: 8px; color: white; font-size: 13px;
-                        font-weight: bold; text-align: center; min-width: 100px; }}
-        .kpi-row {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0; }}
-        .kpi-card {{ flex: 1; min-width: 120px; border-radius: 10px; padding: 18px 12px;
-                     text-align: center; color: white; }}
-        .kpi-label {{ font-size: 10px; font-weight: bold; opacity: 0.9;
-                      text-transform: uppercase; letter-spacing: 0.5px; }}
-        .kpi-value {{ font-size: 26px; font-weight: bold; margin: 6px 0 2px 0; }}
-        .kpi-sub {{ font-size: 10px; opacity: 0.7; }}
-        .chart-container {{ margin: 18px 0; text-align: center; }}
-        .chart-container img {{ max-width: 100%; border-radius: 8px;
-                                box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        .check-card {{ margin: 12px 0; border: 1px solid #eee; border-radius: 8px;
-                       overflow: hidden; }}
+               background-color: #f0f2f5; line-height: 1.6; }}
+        .container {{ max-width: 1080px; margin: 0 auto; background: white;
+                      border-radius: 12px; overflow: hidden;
+                      box-shadow: 0 4px 20px rgba(0,0,0,0.12); }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 30%, #f093fb 60%, #f5576c 100%);
+                   padding: 35px 35px 30px 35px; color: white;
+                   position: relative; overflow: hidden; }}
+        .header::before {{ content: ''; position: absolute; top: -50%; left: -50%;
+                          width: 200%; height: 200%; background: radial-gradient(circle,
+                          rgba(255,255,255,0.1) 0%, transparent 60%);
+                          animation: shimmer 3s ease-in-out infinite; }}
+        .header h1 {{ margin: 0 0 8px 0; font-size: 26px; letter-spacing: 0.5px;
+                      text-shadow: 0 2px 4px rgba(0,0,0,0.2); position: relative; }}
+        .header p {{ margin: 0; font-size: 12px; opacity: 0.9; position: relative; }}
+        .header-icon {{ font-size: 32px; margin-right: 10px; vertical-align: middle; }}
+        .content {{ padding: 30px 35px; }}
+
+        h2 {{ color: #2c3e50; margin-top: 40px; margin-bottom: 18px; font-size: 18px;
+              padding: 10px 16px; border-radius: 8px;
+              background: linear-gradient(90deg, #f8f9ff 0%, #fff 100%);
+              border-left: 5px solid #764ba2; }}
+        h2 .section-icon {{ font-size: 20px; margin-right: 8px; vertical-align: middle; }}
+
+        h3 {{ color: #2c3e50; font-size: 15px; margin-top: 22px; margin-bottom: 12px; }}
+
+        p {{ margin-bottom: 12px; }}
+
+        table {{ border-collapse: collapse; width: 100%; margin-top: 12px; margin-bottom: 16px;
+                 font-size: 12px; border-radius: 8px; overflow: hidden;
+                 box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
+        th {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;
+              padding: 10px 12px; text-align: left;
+              font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
+              text-transform: uppercase; }}
+        td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }}
+        tr:nth-child(even) {{ background-color: #fafbfe; }}
+        tr:hover {{ background-color: #f0f3ff; }}
+
+        .badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
+                  color: white; font-weight: bold; font-size: 10px;
+                  letter-spacing: 0.5px; text-transform: uppercase;
+                  box-shadow: 0 2px 4px rgba(0,0,0,0.15); }}
+
+        .summary-pill {{ display: inline-flex; align-items: center; gap: 6px;
+                        padding: 12px 20px; margin: 4px 6px 4px 0;
+                        border-radius: 25px; color: white; font-size: 13px;
+                        font-weight: bold; text-align: center;
+                        box-shadow: 0 3px 8px rgba(0,0,0,0.15);
+                        transition: transform 0.2s; }}
+        .summary-pill .pill-icon {{ font-size: 18px; }}
+
+        .kpi-row {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 22px 0; }}
+        .kpi-card {{ flex: 1; min-width: 130px; border-radius: 14px; padding: 20px 14px;
+                     text-align: center; color: white; position: relative;
+                     overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }}
+        .kpi-card::before {{ content: ''; position: absolute; top: 0; left: 0;
+                            width: 100%; height: 100%;
+                            background: linear-gradient(135deg,
+                            rgba(255,255,255,0.2) 0%, transparent 60%); }}
+        .kpi-icon {{ font-size: 28px; margin-bottom: 6px; position: relative;
+                     filter: drop-shadow(0 2px 3px rgba(0,0,0,0.2)); }}
+        .kpi-label {{ font-size: 10px; font-weight: bold; opacity: 0.95;
+                      text-transform: uppercase; letter-spacing: 0.6px;
+                      position: relative; }}
+        .kpi-value {{ font-size: 28px; font-weight: bold; margin: 8px 0 4px 0;
+                      position: relative;
+                      text-shadow: 0 2px 4px rgba(0,0,0,0.2); }}
+
+        .chart-container {{ margin: 22px 0; text-align: center; }}
+        .chart-container img {{ max-width: 100%; border-radius: 10px;
+                                box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                                border: 1px solid #eef0f5; }}
+
+        .check-card {{ margin: 16px 0; border: 1px solid #e8eaf0; border-radius: 10px;
+                       overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
         .check-card-header {{ display: flex; justify-content: space-between;
-                              align-items: center; padding: 12px 15px;
-                              background: #fafbfc; border-bottom: 1px solid #eee; }}
-        .check-card-body {{ padding: 12px 15px; }}
-        .cat-badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+                              align-items: center; padding: 14px 18px;
+                              background: linear-gradient(90deg, #fafbfe 0%, #fff 100%);
+                              border-bottom: 1px solid #eee; }}
+        .check-card-body {{ padding: 16px 18px; }}
+        .check-title-icon {{ font-size: 16px; margin-right: 6px; vertical-align: middle; }}
+
+        .cat-badge {{ display: inline-flex; align-items: center; gap: 4px;
+                      padding: 3px 10px; border-radius: 12px;
                       font-size: 10px; font-weight: bold; color: white; margin-left: 8px; }}
-        .footer {{ padding: 20px 30px; font-size: 11px; color: #888;
-                   border-top: 1px solid #eee; background: #fafbfc; }}
-        .dict-box {{ background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px;
-                     padding: 15px; margin: 10px 0; }}
+
+        .footer {{ padding: 25px 35px; font-size: 11px; color: #888;
+                   border-top: 2px solid #eee;
+                   background: linear-gradient(90deg, #fafbfc 0%, #f5f6fa 100%); }}
+        .footer-icon {{ font-size: 14px; margin-right: 4px; vertical-align: middle; }}
+
+        .dict-box {{ background: linear-gradient(135deg, #f8f9ff 0%, #fef9ff 100%);
+                     border: 1px solid #e8e0f0; border-radius: 10px;
+                     padding: 20px; margin: 14px 0; }}
+        .dict-item {{ margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #eee; }}
+        .dict-item:last-child {{ border-bottom: none; margin-bottom: 0; padding-bottom: 0; }}
+        .dict-icon {{ font-size: 14px; margin-right: 6px; vertical-align: middle; }}
+
+        .trend-card {{ margin: 22px 0; padding: 20px; background: linear-gradient(135deg,
+                       #fafbfe 0%, #f8f5ff 100%);
+                       border-radius: 12px; border: 1px solid #e8e0f0;
+                       box-shadow: 0 2px 8px rgba(0,0,0,0.04); }}
+        .trend-title {{ color: #2c3e50; margin-top: 0; margin-bottom: 14px; }}
+        .trend-icon {{ font-size: 18px; margin-right: 6px; vertical-align: middle; }}
+
+        .spacer {{ height: 20px; }}
+        .spacer-sm {{ height: 12px; }}
     </style></head>
     <body>
     <div class="container">
 
-    <!-- Header -->
+    <!-- Header with gradient + icon -->
     <div class="header">
-        <h1>Inforce Membership DQ Dashboard</h1>
-        <p>{job_name} &nbsp;|&nbsp; Layer: {layer} &nbsp;|&nbsp;
-           Date: {run_date} &nbsp;|&nbsp; Generated: {now_str} &nbsp;|&nbsp;
-           Duration: {duration_str}</p>
+        <h1><span class="header-icon">&#x1F4CA;</span>
+            Inforce Membership DQ Dashboard</h1>
+        <p>&#x1F3E2; {job_name} &nbsp;&bull;&nbsp;
+           &#x1F4C2; Layer: {layer} &nbsp;&bull;&nbsp;
+           &#x1F4C5; {run_date} &nbsp;&bull;&nbsp;
+           &#x23F1; Generated: {now_str} &nbsp;&bull;&nbsp;
+           &#x23F3; Duration: {duration_str}</p>
     </div>
 
     <div class="content">
 
-    <!-- Overall Status Banner -->
-    <div style="margin-bottom:18px;">
-        <span class="summary-box" style="background-color:{overall_color};">
-            Overall: {overall_status}</span>
-        <span class="summary-box" style="background-color:#17a2b8;">
-            Total Checks: {total}</span>
-        <span class="summary-box" style="background-color:#28a745;">
-            Passed: {passed}</span>"""
+    <div class="spacer-sm"></div>
 
-    if failed > 0:
-        html += f"""
-        <span class="summary-box" style="background-color:#dc3545;">
-            Failed: {failed}</span>"""
-    if warned > 0:
-        html += f"""
-        <span class="summary-box" style="background-color:#fd7e14;">
-            Warnings: {warned}</span>"""
-    if errored > 0:
-        html += f"""
-        <span class="summary-box" style="background-color:#6c757d;">
-            Errors: {errored}</span>"""
-    if info_count > 0:
-        html += f"""
-        <span class="summary-box" style="background-color:#17a2b8;">
-            Info: {info_count}</span>"""
+    <!-- Overall Status Banner with pill badges -->
+    <div style="margin-bottom:24px;text-align:center;">"""
 
-    html += "</div>"
+    for pill_color, pill_icon, pill_text in status_pills:
+        html += f"""
+        <span class="summary-pill" style="background:{pill_color};">
+            <span class="pill-icon">{pill_icon}</span> {pill_text}</span>"""
+
+    html += """
+    </div>
+
+    <div class="spacer"></div>"""
 
     # ---- KPI Scorecard ----
     if kpi_results:
-        html += '<h2>1. Membership KPIs</h2>'
+        html += f'<h2><span class="section-icon">{SECTION_ICONS["kpi"]}</span> 1. Membership KPIs</h2>'
+        html += '<div class="spacer-sm"></div>'
         html += '<div class="kpi-row">'
         for kpi in kpi_results:
             val = kpi.get("value")
             color = kpi.get("color", "#3498db")
+            icon_key = kpi.get("name", "default")
+            # Map KPI name to icon
+            kpi_icon = KPI_ICONS.get("default")
+            for key in KPI_ICONS:
+                if key in icon_key or key in kpi.get("display_name", "").lower():
+                    kpi_icon = KPI_ICONS[key]
+                    break
             if val is None:
                 val_str = "N/A"
             elif kpi["format"] == "percentage":
@@ -728,89 +840,131 @@ def generate_dashboard_html(
             else:
                 val_str = f"{val:,.0f}"
             html += f"""
-            <div class="kpi-card" style="background:{color};">
+            <div class="kpi-card" style="background:linear-gradient(135deg, {color} 0%,
+                        {color}dd 100%);">
+                <div class="kpi-icon">{kpi_icon}</div>
                 <div class="kpi-label">{kpi['display_name']}</div>
                 <div class="kpi-value">{val_str}</div>
             </div>"""
         html += "</div>"
+        html += '<div class="spacer"></div>'
 
     # ---- Pass Rate + Category Charts ----
-    html += '<h2>2. Validation Summary</h2>'
+    html += f'<h2><span class="section-icon">{SECTION_ICONS["summary"]}</span> 2. Validation Summary</h2>'
+    html += '<div class="spacer-sm"></div>'
 
-    # Pass rate gauge bar
+    # Pass rate gauge bar with colorful gradient
     if actionable > 0:
+        # Animated gradient for the pass rate bar
+        bar_gradient = (
+            f"linear-gradient(90deg, {pass_color} 0%, {pass_color}cc {pass_rate:.0f}%, "
+            f"#e9ecef {pass_rate:.0f}%)"
+        )
         html += f"""
-    <div style="display:flex;gap:15px;margin:15px 0;flex-wrap:wrap;">
-      <div style="flex:2;min-width:250px;background:#fafbfc;border:1px solid #eee;
-                  border-radius:8px;padding:18px;">
-        <div style="color:#666;font-size:11px;font-weight:bold;margin-bottom:8px;">
-            PASS RATE (excluding informational)</div>
-        <div style="background:#e9ecef;border-radius:10px;height:22px;overflow:hidden;">
-          <div style="background:{pass_color};height:100%;width:{pass_rate:.0f}%;
-                      border-radius:10px;"></div>
+    <div style="display:flex;gap:18px;margin:18px 0;flex-wrap:wrap;">
+      <div style="flex:2;min-width:280px;background:linear-gradient(135deg, #fafbfe 0%, #f5f0ff 100%);
+                  border:1px solid #e8e0f0;border-radius:12px;padding:22px;">
+        <div style="color:#555;font-size:12px;font-weight:bold;margin-bottom:10px;
+                    letter-spacing:0.5px;">
+            &#x1F3AF; PASS RATE <span style="color:#aaa;font-weight:normal;">
+            (excluding informational)</span></div>
+
+        <div style="background:#e9ecef;border-radius:12px;height:28px;overflow:hidden;
+                    box-shadow:inset 0 2px 4px rgba(0,0,0,0.1);">
+          <div style="background:linear-gradient(90deg, {pass_color}, {pass_color}bb);
+                      height:100%;width:{pass_rate:.0f}%;border-radius:12px;
+                      box-shadow:0 2px 6px {pass_color}66;"></div>
         </div>
-        <div style="color:{pass_color};font-size:24px;font-weight:bold;
-                    text-align:center;margin-top:8px;">{pass_rate:.1f}%</div>
-        <div style="text-align:center;color:#888;font-size:11px;">
-            {passed} passed / {actionable} actionable checks</div>
+
+        <div style="text-align:center;margin-top:12px;">
+          <span style="color:{pass_color};font-size:36px;font-weight:bold;
+                       text-shadow:0 2px 4px {pass_color}33;">{pass_rate:.1f}%</span>
+        </div>
+
+        <div style="text-align:center;margin-top:6px;display:flex;justify-content:center;gap:16px;">
+          <span style="color:#28a745;font-size:12px;font-weight:bold;">
+              &#x2705; {passed} Passed</span>
+          <span style="color:#dc3545;font-size:12px;font-weight:bold;">
+              &#x274C; {failed} Failed</span>
+          <span style="color:#888;font-size:12px;">
+              of {actionable} actionable</span>
+        </div>
       </div>"""
 
         # Pass rate donut chart
         pie_b64 = generate_pass_rate_pie(passed, failed, warned, errored, info_count)
         if pie_b64:
             html += f"""
-      <div style="flex:1;min-width:200px;text-align:center;">
-        <img src="data:image/png;base64,{pie_b64}" style="max-width:260px;border-radius:8px;" />
+      <div style="flex:1;min-width:220px;text-align:center;background:linear-gradient(135deg,
+                  #fafbfe 0%, #f5f0ff 100%);border:1px solid #e8e0f0;
+                  border-radius:12px;padding:15px;">
+        <img src="data:image/png;base64,{pie_b64}"
+             style="max-width:280px;border-radius:10px;
+                    box-shadow:0 3px 10px rgba(0,0,0,0.08);" />
       </div>"""
         html += "</div>"
+
+    html += '<div class="spacer-sm"></div>'
 
     # Category bar chart
     cat_chart_b64 = generate_category_bar_chart(validation_results)
     if cat_chart_b64:
         html += f"""
-    <div class="chart-container">
+    <div class="chart-container" style="background:linear-gradient(135deg, #fafbfe 0%,
+                #f5f0ff 100%);border:1px solid #e8e0f0;border-radius:12px;padding:18px;">
         <img src="data:image/png;base64,{cat_chart_b64}" alt="Checks by Category" />
     </div>"""
 
+    html += '<div class="spacer"></div>'
+
     # ---- Validation Details ----
-    html += '<h2>3. Validation Check Details</h2>'
+    html += f'<h2><span class="section-icon">{SECTION_ICONS["validations"]}</span> 3. Validation Check Details</h2>'
+    html += '<div class="spacer-sm"></div>'
 
     for i, r in enumerate(validation_results, 1):
         color = _status_color(r["status"])
         cat_color = CATEGORY_COLORS.get(r["category"], "#95a5a6")
+        cat_icon = CATEGORY_ICONS.get(r["category"], "&#x1F4CB;")
+        status_icon = STATUS_ICONS.get(r["status"], "")
         dur_str = f'{r["duration_sec"]}s'
 
         html += f"""
-    <div class="check-card" style="border-left:4px solid {color};">
+    <div class="check-card" style="border-left:5px solid {color};">
       <div class="check-card-header">
         <div>
-          <span style="font-weight:bold;color:#2c3e50;">
+          <span class="check-title-icon">{status_icon}</span>
+          <span style="font-weight:bold;color:#2c3e50;font-size:13px;">
               {i}. {r['display_name']}</span>
           <span class="cat-badge" style="background:{cat_color};">
-              {r['category']}</span>
+              {cat_icon} {r['category']}</span>
         </div>
         <div>
           <span style="color:#888;font-size:11px;margin-right:10px;">
-              {r['row_count']} rows | {dur_str}</span>
+              &#x1F4C4; {r['row_count']} rows &nbsp;|&nbsp; &#x23F1; {dur_str}</span>
           <span class="badge" style="background-color:{color};">{r['status']}</span>
         </div>
       </div>
       <div class="check-card-body">
-        <p style="color:#666;font-size:11px;margin:4px 0;">
-          <b>Description:</b> {r['description']}</p>
-        <p style="color:#666;font-size:11px;margin:4px 0;">
-          <b>Detail:</b> {r['detail']}</p>"""
+        <p style="color:#555;font-size:12px;margin:6px 0 10px 0;">
+          &#x1F4DD; <b>Description:</b> {r['description']}</p>
+
+        <p style="color:#555;font-size:12px;margin:6px 0 10px 0;">
+          &#x1F527; <b>Detail:</b> {r['detail']}</p>"""
 
         # Show failure details if any
         if r["failure_details"]:
-            html += '<div style="margin:8px 0;padding:8px;background:#fff0f0;border-radius:4px;font-size:11px;">'
+            html += """<div style="margin:12px 0;padding:12px 14px;
+                        background:linear-gradient(90deg, #fff0f0 0%, #fff5f5 100%);
+                        border-radius:8px;border-left:4px solid #dc3545;font-size:12px;">"""
             for fd in r["failure_details"]:
-                html += f'<div style="color:#dc3545;">&#9888; {fd}</div>'
+                html += f'<div style="color:#dc3545;margin:4px 0;">&#x1F6A8; {fd}</div>'
             html += "</div>"
+
+        html += '<div class="spacer-sm"></div>'
 
         # Data preview table
         if r["data_preview"] and r["columns"]:
-            html += '<table style="margin-top:8px;"><thead><tr>'
+            html += '<table style="margin-top:10px;"><thead><tr>'
             for col in r["columns"]:
                 html += f"<th>{col.replace('_', ' ').title()}</th>"
             html += "</tr></thead><tbody>"
@@ -827,33 +981,64 @@ def generate_dashboard_html(
                 html += "</tr>"
             html += "</tbody></table>"
             if r["row_count"] > 15:
-                html += f'<p style="color:#888;font-size:10px;">Showing 15 of {r["row_count"]} rows</p>'
+                html += f"""<p style="color:#999;font-size:10px;margin-top:8px;
+                            font-style:italic;">&#x1F4C4; Showing 15 of {r["row_count"]} rows</p>"""
 
         html += "</div></div>"
+        html += '<div class="spacer-sm"></div>'
 
     # ---- Trends Section ----
     if trend_results:
-        html += '<h2>4. Membership Trends</h2>'
-        for tr in trend_results:
+        html += f'<h2><span class="section-icon">{SECTION_ICONS["trends"]}</span> 4. Membership Trends</h2>'
+        html += '<div class="spacer-sm"></div>'
+
+        # Trend type icons
+        trend_type_icons = {
+            "trend": "&#x1F4C8;",        # chart increasing
+            "grouped_bar": "&#x1F4CA;",   # bar chart
+            "stacked_bar": "&#x1F4CA;",   # bar chart
+            "bar": "&#x1F4CA;",           # bar chart
+        }
+
+        for idx, tr in enumerate(trend_results):
+            chart_type = tr.get("chart", {}).get("type", "trend")
+            trend_icon = trend_type_icons.get(chart_type, "&#x1F4C8;")
+            # Alternate subtle background gradients for visual variety
+            bg_colors = [
+                "linear-gradient(135deg, #f0f7ff 0%, #f5f0ff 100%)",
+                "linear-gradient(135deg, #f0fff7 0%, #f5f0ff 100%)",
+                "linear-gradient(135deg, #fff7f0 0%, #fff0f5 100%)",
+                "linear-gradient(135deg, #f5f0ff 0%, #f0f7ff 100%)",
+            ]
+            bg = bg_colors[idx % len(bg_colors)]
+            border_colors = ["#d0e0f0", "#c0e8d0", "#f0d0c0", "#d8c0f0"]
+            bc = border_colors[idx % len(border_colors)]
+
             html += f"""
-        <div style="margin:18px 0;padding:15px;background:#fafbfc;
-                     border-radius:8px;border:1px solid #eee;">
-            <h3 style="color:#2c3e50;margin-top:0;">{tr['display_name']}</h3>"""
+        <div class="trend-card" style="background:{bg};border-color:{bc};">
+            <h3 class="trend-title">
+                <span class="trend-icon">{trend_icon}</span>
+                {tr['display_name']}</h3>"""
 
             if tr["status"] == "error":
-                html += f'<p style="color:#dc3545;">Query failed: {tr.get("error", "")}</p>'
+                html += f"""
+            <p style="color:#dc3545;font-size:12px;">
+                &#x1F6A8; <b>Query failed:</b> {tr.get("error", "")}</p>"""
             elif tr["data"]:
                 chart_b64 = generate_trend_chart(tr["chart"], tr["data"], tr["columns"])
                 if chart_b64:
-                    html += f"""<div class="chart-container">
-                        <img src="data:image/png;base64,{chart_b64}"
-                             alt="{tr['chart'].get('title', '')}" /></div>"""
+                    html += f"""
+            <div class="chart-container">
+                <img src="data:image/png;base64,{chart_b64}"
+                     alt="{tr['chart'].get('title', '')}" /></div>"""
                 else:
                     html += html_bar_chart_fallback(tr["chart"], tr["data"], tr["columns"])
 
-                # Also show data table for trend queries (collapsed, first 10 rows)
+                html += '<div class="spacer-sm"></div>'
+
+                # Show data table for trend queries (first 20 rows)
                 if len(tr["data"]) <= 20:
-                    html += '<table style="margin-top:10px;"><thead><tr>'
+                    html += '<table style="margin-top:12px;"><thead><tr>'
                     for col in tr["columns"]:
                         html += f"<th>{col.replace('_', ' ').title()}</th>"
                     html += "</tr></thead><tbody>"
@@ -864,38 +1049,75 @@ def generate_dashboard_html(
                         html += "</tr>"
                     html += "</tbody></table>"
             else:
-                html += '<p style="color:#888;">No data returned.</p>'
+                html += '<p style="color:#888;font-size:12px;">&#x1F4ED; No data returned.</p>'
 
             html += "</div>"
 
+        html += '<div class="spacer"></div>'
+
     # ---- Checks Dictionary ----
-    html += '<h2>5. DQ Checks Dictionary</h2>'
+    html += f'<h2><span class="section-icon">{SECTION_ICONS["dictionary"]}</span> 5. DQ Checks Dictionary</h2>'
+    html += '<div class="spacer-sm"></div>'
     html += '<div class="dict-box">'
+
     for r in validation_results:
         if r.get("logic") or r.get("expected_result"):
+            cat_color = CATEGORY_COLORS.get(r.get("category", ""), "#95a5a6")
+            cat_icon = CATEGORY_ICONS.get(r.get("category", ""), "&#x1F4CB;")
             html += f"""
-            <div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #eee;">
-              <div style="font-weight:bold;color:#2c3e50;font-size:13px;">
-                  {r['display_name']}</div>
-              <table style="margin:4px 0;border:none;font-size:11px;">
-                <tr><td style="border:none;width:140px;color:#888;font-weight:bold;">
-                    Purpose</td><td style="border:none;">{r['description']}</td></tr>
-                <tr><td style="border:none;color:#888;font-weight:bold;">
-                    Logic</td><td style="border:none;">{r.get('logic', '-')}</td></tr>
-                <tr><td style="border:none;color:#888;font-weight:bold;">
-                    Expected Result</td><td style="border:none;">{r.get('expected_result', '-')}</td></tr>
-                <tr><td style="border:none;color:#888;font-weight:bold;">
-                    Failure Impact</td><td style="border:none;">{r.get('failure_implication', '-')}</td></tr>
+            <div class="dict-item">
+              <div style="font-weight:bold;color:#2c3e50;font-size:14px;margin-bottom:8px;">
+                  <span class="dict-icon">{cat_icon}</span>
+                  {r['display_name']}
+                  <span style="display:inline-block;padding:2px 8px;border-radius:10px;
+                               background:{cat_color};color:white;font-size:9px;
+                               font-weight:bold;margin-left:8px;vertical-align:middle;">
+                      {r.get('category', '')}</span>
+              </div>
+              <table style="margin:6px 0;border:none;font-size:12px;">
+                <tr><td style="border:none;width:150px;color:#764ba2;font-weight:bold;
+                               vertical-align:top;padding:4px 8px;">
+                    &#x1F3AF; Purpose</td>
+                    <td style="border:none;padding:4px 8px;color:#444;">
+                    {r['description']}</td></tr>
+                <tr><td style="border:none;color:#764ba2;font-weight:bold;
+                               vertical-align:top;padding:4px 8px;">
+                    &#x2699; Logic</td>
+                    <td style="border:none;padding:4px 8px;color:#444;">
+                    {r.get('logic', '-')}</td></tr>
+                <tr><td style="border:none;color:#764ba2;font-weight:bold;
+                               vertical-align:top;padding:4px 8px;">
+                    &#x2705; Expected</td>
+                    <td style="border:none;padding:4px 8px;color:#444;">
+                    {r.get('expected_result', '-')}</td></tr>
+                <tr><td style="border:none;color:#764ba2;font-weight:bold;
+                               vertical-align:top;padding:4px 8px;">
+                    &#x26A0; Impact</td>
+                    <td style="border:none;padding:4px 8px;color:#444;">
+                    {r.get('failure_implication', '-')}</td></tr>
               </table>
             </div>"""
     html += "</div>"
 
     # ---- Footer ----
     html += f"""
+    <div class="spacer"></div>
     </div><!-- end content -->
-    <div class="footer">
-        <p>Generated by Inforce Membership DQ Dashboard v2.0 &nbsp;|&nbsp;
-           BIG DATA – Membership Team &nbsp;|&nbsp; {now_str}</p>
+
+    <div class="footer" style="text-align:center;">
+        <p>
+            <span class="footer-icon">&#x1F4E7;</span>
+            Generated by <b>Inforce Membership DQ Dashboard v2.0</b>
+            &nbsp;&bull;&nbsp;
+            <span class="footer-icon">&#x1F46B;</span>
+            BIG DATA &ndash; Membership Team
+            &nbsp;&bull;&nbsp;
+            <span class="footer-icon">&#x1F4C5;</span>
+            {now_str}
+        </p>
+        <p style="margin-top:8px;color:#aaa;font-size:10px;">
+            &#x2728; Powered by PySpark + AWS Glue &nbsp;|&nbsp;
+            &#x1F512; Internal Use Only</p>
     </div>
     </div></body></html>"""
 
@@ -910,10 +1132,13 @@ def send_email(html_content, email_cfg, overall_status):
     sender = email_cfg["sender"]
     recipients = email_cfg["recipients"]
     run_date = datetime.now().strftime("%Y-%m-%d")
-    status_emoji = "PASSED" if overall_status == STATUS_PASS else "FAILED"
+    if overall_status == STATUS_PASS:
+        status_emoji = "\u2705 PASSED"
+    else:
+        status_emoji = "\u274C FAILED"
 
-    subject = (f"{email_cfg.get('subject_prefix', 'Inforce DQ')} – "
-               f"{status_emoji} – {run_date}")
+    subject = (f"{email_cfg.get('subject_prefix', 'Inforce DQ')} \u2013 "
+               f"{status_emoji} \u2013 {run_date}")
 
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
