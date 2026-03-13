@@ -393,9 +393,25 @@ def generate_trend_chart(chart_cfg, data, columns):
                 markeredgecolor="white", markeredgewidth=1.5)
         ax.set_xticks(range(len(x_vals)))
         ax.set_xticklabels(x_vals, rotation=45, ha="right", fontsize=8)
+        # Smart label placement: skip labels when too many points to avoid overlap
+        n_points = len(y_vals)
+        if n_points <= 8:
+            label_step = 1  # label every point
+        elif n_points <= 16:
+            label_step = 2  # label every 2nd point
+        elif n_points <= 30:
+            label_step = 3
+        else:
+            label_step = max(1, n_points // 10)
         for i, v in enumerate(y_vals):
-            ax.annotate(f"{v:,.0f}", (i, v), textcoords="offset points",
-                        xytext=(0, 10), ha="center", fontsize=7, fontweight="bold")
+            # Always label first, last, and every Nth point
+            if i == 0 or i == n_points - 1 or i % label_step == 0:
+                # Alternate above/below to reduce overlap
+                y_offset = 12 if (i % 2 == 0) else -16
+                va = "bottom" if y_offset > 0 else "top"
+                ax.annotate(f"{v:,.0f}", (i, v), textcoords="offset points",
+                            xytext=(0, y_offset), ha="center", va=va,
+                            fontsize=7, fontweight="bold", color="#2c3e50")
 
     elif chart_type == "trend" and group_by:
         groups = df[group_by].unique()
@@ -709,10 +725,10 @@ def generate_dashboard_html(
         table {{ border-collapse: collapse; width: 100%; margin-top: 12px; margin-bottom: 16px;
                  font-size: 12px; border-radius: 8px; overflow: hidden;
                  box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
-        th {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;
+        th {{ background: linear-gradient(135deg, #eef2ff 0%, #f0e6ff 100%); color: #4a2d7a;
               padding: 10px 12px; text-align: left;
               font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
-              text-transform: uppercase; }}
+              text-transform: uppercase; border-bottom: 2px solid #764ba2; }}
         td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }}
         tr:nth-child(even) {{ background-color: #fafbfe; }}
         tr:hover {{ background-color: #f0f3ff; }}
@@ -732,20 +748,15 @@ def generate_dashboard_html(
 
         .kpi-row {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 22px 0; }}
         .kpi-card {{ flex: 1; min-width: 130px; border-radius: 14px; padding: 20px 14px;
-                     text-align: center; color: white; position: relative;
-                     overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }}
-        .kpi-card::before {{ content: ''; position: absolute; top: 0; left: 0;
-                            width: 100%; height: 100%;
-                            background: linear-gradient(135deg,
-                            rgba(255,255,255,0.2) 0%, transparent 60%); }}
-        .kpi-icon {{ font-size: 28px; margin-bottom: 6px; position: relative;
-                     filter: drop-shadow(0 2px 3px rgba(0,0,0,0.2)); }}
-        .kpi-label {{ font-size: 10px; font-weight: bold; opacity: 0.95;
+                     text-align: center; position: relative;
+                     overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                     border: 1px solid #e8eaf0; }}
+        .kpi-icon {{ font-size: 30px; margin-bottom: 8px; position: relative; }}
+        .kpi-label {{ font-size: 10px; font-weight: bold;
                       text-transform: uppercase; letter-spacing: 0.6px;
+                      position: relative; color: #666; }}
+        .kpi-value {{ font-size: 30px; font-weight: bold; margin: 8px 0 4px 0;
                       position: relative; }}
-        .kpi-value {{ font-size: 28px; font-weight: bold; margin: 8px 0 4px 0;
-                      position: relative;
-                      text-shadow: 0 2px 4px rgba(0,0,0,0.2); }}
 
         .chart-container {{ margin: 22px 0; text-align: center; }}
         .chart-container img {{ max-width: 100%; border-radius: 10px;
@@ -840,11 +851,11 @@ def generate_dashboard_html(
             else:
                 val_str = f"{val:,.0f}"
             html += f"""
-            <div class="kpi-card" style="background:linear-gradient(135deg, {color} 0%,
-                        {color}dd 100%);">
+            <div class="kpi-card" style="background:linear-gradient(135deg, {color}12 0%,
+                        {color}20 100%); border-color:{color}40;">
                 <div class="kpi-icon">{kpi_icon}</div>
                 <div class="kpi-label">{kpi['display_name']}</div>
-                <div class="kpi-value">{val_str}</div>
+                <div class="kpi-value" style="color:{color};">{val_str}</div>
             </div>"""
         html += "</div>"
         html += '<div class="spacer"></div>'
