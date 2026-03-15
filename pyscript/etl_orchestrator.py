@@ -724,6 +724,171 @@ def _to_float(row, col):
         return None
 
 
+def _execute_data_diff(cdef, result_a, result_b, cost_usd):
+    """
+    Row-level data diff between two query results for delta-flow comparisons.
+
+    Compares actual rows using one or more key columns and optionally checks
+    non-key columns for value mismatches on matched keys.
+
+    Config fields:
+      key_columns        – str or list[str]: column(s) forming the composite key
+      compare_columns    – list[str] (optional): non-key columns to diff on
+                           matched rows. If omitted, only key presence is checked.
+      case_sensitive     – bool (default True): key matching case sensitivity
+      max_diff_rows      – int (default 100): cap on rows reported per category
+      ignore_duplicates  – bool (default False): if True, de-dups keys before diff
+    """
+    name = cdef["name"]
+    abort_on_failure = cdef.get("abort_on_failure", False)
+    qa = cdef["query_a"]
+    qb = cdef["query_b"]
+
+    key_cols = cdef.get("key_columns", cdef.get("compare_column", ""))
+    if isinstance(key_cols, str):
+        key_cols = [key_cols]
+    compare_cols = cdef.get("compare_columns", [])
+    case_sensitive = cdef.get("case_sensitive", True)
+    max_diff_rows = cdef.get("max_diff_rows", 100)
+    ignore_duplicates = cdef.get("ignore_duplicates", False)
+
+    header_a, data_a = parse_athena_rows(result_a["rows"])
+    header_b, data_b = parse_athena_rows(result_b["rows"])
+
+    # Validate key columns exist in both results
+    for kc in key_cols:
+        if kc not in header_a:
+            return {
+                "name": name, "description": cdef.get("description", ""),
+                "check_type": "comparison", "rule": "data_diff",
+                "abort_on_failure": abort_on_failure,
+                "status": STATUS_FAIL,
+                "detail": f"Key column '{kc}' not found in Query A results (available: {header_a})",
+                "value_a": len(data_a), "value_b": len(data_b),
+                "label_a": qa.get("label", "Query A"),
+                "label_b": qb.get("label", "Query B"),
+                "cost_usd": cost_usd,
+            }
+        if kc not in header_b:
+            return {
+                "name": name, "description": cdef.get("description", ""),
+                "check_type": "comparison", "rule": "data_diff",
+                "abort_on_failure": abort_on_failure,
+                "status": STATUS_FAIL,
+                "detail": f"Key column '{kc}' not found in Query B results (available: {header_b})",
+                "value_a": len(data_a), "value_b": len(data_b),
+                "label_a": qa.get("label", "Query A"),
+                "label_b": qb.get("label", "Query B"),
+                "cost_usd": cost_usd,
+            }
+
+    def make_key(row):
+        """Build composite key tuple from row dict."""
+        parts = []
+        for kc in key_cols:
+            val = row.get(kc, "")
+            if val is None:
+                val = "<NULL>"
+            elif not case_sensitive:
+                val = str(val).lower()
+            else:
+                val = str(val)
+            parts.append(val)
+        return tuple(parts)
+
+    # Build keyed dictionaries
+    keys_a = {}   # key -> list of row dicts
+    dup_a = 0
+    for row in data_a:
+        k = make_key(row)
+        if k in keys_a:
+            dup_a += 1
+            if not ignore_duplicates:
+                keys_a[k].append(row)
+        else:
+            keys_a[k] = [row]
+
+    keys_b = {}
+    dup_b = 0
+    for row in data_b:
+        k = make_key(row)
+        if k in keys_b:
+            dup_b += 1
+            if not ignore_duplicates:
+                keys_b[k].append(row)
+        else:
+            keys_b[k] = [row]
+
+    set_a = set(keys_a.keys())
+    set_b = set(keys_b.keys())
+
+    only_in_a = sorted(set_a - set_b)
+    only_in_b = sorted(set_b - set_a)
+    common_keys = set_a & set_b
+
+    # Check value mismatches on matched keys
+    mismatched = []
+    if compare_cols:
+        for k in sorted(common_keys):
+            row_a = keys_a[k][0]  # take first occurrence
+            row_b = keys_b[k][0]
+            diffs = {}
+            for col in compare_cols:
+                va = str(row_a.get(col, "")) if row_a.get(col) is not None else "<NULL>"
+                vb = str(row_b.get(col, "")) if row_b.get(col) is not None else "<NULL>"
+                if not case_sensitive:
+                    va, vb = va.lower(), vb.lower()
+                if va != vb:
+                    diffs[col] = {"a": row_a.get(col, ""), "b": row_b.get(col, "")}
+            if diffs:
+                key_display = dict(zip(key_cols, k))
+                mismatched.append({"key": key_display, "diffs": diffs})
+
+    # Build result
+    has_diff = len(only_in_a) > 0 or len(only_in_b) > 0 or len(mismatched) > 0
+    passed = not has_diff
+
+    # Summary detail string
+    parts = []
+    parts.append(f"A={len(data_a)} rows, B={len(data_b)} rows")
+    parts.append(f"only_in_A={len(only_in_a)}, only_in_B={len(only_in_b)}")
+    if compare_cols:
+        parts.append(f"value_mismatches={len(mismatched)}")
+    if dup_a or dup_b:
+        parts.append(f"duplicates(A={dup_a}, B={dup_b})")
+    detail = "; ".join(parts)
+    detail += f" → {'no differences' if passed else 'DIFFERENCES FOUND'}"
+
+    # Build diff detail for HTML rendering
+    diff_detail = {
+        "only_in_a": [dict(zip(key_cols, k)) for k in only_in_a[:max_diff_rows]],
+        "only_in_b": [dict(zip(key_cols, k)) for k in only_in_b[:max_diff_rows]],
+        "mismatched": mismatched[:max_diff_rows],
+        "only_in_a_total": len(only_in_a),
+        "only_in_b_total": len(only_in_b),
+        "mismatched_total": len(mismatched),
+        "key_columns": key_cols,
+        "compare_columns": compare_cols,
+        "duplicates_a": dup_a,
+        "duplicates_b": dup_b,
+    }
+
+    status = STATUS_PASS if passed else STATUS_FAIL
+    logger.info("Comparison %s (data_diff): %s – %s", name, status, detail)
+
+    return {
+        "name": name, "description": cdef.get("description", ""),
+        "check_type": "comparison", "rule": "data_diff",
+        "abort_on_failure": abort_on_failure,
+        "status": status, "detail": detail,
+        "value_a": len(data_a), "value_b": len(data_b),
+        "label_a": qa.get("label", "Query A"),
+        "label_b": qb.get("label", "Query B"),
+        "cost_usd": cost_usd,
+        "diff_detail": diff_detail,
+    }
+
+
 def _execute_comparison_check(cdef, output_location, workgroup):
     """
     Run two Athena queries (query_a, query_b) and compare their results.
@@ -738,6 +903,7 @@ def _execute_comparison_check(cdef, output_location, workgroup):
       b_equals_zero       – b == 0
       a_not_zero          – a != 0
       b_not_zero          – b != 0
+      data_diff           – row-level diff using key columns (delta flow)
       custom              – user provides a Python expression with a_val, b_val
     """
     name = cdef["name"]
@@ -786,6 +952,10 @@ def _execute_comparison_check(cdef, output_location, workgroup):
             "label_b": qb.get("label", "Query B"),
             "cost_usd": cost_usd,
         }
+
+    # For data_diff rule, delegate to specialised handler
+    if rule == "data_diff":
+        return _execute_data_diff(cdef, result_a, result_b, cost_usd)
 
     # Extract scalar values
     a_val = extract_scalar(result_a["rows"], column) if column else None
@@ -1289,6 +1459,15 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
         ]))
 
     for cr in comparison_results:
+        actual_value = f"A={cr.get('value_a')},B={cr.get('value_b')}"
+        diff_detail = cr.get("diff_detail")
+        if diff_detail:
+            actual_value = (
+                f"rows_A={cr.get('value_a')},rows_B={cr.get('value_b')},"
+                f"only_in_A={diff_detail['only_in_a_total']},"
+                f"only_in_B={diff_detail['only_in_b_total']},"
+                f"mismatched={diff_detail['mismatched_total']}"
+            )
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
             ("event_type", "COMPARISON"), ("source_label", ""),
@@ -1296,7 +1475,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             ("status", cr["status"]), ("detail", cr["detail"]),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
             ("validation_name", cr["name"]), ("check_type", f"comparison:{cr.get('rule', '')}"),
-            ("actual_value", f"A={cr.get('value_a')},B={cr.get('value_b')}"),
+            ("actual_value", actual_value),
             ("query", ""), ("overall_status", overall_status),
             ("cost_usd", str(cr.get("cost_usd", 0))),
             ("failure_reason", ""),
@@ -1699,6 +1878,56 @@ def generate_dashboard_html(
                 <td><b>{cr.get('label_b', 'B')}:</b> {cr.get('value_b', '-')}</td>
                 <td><span class="badge" style="background-color:{color};">{cr['status']}</span></td>
                 <td>{cr.get('detail', '-')}</td></tr>"""
+
+            # Render data_diff detail tables when differences exist
+            dd = cr.get("diff_detail")
+            if dd and (dd["only_in_a"] or dd["only_in_b"] or dd["mismatched"]):
+                key_cols = dd.get("key_columns", [])
+                key_header = "".join(f"<th>{k}</th>" for k in key_cols)
+
+                html += f'<tr><td colspan="7" style="padding:0;">'
+                html += '<div style="padding:12px 16px;background:#fef9f0;border-top:2px solid #f0c040;">'
+
+                if dd["only_in_a"]:
+                    trunc_a = f" (showing {len(dd['only_in_a'])} of {dd['only_in_a_total']})" if dd["only_in_a_total"] > len(dd["only_in_a"]) else ""
+                    html += f'<p style="color:#c0392b;font-weight:bold;margin:8px 0 4px;">Only in {cr.get("label_a", "A")} ({dd["only_in_a_total"]} records){trunc_a}</p>'
+                    html += f'<table style="font-size:11px;"><thead><tr>{key_header}</tr></thead><tbody>'
+                    for row in dd["only_in_a"]:
+                        html += "<tr>" + "".join(f"<td>{row.get(k, '')}</td>" for k in key_cols) + "</tr>"
+                    html += "</tbody></table>"
+
+                if dd["only_in_b"]:
+                    trunc_b = f" (showing {len(dd['only_in_b'])} of {dd['only_in_b_total']})" if dd["only_in_b_total"] > len(dd["only_in_b"]) else ""
+                    html += f'<p style="color:#2980b9;font-weight:bold;margin:8px 0 4px;">Only in {cr.get("label_b", "B")} ({dd["only_in_b_total"]} records){trunc_b}</p>'
+                    html += f'<table style="font-size:11px;"><thead><tr>{key_header}</tr></thead><tbody>'
+                    for row in dd["only_in_b"]:
+                        html += "<tr>" + "".join(f"<td>{row.get(k, '')}</td>" for k in key_cols) + "</tr>"
+                    html += "</tbody></table>"
+
+                if dd["mismatched"]:
+                    cmp_cols = dd.get("compare_columns", [])
+                    trunc_m = f" (showing {len(dd['mismatched'])} of {dd['mismatched_total']})" if dd["mismatched_total"] > len(dd["mismatched"]) else ""
+                    html += f'<p style="color:#8e44ad;font-weight:bold;margin:8px 0 4px;">Value Mismatches ({dd["mismatched_total"]} records){trunc_m}</p>'
+                    mismatch_hdr = key_header + "".join(f"<th>{c} (A)</th><th>{c} (B)</th>" for c in cmp_cols)
+                    html += f'<table style="font-size:11px;"><thead><tr>{mismatch_hdr}</tr></thead><tbody>'
+                    for m in dd["mismatched"]:
+                        html += "<tr>"
+                        for k in key_cols:
+                            html += f"<td>{m['key'].get(k, '')}</td>"
+                        for c in cmp_cols:
+                            if c in m["diffs"]:
+                                html += f'<td style="background:#fde8e8;">{m["diffs"][c]["a"]}</td>'
+                                html += f'<td style="background:#e8f4fd;">{m["diffs"][c]["b"]}</td>'
+                            else:
+                                html += "<td>-</td><td>-</td>"
+                        html += "</tr>"
+                    html += "</tbody></table>"
+
+                if dd["duplicates_a"] or dd["duplicates_b"]:
+                    html += f'<p style="color:#e67e22;font-size:11px;margin:8px 0 0;">Duplicate keys: A={dd["duplicates_a"]}, B={dd["duplicates_b"]}</p>'
+
+                html += '</div></td></tr>'
+
         html += "</tbody></table>"
         section_num += 1
 

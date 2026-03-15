@@ -195,6 +195,27 @@
         "compare_column": "cnt",
         "rule": "a_not_zero",
         "abort_on_failure": true
+      },
+      {
+        "name": "delta_membership_diff",
+        "description": "Compare membership numbers between source delta and target delta to find missing or extra records",
+        "query_a": {
+          "label": "Source Delta",
+          "database": "landing_db",
+          "query": "SELECT membership_number, member_name, plan_code FROM landing_db.mbr_delta WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Target Delta",
+          "database": "curated_db",
+          "query": "SELECT membership_number, member_name, plan_code FROM curated_db.mbr_delta WHERE cast(update_date as date) = current_date"
+        },
+        "rule": "data_diff",
+        "key_columns": ["membership_number"],
+        "compare_columns": ["member_name", "plan_code"],
+        "case_sensitive": false,
+        "max_diff_rows": 50,
+        "ignore_duplicates": false,
+        "abort_on_failure": false
       }
     ]
   },
