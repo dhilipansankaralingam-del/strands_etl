@@ -1,0 +1,1141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strands ETL Orchestrator Framework - Technical Documentation</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+         max-width: 1200px; margin: 0 auto; padding: 20px; color: #172b4d; background: #fff; line-height: 1.6; }
+  .toc { background: linear-gradient(135deg, #f8f9ff 0%, #f0f4ff 100%); border: 1px solid #d0d7e6;
+         border-radius: 10px; padding: 25px 35px; margin: 30px 0; }
+  .toc h2 { color: #0052cc; margin-top: 0; }
+  .toc ul { list-style: none; padding: 0; }
+  .toc li { padding: 5px 0; }
+  .toc a { color: #0052cc; text-decoration: none; font-weight: 500; }
+  .toc a:hover { text-decoration: underline; }
+  h1 { color: #172b4d; font-size: 32px; border-bottom: 3px solid #0052cc; padding-bottom: 12px; }
+  h2 { color: #0052cc; font-size: 24px; margin-top: 40px; border-bottom: 2px solid #dfe1e6; padding-bottom: 8px; }
+  h3 { color: #253858; font-size: 18px; margin-top: 25px; }
+  h4 { color: #42526e; font-size: 15px; }
+  .panel { border-radius: 8px; padding: 18px 22px; margin: 18px 0; }
+  .panel-info { background: #deebff; border-left: 4px solid #0052cc; }
+  .panel-success { background: #e3fcef; border-left: 4px solid #00875a; }
+  .panel-warning { background: #fffae6; border-left: 4px solid #ff991f; }
+  .panel-error { background: #ffebe6; border-left: 4px solid #de350b; }
+  table { border-collapse: collapse; width: 100%; margin: 15px 0; font-size: 14px; }
+  th { background: linear-gradient(135deg, #0052cc 0%, #0065ff 100%); color: #fff;
+       padding: 12px 15px; text-align: left; font-weight: 600; font-size: 13px; }
+  td { padding: 10px 15px; border-bottom: 1px solid #dfe1e6; }
+  tr:nth-child(even) { background: #f4f5f7; }
+  tr:hover { background: #ebecf0; }
+  code { background: #f4f5f7; padding: 2px 6px; border-radius: 3px; font-size: 13px; color: #de350b; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 18px; border-radius: 8px; overflow-x: auto;
+        font-size: 13px; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .arch-diagram { margin: 25px 0; overflow-x: auto; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px;
+           font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge-blue { background: #deebff; color: #0052cc; }
+  .badge-green { background: #e3fcef; color: #00875a; }
+  .badge-red { background: #ffebe6; color: #de350b; }
+  .badge-orange { background: #fffae6; color: #ff991f; }
+  .badge-purple { background: #eae6ff; color: #6554c0; }
+  details { margin: 12px 0; border: 1px solid #dfe1e6; border-radius: 6px; }
+  details summary { padding: 12px 16px; background: #f4f5f7; cursor: pointer; font-weight: 600;
+                    color: #253858; border-radius: 6px; }
+  details[open] summary { border-bottom: 1px solid #dfe1e6; border-radius: 6px 6px 0 0; }
+  details > div { padding: 16px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-pass { background: #00875a; }
+  .status-fail { background: #de350b; }
+  .status-warn { background: #ff991f; }
+  .metric-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 20px 0; }
+  .metric-card { flex: 1; min-width: 180px; padding: 20px; border-radius: 10px; text-align: center;
+                 color: #fff; box-shadow: 0 3px 10px rgba(0,0,0,0.12); }
+  .metric-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.9; }
+  .metric-card .value { font-size: 28px; font-weight: bold; margin: 8px 0; }
+</style>
+</head>
+<body>
+
+<!-- ===== HEADER ===== -->
+<h1>Strands ETL Orchestrator Framework</h1>
+<p><span class="badge badge-blue">Version 1.1.0</span>
+   <span class="badge badge-green">Production</span>
+   <span class="badge badge-purple">Python 3.x</span></p>
+
+<div class="panel panel-info">
+  <strong>Overview:</strong> The Strands ETL Orchestrator (<code>etl_orchestrator.py</code>) is a config-driven, end-to-end data pipeline framework that automates S3 stale folder detection, AWS Glue job triggering, post-load data quality validations via Athena, cross-table comparison checks, summary analytics with chart generation, audit logging, and HTML email dashboard reporting. It supports three run modes: <code>full_pipeline</code>, <code>validation_only</code>, and <code>summary</code>.
+</div>
+
+<!-- ===== TABLE OF CONTENTS ===== -->
+<div class="toc">
+  <h2>Table of Contents</h2>
+  <ul>
+    <li><a href="#arch">1. System Architecture Diagram</a></li>
+    <li><a href="#dataflow">2. Data Flow: Source to Mart</a></li>
+    <li><a href="#runmodes">3. Run Modes</a></li>
+    <li><a href="#phase1">4. Phase 1: S3 Stale Folder Detection</a></li>
+    <li><a href="#phase2">5. Phase 2: Glue Job Triggering</a></li>
+    <li><a href="#phase3">6. Phase 3: Post-Load Validations (Athena)</a></li>
+    <li><a href="#comparisons">7. Cross-Query Comparison Checks</a></li>
+    <li><a href="#summary">8. Summary Mode &amp; Chart Generation</a></li>
+    <li><a href="#audit">9. Audit Logging Architecture</a></li>
+    <li><a href="#dashboard">10. Dashboard HTML Email</a></li>
+    <li><a href="#config">11. Configuration Reference</a></li>
+    <li><a href="#queries">12. Validation Queries &amp; Check Types</a></li>
+    <li><a href="#s3layout">13. S3 Bucket Layout</a></li>
+    <li><a href="#troubleshoot">14. Troubleshooting Guide</a></li>
+  </ul>
+</div>
+
+<!-- ===== 1. ARCHITECTURE DIAGRAM ===== -->
+<h2 id="arch">1. System Architecture Diagram</h2>
+
+<div class="arch-diagram">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" style="width:100%;max-width:1100px;">
+  <defs>
+    <linearGradient id="gBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0052cc"/><stop offset="100%" style="stop-color:#2684ff"/>
+    </linearGradient>
+    <linearGradient id="gGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00875a"/><stop offset="100%" style="stop-color:#36b37e"/>
+    </linearGradient>
+    <linearGradient id="gOrange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff8b00"/><stop offset="100%" style="stop-color:#ffab00"/>
+    </linearGradient>
+    <linearGradient id="gPurple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6554c0"/><stop offset="100%" style="stop-color:#8777d9"/>
+    </linearGradient>
+    <linearGradient id="gRed" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#de350b"/><stop offset="100%" style="stop-color:#ff5630"/>
+    </linearGradient>
+    <linearGradient id="gTeal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00b8d9"/><stop offset="100%" style="stop-color:#4fc3f7"/>
+    </linearGradient>
+    <linearGradient id="gPink" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e91e63"/><stop offset="100%" style="stop-color:#f48fb1"/>
+    </linearGradient>
+    <filter id="shadow"><feDropShadow dx="2" dy="3" stdDeviation="4" flood-opacity="0.15"/></filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#0052cc"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#00875a"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ff8b00"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6554c0"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="720" rx="12" fill="#f8f9ff" stroke="#dfe1e6" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="550" y="35" text-anchor="middle" font-size="20" font-weight="bold" fill="#172b4d">Strands ETL Orchestrator - System Architecture</text>
+
+  <!-- CONFIG BOX -->
+  <rect x="20" y="55" width="160" height="60" rx="10" fill="url(#gPurple)" filter="url(#shadow)"/>
+  <text x="100" y="82" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Config JSON</text>
+  <text x="100" y="100" text-anchor="middle" fill="#e0d6ff" font-size="10">S3 or Local Path</text>
+
+  <!-- ORCHESTRATOR MAIN BOX -->
+  <rect x="230" y="55" width="640" height="60" rx="12" fill="url(#gBlue)" filter="url(#shadow)"/>
+  <text x="550" y="80" text-anchor="middle" fill="white" font-size="16" font-weight="bold">ETL Orchestrator Engine</text>
+  <text x="550" y="100" text-anchor="middle" fill="#b3d4ff" font-size="11">etl_orchestrator.py | Run Modes: full_pipeline | validation_only | summary</text>
+
+  <!-- Arrow: Config -> Orchestrator -->
+  <line x1="180" y1="85" x2="228" y2="85" stroke="#6554c0" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- ========== PHASE 1: S3 STALE DETECTION ========== -->
+  <rect x="20" y="145" width="250" height="160" rx="10" fill="white" stroke="#ff8b00" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="20" y="145" width="250" height="32" rx="10" fill="url(#gOrange)"/>
+  <text x="145" y="166" text-anchor="middle" fill="white" font-size="13" font-weight="bold">Phase 1: S3 Stale Detection</text>
+
+  <text x="35" y="198" fill="#42526e" font-size="11">1. List S3 subfolders under prefix</text>
+  <text x="35" y="216" fill="#42526e" font-size="11">2. Check subfolder age (hours)</text>
+  <text x="35" y="234" fill="#42526e" font-size="11">3. Compare vs count threshold</text>
+  <text x="35" y="252" fill="#42526e" font-size="11">4. Classify: OK | Stale | Check Source</text>
+  <text x="35" y="280" fill="#ff8b00" font-size="10" font-weight="bold">Thresholds: count=3, age=3h, no-sub=5h</text>
+
+  <!-- S3 Bucket icon -->
+  <rect x="920" y="145" width="160" height="80" rx="10" fill="url(#gOrange)" filter="url(#shadow)"/>
+  <text x="1000" y="178" text-anchor="middle" fill="white" font-size="12" font-weight="bold">S3 Landing</text>
+  <text x="1000" y="198" text-anchor="middle" fill="#ffe0b2" font-size="10">CSV Subfolders</text>
+
+  <!-- Arrow Phase 1 -> S3 -->
+  <line x1="270" y1="185" x2="918" y2="185" stroke="#ff8b00" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrowOrange)"/>
+  <text x="590" y="178" text-anchor="middle" fill="#ff8b00" font-size="10" font-weight="bold">list_subfolders() + check_staleness()</text>
+
+  <!-- ========== PHASE 2: GLUE JOB TRIGGER ========== -->
+  <rect x="300" y="145" width="280" height="160" rx="10" fill="white" stroke="#de350b" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="300" y="145" width="280" height="32" rx="10" fill="url(#gRed)"/>
+  <text x="440" y="166" text-anchor="middle" fill="white" font-size="13" font-weight="bold">Phase 2: Glue Job Trigger</text>
+
+  <text x="315" y="198" fill="#42526e" font-size="11">1. For each stale source:</text>
+  <text x="325" y="216" fill="#42526e" font-size="11">- Pass stale subfolder list</text>
+  <text x="325" y="234" fill="#42526e" font-size="11">- Start Glue job (boto3)</text>
+  <text x="325" y="252" fill="#42526e" font-size="11">- Poll every 30s until terminal</text>
+  <text x="315" y="272" fill="#42526e" font-size="11">2. Workers: G.1X/G.2X configurable</text>
+  <text x="315" y="290" fill="#de350b" font-size="10" font-weight="bold">trigger_glue.py: CSV -> Iceberg Tables</text>
+
+  <!-- AWS Glue icon -->
+  <rect x="920" y="245" width="160" height="80" rx="10" fill="url(#gRed)" filter="url(#shadow)"/>
+  <text x="1000" y="278" text-anchor="middle" fill="white" font-size="12" font-weight="bold">AWS Glue</text>
+  <text x="1000" y="298" text-anchor="middle" fill="#ffcdd2" font-size="10">PySpark + Iceberg</text>
+
+  <!-- Arrow Phase 2 -> Glue -->
+  <line x1="580" y1="275" x2="918" y2="275" stroke="#de350b" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="750" y="268" text-anchor="middle" fill="#de350b" font-size="10" font-weight="bold">start_job_run() + get_job_run()</text>
+
+  <!-- ========== PHASE 3: VALIDATIONS ========== -->
+  <rect x="610" y="145" width="280" height="160" rx="10" fill="white" stroke="#00875a" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="610" y="145" width="280" height="32" rx="10" fill="url(#gGreen)"/>
+  <text x="750" y="166" text-anchor="middle" fill="white" font-size="13" font-weight="bold">Phase 3: Validations</text>
+
+  <text x="625" y="198" fill="#42526e" font-size="11">Single-Query Checks:</text>
+  <text x="635" y="216" fill="#42526e" font-size="11">- row_count, no_rows, threshold</text>
+  <text x="635" y="234" fill="#42526e" font-size="11">- rolling_average, source_recon</text>
+  <text x="625" y="255" fill="#42526e" font-size="11">Cross-Query Comparisons:</text>
+  <text x="635" y="273" fill="#42526e" font-size="11">- match, percentage_within, data_diff</text>
+  <text x="625" y="293" fill="#00875a" font-size="10" font-weight="bold">Parallel execution (max 5 threads)</text>
+
+  <!-- Athena icon -->
+  <rect x="920" y="345" width="160" height="80" rx="10" fill="url(#gTeal)" filter="url(#shadow)"/>
+  <text x="1000" y="378" text-anchor="middle" fill="white" font-size="12" font-weight="bold">AWS Athena</text>
+  <text x="1000" y="398" text-anchor="middle" fill="#b2ebf2" font-size="10">.00/TB scanned</text>
+
+  <!-- Arrow Phase 3 -> Athena -->
+  <line x1="890" y1="260" x2="960" y2="343" stroke="#00875a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- ========== DATA LAYERS (Bottom) ========== -->
+  <!-- Landing -->
+  <rect x="20" y="340" width="155" height="70" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="97" y="370" text-anchor="middle" fill="#1565c0" font-size="13" font-weight="bold">Landing</text>
+  <text x="97" y="390" text-anchor="middle" fill="#42526e" font-size="10">Iceberg Tables (S3)</text>
+
+  <!-- Staging -->
+  <rect x="195" y="340" width="155" height="70" rx="10" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="272" y="370" text-anchor="middle" fill="#2e7d32" font-size="13" font-weight="bold">Staging</text>
+  <text x="272" y="390" text-anchor="middle" fill="#42526e" font-size="10">staging_db (Athena)</text>
+
+  <!-- Curated -->
+  <rect x="370" y="340" width="155" height="70" rx="10" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="447" y="370" text-anchor="middle" fill="#e65100" font-size="13" font-weight="bold">Curated</text>
+  <text x="447" y="390" text-anchor="middle" fill="#42526e" font-size="10">curated_db (Athena)</text>
+
+  <!-- Mart -->
+  <rect x="545" y="340" width="155" height="70" rx="10" fill="#fce4ec" stroke="#c62828" stroke-width="2"/>
+  <text x="622" y="370" text-anchor="middle" fill="#c62828" font-size="13" font-weight="bold">Mart</text>
+  <text x="622" y="390" text-anchor="middle" fill="#42526e" font-size="10">aew_membership</text>
+
+  <!-- Arrows between layers -->
+  <line x1="175" y1="375" x2="193" y2="375" stroke="#0052cc" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <line x1="350" y1="375" x2="368" y2="375" stroke="#0052cc" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <line x1="525" y1="375" x2="543" y2="375" stroke="#0052cc" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Validation arrows pointing at layers -->
+  <line x1="97" y1="340" x2="97" y2="310" stroke="#00875a" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="272" y1="340" x2="272" y2="310" stroke="#00875a" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="447" y1="340" x2="447" y2="310" stroke="#00875a" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="280" y="325" text-anchor="middle" fill="#00875a" font-size="9" font-weight="bold">Validations run against each layer</text>
+
+  <!-- ========== AUDIT + EMAIL (Bottom Section) ========== -->
+  <!-- Audit -->
+  <rect x="20" y="440" width="340" height="100" rx="10" fill="white" stroke="#6554c0" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="20" y="440" width="340" height="30" rx="10" fill="url(#gPurple)"/>
+  <text x="190" y="460" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Audit Logging (S3 + Athena)</text>
+
+  <text x="35" y="490" fill="#42526e" font-size="11">Table: audit_db.etl_orchestrator_audit</text>
+  <text x="35" y="508" fill="#42526e" font-size="11">Format: Pipe-delimited CSV | Partition: run_date</text>
+  <text x="35" y="526" fill="#42526e" font-size="11">Events: STALE_CHECK | GLUE_TRIGGER | VALIDATION | COMPARISON</text>
+
+  <!-- Email Dashboard -->
+  <rect x="390" y="440" width="340" height="100" rx="10" fill="white" stroke="#e91e63" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="390" y="440" width="340" height="30" rx="10" fill="url(#gPink)"/>
+  <text x="560" y="460" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Dashboard HTML Email</text>
+
+  <text x="405" y="490" fill="#42526e" font-size="11">KPI Scorecard: Pass/Fail/Warn counts</text>
+  <text x="405" y="508" fill="#42526e" font-size="11">Validation tables + Comparison details</text>
+  <text x="405" y="526" fill="#42526e" font-size="11">Charts (matplotlib/HTML) + Cost tracking</text>
+
+  <!-- Summary -->
+  <rect x="760" y="440" width="320" height="100" rx="10" fill="white" stroke="#00b8d9" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="760" y="440" width="320" height="30" rx="10" fill="url(#gTeal)"/>
+  <text x="920" y="460" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Summary Mode + Charts</text>
+
+  <text x="775" y="490" fill="#42526e" font-size="11">Parallel Athena queries (bar, pie, trend)</text>
+  <text x="775" y="508" fill="#42526e" font-size="11">Chart generation: matplotlib -> base64 PNG</text>
+  <text x="775" y="526" fill="#42526e" font-size="11">HTML fallback for email clients</text>
+
+  <!-- Arrows from orchestrator to bottom sections -->
+  <line x1="380" y1="115" x2="145" y2="145" stroke="#ff8b00" stroke-width="2" marker-end="url(#arrowOrange)"/>
+  <line x1="550" y1="115" x2="440" y2="145" stroke="#de350b" stroke-width="2"/>
+  <line x1="700" y1="115" x2="750" y2="145" stroke="#00875a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Arrows to audit + email -->
+  <path d="M 550 115 L 550 130 L 190 130 L 190 438" fill="none" stroke="#6554c0" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowPurple)"/>
+  <path d="M 550 115 L 550 130 L 560 130 L 560 438" fill="none" stroke="#e91e63" stroke-width="1.5" stroke-dasharray="5,3"/>
+
+  <!-- Legend -->
+  <rect x="20" y="565" width="1060" height="145" rx="10" fill="#f8f9ff" stroke="#dfe1e6" stroke-width="1"/>
+  <text x="40" y="590" fill="#172b4d" font-size="13" font-weight="bold">Legend &amp; Status Values</text>
+
+  <rect x="40" y="605" width="14" height="14" rx="3" fill="#00875a"/>
+  <text x="60" y="617" fill="#42526e" font-size="11">PASS / OK - Check passed</text>
+
+  <rect x="220" y="605" width="14" height="14" rx="3" fill="#de350b"/>
+  <text x="240" y="617" fill="#42526e" font-size="11">FAIL - Check failed</text>
+
+  <rect x="380" y="605" width="14" height="14" rx="3" fill="#ff8b00"/>
+  <text x="400" y="617" fill="#42526e" font-size="11">WARN / Stale - Warning</text>
+
+  <rect x="570" y="605" width="14" height="14" rx="3" fill="#6c757d"/>
+  <text x="590" y="617" fill="#42526e" font-size="11">SKIPPED / ABORTED / NOT_EXECUTED</text>
+
+  <rect x="820" y="605" width="14" height="14" rx="3" fill="#fd7e14"/>
+  <text x="840" y="617" fill="#42526e" font-size="11">Check with Source</text>
+
+  <text x="40" y="648" fill="#42526e" font-size="11"><tspan font-weight="bold">AWS Services:</tspan> S3 (Data Lake) | Glue (ETL Jobs) | Athena (SQL Queries @ /TB) | SMTP (Email Delivery)</text>
+  <text x="40" y="668" fill="#42526e" font-size="11"><tspan font-weight="bold">Data Layers:</tspan> Landing (Iceberg) -> Staging (staging_db) -> Curated (curated_db) -> Mart (aew_membership, analytics_db)</text>
+  <text x="40" y="688" fill="#42526e" font-size="11"><tspan font-weight="bold">Key Features:</tspan> Parallel validation (5 threads) | Athena retry logic | Cost tracking per query | Rolling average anomaly detection | Row-level data_diff</text>
+  <text x="40" y="698" fill="#42526e" font-size="11"><tspan font-weight="bold">Config:</tspan> orchestrator_config.json (S3 or local) | abort_on_failure controls pipeline halt</text>
+</svg>
+</div>
+
+<!-- ===== 2. DATA FLOW DIAGRAM ===== -->
+<h2 id="dataflow">2. Data Flow: Source to Mart</h2>
+
+<div class="arch-diagram">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 380" style="width:100%;max-width:1100px;">
+  <defs>
+    <linearGradient id="df1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+    <linearGradient id="df2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f093fb"/><stop offset="100%" style="stop-color:#f5576c"/>
+    </linearGradient>
+    <linearGradient id="df3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4facfe"/><stop offset="100%" style="stop-color:#00f2fe"/>
+    </linearGradient>
+    <linearGradient id="df4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#43e97b"/><stop offset="100%" style="stop-color:#38f9d7"/>
+    </linearGradient>
+    <linearGradient id="df5" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#fa709a"/><stop offset="100%" style="stop-color:#fee140"/>
+    </linearGradient>
+    <linearGradient id="df6" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a18cd1"/><stop offset="100%" style="stop-color:#fbc2eb"/>
+    </linearGradient>
+    <filter id="dfShadow"><feDropShadow dx="1" dy="2" stdDeviation="3" flood-opacity="0.12"/></filter>
+    <marker id="dfArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#5c6bc0"/>
+    </marker>
+    <marker id="dfArrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#00875a"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="380" rx="12" fill="#fafbfe" stroke="#e0e3ea" stroke-width="1"/>
+  <text x="550" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#172b4d">Data Flow: Source System to Analytics Mart</text>
+
+  <!-- Source System -->
+  <rect x="20" y="55" width="140" height="90" rx="12" fill="url(#df1)" filter="url(#dfShadow)"/>
+  <text x="90" y="90" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Source System</text>
+  <text x="90" y="110" text-anchor="middle" fill="#e0d6ff" font-size="10">CSV / Redshift</text>
+  <text x="90" y="126" text-anchor="middle" fill="#e0d6ff" font-size="10">MACP + MRD</text>
+
+  <!-- Arrow -->
+  <line x1="160" y1="100" x2="190" y2="100" stroke="#5c6bc0" stroke-width="2.5" marker-end="url(#dfArrow)"/>
+
+  <!-- S3 Landing -->
+  <rect x="195" y="55" width="140" height="90" rx="12" fill="url(#df2)" filter="url(#dfShadow)"/>
+  <text x="265" y="85" text-anchor="middle" fill="white" font-size="12" font-weight="bold">S3 Landing</text>
+  <text x="265" y="103" text-anchor="middle" fill="#ffe0e6" font-size="10">CSV Subfolders</text>
+  <text x="265" y="119" text-anchor="middle" fill="#ffe0e6" font-size="10">Stale Detection</text>
+  <text x="265" y="135" text-anchor="middle" fill="#ffe0e6" font-size="9">(3h age / 3 count)</text>
+
+  <!-- Arrow -->
+  <line x1="335" y1="100" x2="365" y2="100" stroke="#5c6bc0" stroke-width="2.5" marker-end="url(#dfArrow)"/>
+  <text x="350" y="90" text-anchor="middle" fill="#5c6bc0" font-size="9" font-weight="bold">Glue</text>
+
+  <!-- Landing Iceberg -->
+  <rect x="370" y="55" width="140" height="90" rx="12" fill="url(#df3)" filter="url(#dfShadow)"/>
+  <text x="440" y="85" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Landing DB</text>
+  <text x="440" y="103" text-anchor="middle" fill="#e0f7fa" font-size="10">Iceberg Tables</text>
+  <text x="440" y="119" text-anchor="middle" fill="#e0f7fa" font-size="10">landing_db.*</text>
+  <text x="440" y="135" text-anchor="middle" fill="#e0f7fa" font-size="9">Row count + DQ</text>
+
+  <!-- Arrow -->
+  <line x1="510" y1="100" x2="540" y2="100" stroke="#5c6bc0" stroke-width="2.5" marker-end="url(#dfArrow)"/>
+
+  <!-- Staging -->
+  <rect x="545" y="55" width="140" height="90" rx="12" fill="url(#df4)" filter="url(#dfShadow)"/>
+  <text x="615" y="85" text-anchor="middle" fill="#1b5e20" font-size="12" font-weight="bold">Staging DB</text>
+  <text x="615" y="103" text-anchor="middle" fill="#1b5e20" font-size="10">staging_db.*</text>
+  <text x="615" y="119" text-anchor="middle" fill="#1b5e20" font-size="10">Reconciliation</text>
+  <text x="615" y="135" text-anchor="middle" fill="#1b5e20" font-size="9">vs Landing checks</text>
+
+  <!-- Arrow -->
+  <line x1="685" y1="100" x2="715" y2="100" stroke="#5c6bc0" stroke-width="2.5" marker-end="url(#dfArrow)"/>
+
+  <!-- Curated -->
+  <rect x="720" y="55" width="140" height="90" rx="12" fill="url(#df5)" filter="url(#dfShadow)"/>
+  <text x="790" y="85" text-anchor="middle" fill="#b71c1c" font-size="12" font-weight="bold">Curated DB</text>
+  <text x="790" y="103" text-anchor="middle" fill="#4a0000" font-size="10">curated_db.*</text>
+  <text x="790" y="119" text-anchor="middle" fill="#4a0000" font-size="10">Business Logic</text>
+  <text x="790" y="135" text-anchor="middle" fill="#4a0000" font-size="9">% tolerance checks</text>
+
+  <!-- Arrow -->
+  <line x1="860" y1="100" x2="890" y2="100" stroke="#5c6bc0" stroke-width="2.5" marker-end="url(#dfArrow)"/>
+
+  <!-- Mart -->
+  <rect x="895" y="55" width="180" height="90" rx="12" fill="url(#df6)" filter="url(#dfShadow)"/>
+  <text x="985" y="85" text-anchor="middle" fill="#4a148c" font-size="12" font-weight="bold">Analytics Mart</text>
+  <text x="985" y="103" text-anchor="middle" fill="#4a148c" font-size="10">aew_membership</text>
+  <text x="985" y="119" text-anchor="middle" fill="#4a148c" font-size="10">analytics_db</text>
+  <text x="985" y="135" text-anchor="middle" fill="#4a148c" font-size="9">KPIs + Dashboards</text>
+
+  <!-- Validation Layer (below) -->
+  <rect x="195" y="175" width="705" height="55" rx="10" fill="#e8f5e9" stroke="#00875a" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="547" y="200" text-anchor="middle" fill="#00875a" font-size="13" font-weight="bold">Validation Layer: row_count | no_rows | threshold | rolling_average | source_reconciliation | comparison | data_diff</text>
+  <text x="547" y="218" text-anchor="middle" fill="#2e7d32" font-size="11">Athena queries executed in parallel (max 5) with retry logic | Cost: $5/TB scanned | abort_on_failure controls</text>
+
+  <!-- Validation arrows from layer to boxes -->
+  <line x1="265" y1="145" x2="265" y2="173" stroke="#00875a" stroke-width="1.5" marker-end="url(#dfArrowGreen)"/>
+  <line x1="440" y1="145" x2="440" y2="173" stroke="#00875a" stroke-width="1.5" marker-end="url(#dfArrowGreen)"/>
+  <line x1="615" y1="145" x2="615" y2="173" stroke="#00875a" stroke-width="1.5" marker-end="url(#dfArrowGreen)"/>
+  <line x1="790" y1="145" x2="790" y2="173" stroke="#00875a" stroke-width="1.5" marker-end="url(#dfArrowGreen)"/>
+
+  <!-- Audit + Email -->
+  <rect x="20" y="255" width="520" height="55" rx="10" fill="#ede7f6" stroke="#6554c0" stroke-width="2"/>
+  <text x="280" y="280" text-anchor="middle" fill="#4a148c" font-size="12" font-weight="bold">Audit: S3 pipe-delimited CSV (run_date partition) + MSCK REPAIR TABLE</text>
+  <text x="280" y="298" text-anchor="middle" fill="#6554c0" font-size="10">audit_db.etl_orchestrator_audit | Events: STALE_CHECK, GLUE_TRIGGER, VALIDATION, COMPARISON, SUMMARY_QUERY</text>
+
+  <rect x="560" y="255" width="520" height="55" rx="10" fill="#fce4ec" stroke="#e91e63" stroke-width="2"/>
+  <text x="820" y="280" text-anchor="middle" fill="#880e4f" font-size="12" font-weight="bold">Dashboard Email: KPI Scorecard + Charts + Cost Tracking</text>
+  <text x="820" y="298" text-anchor="middle" fill="#e91e63" font-size="10">SMTP (10.19.10.29:25) | matplotlib charts or HTML fallback | Vibrant color palette</text>
+
+  <!-- Source labels for monitored tables -->
+  <rect x="20" y="330" width="1060" height="40" rx="8" fill="#f5f5f5" stroke="#e0e0e0" stroke-width="1"/>
+  <text x="40" y="355" fill="#42526e" font-size="11"><tspan font-weight="bold">Monitored Sources:</tspan> MACP Address Table | MACP Customer Address | MACP Customer | MACP Cust Comm Pref Channel | MRD Member Info | MRD Member Product Detail</text>
+</svg>
+</div>
+
+<!-- ===== 3. RUN MODES ===== -->
+<h2 id="runmodes">3. Run Modes</h2>
+
+<div class="panel panel-info">
+  <strong>Usage:</strong> <code>python etl_orchestrator.py --config s3://bucket/path/orchestrator_config.json [--summary-config s3://bucket/summary_config.json]</code>
+</div>
+
+<table>
+<thead>
+<tr><th>Run Mode</th><th>Description</th><th>Phases Executed</th><th>When to Use</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>full_pipeline</code></td>
+  <td>Complete end-to-end orchestration</td>
+  <td>S3 Stale Detection &rarr; Glue Trigger &rarr; Validations &rarr; Comparisons &rarr; Audit &rarr; Email</td>
+  <td>Scheduled daily runs; new data landing from source systems</td>
+</tr>
+<tr>
+  <td><code>validation_only</code></td>
+  <td>Skip stale detection &amp; Glue, run validations directly</td>
+  <td>Validations &rarr; Comparisons &rarr; Audit &rarr; Email</td>
+  <td>Re-run validations after manual loads; spot-check data quality</td>
+</tr>
+<tr>
+  <td><code>summary</code></td>
+  <td>Parallel analytics queries with chart generation</td>
+  <td>Summary Queries + Charts &rarr; (optionally) Validations &rarr; Audit &rarr; Email</td>
+  <td>Generate dashboards &amp; reports; weekly/monthly summaries</td>
+</tr>
+</tbody>
+</table>
+
+<div class="panel panel-warning">
+  <strong>Fallback Logic:</strong> If <code>run_mode=summary</code> but no summary queries are defined, the orchestrator falls back to <code>validation_only</code>. If no validations are defined either, it falls back to <code>full_pipeline</code>.
+</div>
+
+<!-- ===== 4. PHASE 1: S3 STALE DETECTION ===== -->
+<h2 id="phase1">4. Phase 1: S3 Stale Folder Detection</h2>
+
+<p>The orchestrator monitors configured S3 prefixes for stale data subfolders. Source systems (MACP, MRD) drop CSV files into timestamped subfolders under each prefix. The staleness check determines whether data needs processing.</p>
+
+<h3>4.1 Staleness Algorithm</h3>
+
+<table>
+<thead>
+<tr><th>Condition</th><th>Result Status</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td>Subfolder count &gt; <code>stale_subfolder_count_threshold</code> (default: 3)</td><td><span class="badge badge-red">Stale</span></td><td>Process ALL subfolders via Glue</td></tr>
+<tr><td>Any subfolder age &gt; <code>stale_subfolder_hours_threshold</code> (default: 3h)</td><td><span class="badge badge-red">Stale</span></td><td>Process only stale subfolders via Glue</td></tr>
+<tr><td>No subfolders &amp; last update &gt; <code>no_subfolder_hours_threshold</code> (default: 5h)</td><td><span class="badge badge-orange">Check with Source</span></td><td>Log warning, skip Glue</td></tr>
+<tr><td>No objects found under prefix</td><td><span class="badge badge-orange">Check with Source</span></td><td>Log warning, skip Glue</td></tr>
+<tr><td>Everything within thresholds</td><td><span class="badge badge-green">OK</span></td><td>No action needed</td></tr>
+</tbody>
+</table>
+
+<h3>4.2 Key Functions</h3>
+
+<table>
+<thead>
+<tr><th>Function</th><th>Purpose</th><th>Returns</th></tr>
+</thead>
+<tbody>
+<tr><td><code>list_subfolders(bucket, prefix)</code></td><td>List all subfolders under an S3 prefix with their latest modified timestamps</td><td>List of <code>{prefix, latest_modified}</code></td></tr>
+<tr><td><code>_get_latest_modified(bucket, prefix)</code></td><td>Paginate S3 objects to find the most recent <code>LastModified</code> datetime</td><td><code>datetime</code> or <code>None</code></td></tr>
+<tr><td><code>check_staleness(source, defaults)</code></td><td>Evaluate a single monitored source against thresholds</td><td>Result dict with status, stale_subfolders list, detail</td></tr>
+</tbody>
+</table>
+
+<h3>4.3 Monitored Sources (from config)</h3>
+
+<table>
+<thead>
+<tr><th>#</th><th>Label</th><th>S3 Prefix</th><th>Workers</th><th>Worker Type</th><th>Timeout</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>MACP Address Table</td><td><code>landing/MACP.Mac_ADDRESS_TB__ct/</code></td><td>10</td><td>G.1X</td><td>120 min</td></tr>
+<tr><td>2</td><td>MACP Customer Address</td><td><code>landing/MACP.Mac_CUST_ADDRESS__ct/</code></td><td>10</td><td>G.1X</td><td>120 min</td></tr>
+<tr><td>3</td><td>MACP Customer</td><td><code>landing/MACP.Mac_CUSTOMER__ct/</code></td><td>15</td><td>G.2X</td><td>180 min</td></tr>
+<tr><td>4</td><td>MACP Cust Comm Pref Channel</td><td><code>landing/MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/</code></td><td>10</td><td>G.1X</td><td>120 min</td></tr>
+<tr><td>5</td><td>MRD Member Info</td><td><code>landing/MRDP.MRD_MBR_INFO__ct/</code></td><td>20</td><td>G.2X</td><td>180 min</td></tr>
+<tr><td>6</td><td>MRD Member Product Detail</td><td><code>landing/MRDP.MRD_MBR_PRD_DTL__ct/</code></td><td>20</td><td>G.2X</td><td>180 min</td></tr>
+</tbody>
+</table>
+
+<!-- ===== 5. PHASE 2: GLUE JOB TRIGGER ===== -->
+<h2 id="phase2">5. Phase 2: Glue Job Triggering</h2>
+
+<p>For each source classified as <span class="badge badge-red">Stale</span>, the orchestrator triggers an AWS Glue job to process the stale CSV subfolders into Iceberg tables.</p>
+
+<h3>5.1 Glue Job Flow</h3>
+
+<table>
+<thead>
+<tr><th>Step</th><th>Action</th><th>Detail</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Build arguments</td><td>Pass <code>--stale_folders</code> (comma-separated), <code>--json_file_name</code>, <code>--bucket_name</code>, <code>--archive_s3_path</code>, <code>--source_bucket</code>, <code>--orchestrator_run_id</code></td></tr>
+<tr><td>2</td><td>Start Glue job</td><td><code>glue_client().start_job_run(JobName, Arguments, WorkerType, NumberOfWorkers, Timeout)</code></td></tr>
+<tr><td>3</td><td>Poll for completion</td><td>Check status every 30 seconds until terminal state: SUCCEEDED, FAILED, STOPPED, TIMEOUT, ERROR</td></tr>
+<tr><td>4</td><td>Record result</td><td>Log job_name, job_run_id, status (PASS/FAIL), duration_seconds</td></tr>
+</tbody>
+</table>
+
+<h3>5.2 trigger_glue.py (Glue Script)</h3>
+
+<p>The Glue job script (<code>trigger_glue.py</code>) processes CSV files from S3 into Iceberg tables:</p>
+
+<table>
+<thead>
+<tr><th>Step</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Read config JSON from S3 (schema, database, table name)</td></tr>
+<tr><td>2</td><td>If stale_folders provided: only read CSVs from those subfolders</td></tr>
+<tr><td>3</td><td>Lowercase all column names, cast to target dtypes</td></tr>
+<tr><td>4</td><td>Add processing indicators (<code>hourly_processed_ind</code>, <code>daily_processed_ind</code>) + timestamps (PST/UTC)</td></tr>
+<tr><td>5</td><td>INSERT INTO <code>glue_catalog.{database}.{table_name}</code> (Iceberg)</td></tr>
+<tr><td>6</td><td>Archive processed files, delete stale subfolders</td></tr>
+</tbody>
+</table>
+
+<h3>5.3 Worker Type Cost Reference</h3>
+
+<table>
+<thead>
+<tr><th>Worker Type</th><th>DPU/Worker</th><th>10 Workers x 1h Cost</th><th>20 Workers x 1h Cost</th></tr>
+</thead>
+<tbody>
+<tr><td>G.1X</td><td>1 DPU</td><td>$4.40</td><td>$8.80</td></tr>
+<tr><td>G.2X</td><td>2 DPU</td><td>$8.80</td><td>$17.60</td></tr>
+<tr><td>G.4X</td><td>4 DPU</td><td>$17.60</td><td>$35.20</td></tr>
+<tr><td>G.8X</td><td>8 DPU</td><td>$35.20</td><td>$70.40</td></tr>
+</tbody>
+</table>
+<p style="color:#666;font-size:12px;">Cost formula: <code>(DPU_seconds / 3600) x $0.44</code></p>
+
+<!-- ===== 6. PHASE 3: VALIDATIONS ===== -->
+<h2 id="phase3">6. Phase 3: Post-Load Validations (Athena)</h2>
+
+<p>After Glue loads complete, the orchestrator runs Athena queries to validate data quality across all layers. Validations can run in <strong>parallel</strong> (up to 5 threads) or <strong>sequentially</strong>.</p>
+
+<h3>6.1 Single-Query Validation Check Types</h3>
+
+<table>
+<thead>
+<tr><th>Check Type</th><th>Purpose</th><th>Condition Example</th><th>Fail Behavior</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>row_count</code></td>
+  <td>Verify rows were loaded</td>
+  <td><code>cnt &gt; 0</code></td>
+  <td>FAIL if count is zero; abort_on_failure: true</td>
+</tr>
+<tr>
+  <td><code>no_rows</code></td>
+  <td>Ensure no unwanted rows (e.g., duplicates)</td>
+  <td><code>row_count == 0</code></td>
+  <td>FAIL if rows found (duplicates detected)</td>
+</tr>
+<tr>
+  <td><code>threshold</code></td>
+  <td>Numeric condition check (nulls, freshness, etc.)</td>
+  <td><code>null_cnt == 0</code>, <code>hours_since &lt; 24</code></td>
+  <td>FAIL if threshold breached</td>
+</tr>
+<tr>
+  <td><code>rolling_average</code></td>
+  <td>Anomaly detection vs N-day baseline</td>
+  <td><code>|variance_pct| &lt;= tolerance</code></td>
+  <td>FAIL/WARN if variance exceeds tolerance %</td>
+</tr>
+<tr>
+  <td><code>source_reconciliation</code></td>
+  <td>Compare source vs target counts per table</td>
+  <td><code>|src - tgt| &lt; deviation_threshold</code></td>
+  <td>FAIL if deviations found; lists all deviating rows</td>
+</tr>
+</tbody>
+</table>
+
+<h3>6.2 Configured Validation Queries</h3>
+
+<table>
+<thead>
+<tr><th>#</th><th>Name</th><th>Check Type</th><th>Database</th><th>Abort on Failure</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>landing_row_count_check</code></td><td>row_count</td><td>landing_db</td><td><span class="status-dot status-fail"></span>Yes</td><td>Verify rows loaded into landing table (cnt &gt; 0)</td></tr>
+<tr><td>2</td><td><code>duplicate_check</code></td><td>no_rows</td><td>landing_db</td><td><span class="status-dot status-fail"></span>Yes</td><td>Check for duplicate primary keys (row_count == 0)</td></tr>
+<tr><td>3</td><td><code>null_key_check</code></td><td>threshold</td><td>landing_db</td><td><span class="status-dot status-fail"></span>Yes</td><td>Verify no NULL primary keys (null_cnt == 0)</td></tr>
+<tr><td>4</td><td><code>freshness_check</code></td><td>threshold</td><td>landing_db</td><td><span class="status-dot status-warn"></span>No</td><td>Verify data within 24h (hours_since &lt; 24)</td></tr>
+</tbody>
+</table>
+
+<h3>6.3 Athena Query Execution with Retry</h3>
+
+<pre><code># Retry logic (1 retry on failure)
+result = _run_athena_query_once(query, database, output_location, workgroup)
+if result["state"] != "SUCCEEDED" and ATHENA_RETRY_ATTEMPTS > 0:
+    time.sleep(3)
+    retry_result = _run_athena_query_once(...)
+    retry_result["cost_usd"] += result["cost_usd"]  # accumulate cost from both attempts
+    return retry_result
+return result
+
+# Cost tracking per query
+data_scanned_bytes = stats.get("DataScannedInBytes", 0)
+cost_usd = (data_scanned_bytes / (1024**4)) * 5.00  # $5.00 per TB</code></pre>
+
+<h3>6.4 Rolling Average Check Detail</h3>
+
+<p>The <code>rolling_average</code> check type compares today's count against an N-day rolling average baseline:</p>
+
+<table>
+<thead>
+<tr><th>Field</th><th>Source</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>today_cnt</code></td><td>Query result column</td><td>Current day's record count</td></tr>
+<tr><td><code>baseline_cnt</code></td><td>Query result column (avg_Nday_cnt)</td><td>N-day rolling average baseline</td></tr>
+<tr><td><code>variance_pct</code></td><td>Calculated or from query</td><td><code>|today - baseline| / baseline * 100</code></td></tr>
+<tr><td><code>tolerance</code></td><td>Config (default: 25%)</td><td>Maximum allowed variance percentage</td></tr>
+<tr><td><code>window_start/end</code></td><td>Query result</td><td>Baseline calculation window</td></tr>
+</tbody>
+</table>
+
+<div class="panel panel-success">
+  <strong>Dashboard Rendering:</strong> Rolling average checks get dedicated visual cards in the email dashboard, showing today vs baseline values with a variance gauge bar (green/orange/red based on proximity to tolerance).
+</div>
+
+<!-- ===== 7. COMPARISON CHECKS ===== -->
+<h2 id="comparisons">7. Cross-Query Comparison Checks</h2>
+
+<p>Comparison checks run <strong>two separate Athena queries</strong> (Query A + Query B) and compare their results using configurable rules.</p>
+
+<h3>7.1 Comparison Rules</h3>
+
+<table>
+<thead>
+<tr><th>Rule</th><th>Logic</th><th>Use Case</th></tr>
+</thead>
+<tbody>
+<tr><td><code>match</code></td><td><code>A == B</code></td><td>Exact row count match between landing and staging</td></tr>
+<tr><td><code>percentage_within</code></td><td><code>|A-B|/max(|A|,|B|) * 100 &lt;= tolerance%</code></td><td>Row counts within 5% between landing and curated</td></tr>
+<tr><td><code>difference_within</code></td><td><code>|A - B| &lt;= tolerance</code></td><td>Absolute count difference check</td></tr>
+<tr><td><code>a_not_zero</code></td><td><code>A != 0</code></td><td>Verify non-empty landing load</td></tr>
+<tr><td><code>a_greater_than_b</code></td><td><code>A &gt; B</code></td><td>Landing should have more rows than filtered curated</td></tr>
+<tr><td><code>data_diff</code></td><td>Row-level delta comparison</td><td>Find missing, extra, and changed records between source &amp; target</td></tr>
+<tr><td><code>custom</code></td><td>User-provided Python expression</td><td>Complex business logic comparisons</td></tr>
+</tbody>
+</table>
+
+<h3>7.2 Configured Comparison Checks</h3>
+
+<table>
+<thead>
+<tr><th>#</th><th>Name</th><th>Query A</th><th>Query B</th><th>Rule</th><th>Abort</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>landing_vs_source_row_count</code></td><td>Landing Table (landing_db)</td><td>Source Staging (staging_db)</td><td>match</td><td>Yes</td></tr>
+<tr><td>2</td><td><code>member_info_count_tolerance</code></td><td>Landing (landing_db)</td><td>Curated (curated_db)</td><td>percentage_within (5%)</td><td>No</td></tr>
+<tr><td>3</td><td><code>customer_non_zero_check</code></td><td>Customer Landing (landing_db)</td><td>Baseline (0)</td><td>a_not_zero</td><td>Yes</td></tr>
+<tr><td>4</td><td><code>delta_membership_diff</code></td><td>Source Delta (landing_db)</td><td>Target Delta (curated_db)</td><td>data_diff</td><td>No</td></tr>
+</tbody>
+</table>
+
+<h3>7.3 Data Diff (Row-Level Reconciliation)</h3>
+
+<p>The <code>data_diff</code> rule performs row-level comparison using composite keys:</p>
+
+<table>
+<thead>
+<tr><th>Config Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>key_columns</code></td><td>list[str]</td><td>Columns forming the composite key (e.g., <code>["membership_number"]</code>)</td></tr>
+<tr><td><code>compare_columns</code></td><td>list[str]</td><td>Non-key columns to check for value mismatches (e.g., <code>["member_name", "plan_code"]</code>)</td></tr>
+<tr><td><code>case_sensitive</code></td><td>bool</td><td>Case-sensitive key matching (default: true)</td></tr>
+<tr><td><code>max_diff_rows</code></td><td>int</td><td>Maximum rows reported per category (default: 100)</td></tr>
+<tr><td><code>ignore_duplicates</code></td><td>bool</td><td>De-duplicate keys before diff (default: false)</td></tr>
+</tbody>
+</table>
+
+<p><strong>Detection Categories:</strong></p>
+<ul>
+  <li><span class="status-dot status-fail"></span><strong>Only in A (Missing from Target):</strong> Keys present in source but not target</li>
+  <li><span class="status-dot status-warn"></span><strong>Only in B (Extra in Target):</strong> Keys present in target but not source</li>
+  <li><span class="status-dot status-fail"></span><strong>Value Mismatches:</strong> Same key, different column values (with per-column diff)</li>
+</ul>
+
+<!-- ===== 8. SUMMARY MODE ===== -->
+<h2 id="summary">8. Summary Mode &amp; Chart Generation</h2>
+
+<p>Summary mode runs analytics queries in parallel and generates charts for the email dashboard.</p>
+
+<h3>8.1 Configured Summary Queries</h3>
+
+<table>
+<thead>
+<tr><th>#</th><th>Name</th><th>Chart Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>daily_load_summary</code></td><td>Bar</td><td>Row counts loaded today per landing table (6 tables UNION ALL)</td></tr>
+<tr><td>2</td><td><code>source_distribution</code></td><td>Pie</td><td>Record distribution by source system (MACP vs MRD)</td></tr>
+<tr><td>3</td><td><code>weekly_load_trend</code></td><td>Trend</td><td>Daily row counts over the past 7 days</td></tr>
+</tbody>
+</table>
+
+<h3>8.2 Chart Generation</h3>
+
+<table>
+<thead>
+<tr><th>Chart Type</th><th>Library</th><th>Config Keys</th><th>Fallback</th></tr>
+</thead>
+<tbody>
+<tr><td>Bar (horizontal)</td><td>matplotlib</td><td><code>x_column</code>, <code>y_column</code>, <code>title</code></td><td>HTML table with CSS bars</td></tr>
+<tr><td>Pie</td><td>matplotlib</td><td><code>label_column</code>, <code>value_column</code>, <code>title</code></td><td>Text label (requires matplotlib)</td></tr>
+<tr><td>Trend (line)</td><td>matplotlib</td><td><code>x_column</code>, <code>y_column</code>, <code>title</code></td><td>Text label (requires matplotlib)</td></tr>
+</tbody>
+</table>
+
+<div class="panel panel-info">
+  <strong>Chart Encoding:</strong> Charts are rendered as base64 PNG images embedded directly in the HTML email (<code>data:image/png;base64,...</code>). If matplotlib is unavailable, bar charts fall back to pure HTML/CSS rendering. Color palette uses 15 vibrant colors with gradient fills and value labels on data points.
+</div>
+
+<!-- ===== 9. AUDIT LOGGING ===== -->
+<h2 id="audit">9. Audit Logging Architecture</h2>
+
+<h3>9.1 Audit Table Schema</h3>
+
+<div class="panel panel-info">
+  <strong>Table:</strong> <code>audit_db.etl_orchestrator_audit</code><br>
+  <strong>Format:</strong> Pipe-delimited CSV on S3<br>
+  <strong>Partition:</strong> <code>run_date</code> (YYYY-MM-DD)<br>
+  <strong>Location:</strong> <code>s3://strands-etl-audit/audit_logs/orchestrator/</code>
+</div>
+
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>run_id</code></td><td>STRING</td><td>Unique orchestrator run identifier (UUID hex[:12])</td></tr>
+<tr><td><code>event_timestamp</code></td><td>STRING</td><td>ISO-8601 UTC timestamp of the event</td></tr>
+<tr><td><code>event_type</code></td><td>STRING</td><td>STALE_CHECK | GLUE_TRIGGER | VALIDATION | COMPARISON | SUMMARY_QUERY</td></tr>
+<tr><td><code>source_label</code></td><td>STRING</td><td>Friendly name of the monitored source</td></tr>
+<tr><td><code>source_bucket</code></td><td>STRING</td><td>S3 bucket of the monitored source</td></tr>
+<tr><td><code>source_prefix</code></td><td>STRING</td><td>S3 prefix of the monitored source</td></tr>
+<tr><td><code>subfolder_count</code></td><td>STRING</td><td>Number of subfolders found</td></tr>
+<tr><td><code>status</code></td><td>STRING</td><td>OK | Stale | Check with Source | PASS | FAIL | WARN | NOT_EXECUTED | SKIPPED | ABORTED</td></tr>
+<tr><td><code>detail</code></td><td>STRING</td><td>Human-readable detail message</td></tr>
+<tr><td><code>glue_job_name</code></td><td>STRING</td><td>Triggered Glue job name</td></tr>
+<tr><td><code>glue_job_run_id</code></td><td>STRING</td><td>Glue job run ID</td></tr>
+<tr><td><code>glue_duration_sec</code></td><td>STRING</td><td>Glue job duration in seconds</td></tr>
+<tr><td><code>validation_name</code></td><td>STRING</td><td>Validation query name</td></tr>
+<tr><td><code>check_type</code></td><td>STRING</td><td>row_count | no_rows | threshold | rolling_average | source_reconciliation | comparison:*</td></tr>
+<tr><td><code>actual_value</code></td><td>STRING</td><td>Actual value returned by validation</td></tr>
+<tr><td><code>query</code></td><td>STRING</td><td>Athena SQL query executed</td></tr>
+<tr><td><code>cost_usd</code></td><td>STRING</td><td>Athena query cost ($5/TB scanned)</td></tr>
+<tr><td><code>failure_reason</code></td><td>STRING</td><td>Reason for failure or NOT_EXECUTED</td></tr>
+<tr><td><code>today_count</code></td><td>STRING</td><td>Rolling avg: current day count</td></tr>
+<tr><td><code>baseline_count</code></td><td>STRING</td><td>Rolling avg: N-day baseline average</td></tr>
+<tr><td><code>variance_pct</code></td><td>STRING</td><td>Rolling avg: % variance from baseline</td></tr>
+<tr><td><code>tolerance</code></td><td>STRING</td><td>Rolling avg: configured tolerance %</td></tr>
+<tr><td><code>window_start</code></td><td>STRING</td><td>Rolling avg: baseline window start</td></tr>
+<tr><td><code>window_end</code></td><td>STRING</td><td>Rolling avg: baseline window end</td></tr>
+<tr><td><code>overall_status</code></td><td>STRING</td><td>Pipeline status at time of logging</td></tr>
+</tbody>
+</table>
+
+<h3>9.2 Audit Write Process</h3>
+
+<pre><code># 1. Build audit records from all phases
+records = build_audit_records(run_id, run_date, stale_results, glue_results,
+                              validation_results, comparison_results,
+                              summary_results, overall_status)
+
+# 2. Write pipe-delimited CSV to S3
+# Path: s3://strands-etl-audit/audit_logs/orchestrator/run_date=YYYY-MM-DD/audit_{uuid}.csv
+write_audit_to_s3(records, audit_cfg, run_date)
+
+# 3. Run MSCK REPAIR TABLE to register new partition
+run_msck_repair(audit_cfg)</code></pre>
+
+<h3>9.3 Useful Audit Queries</h3>
+
+<pre><code>-- Latest run summary
+SELECT run_id, event_type, status, detail
+FROM   audit_db.etl_orchestrator_audit
+WHERE  run_date = cast(current_date AS varchar)
+ORDER  BY event_timestamp;
+
+-- Failure history (last 7 days)
+SELECT run_date, run_id, event_type, source_label, validation_name, status, detail
+FROM   audit_db.etl_orchestrator_audit
+WHERE  run_date >= cast(date_add('day', -7, current_date) AS varchar)
+  AND  status IN ('FAIL', 'ABORTED', 'Stale', 'Check with Source')
+ORDER  BY run_date DESC, event_timestamp;
+
+-- Cost breakdown by event type
+SELECT event_type, SUM(CAST(cost_usd AS DOUBLE)) as total_cost
+FROM   audit_db.etl_orchestrator_audit
+WHERE  run_date >= cast(date_add('day', -30, current_date) AS varchar)
+GROUP  BY event_type;</code></pre>
+
+<!-- ===== 10. DASHBOARD EMAIL ===== -->
+<h2 id="dashboard">10. Dashboard HTML Email</h2>
+
+<p>The orchestrator generates a rich HTML email dashboard and sends it via SMTP after every run.</p>
+
+<h3>10.1 Email Sections</h3>
+
+<table>
+<thead>
+<tr><th>#</th><th>Section</th><th>Content</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Header</td><td>Run ID, date, run mode badge, overall status</td></tr>
+<tr><td>2</td><td>Summary Badges</td><td>Overall status, source count, stale count, validation pass/fail, comparison pass/fail</td></tr>
+<tr><td>3</td><td>KPI Scorecard</td><td>Passed, Warnings, Failures, Not Executed, Total Checks (with pass rate bar + Athena cost)</td></tr>
+<tr><td>4</td><td>S3 Stale Detection</td><td>Table: source, bucket/prefix, subfolder count, status, detail (full_pipeline only)</td></tr>
+<tr><td>5</td><td>Glue Job Triggers</td><td>Table: source, job name, run ID, status, duration, detail (full_pipeline only)</td></tr>
+<tr><td>6</td><td>Post-Load Validations</td><td>Table: validation name, check type, status, actual value, cost, detail</td></tr>
+<tr><td>6.1</td><td>Rolling Average Cards</td><td>Visual cards with today/baseline values, variance gauge, window info</td></tr>
+<tr><td>6.2</td><td>Source Reconciliation</td><td>Deviation tables: table name, date, source count, target count, deviation</td></tr>
+<tr><td>7</td><td>Cross-Query Comparisons</td><td>Table: comparison name, rule, value A/B, status, detail + data_diff tables</td></tr>
+<tr><td>8</td><td>Summary Dashboard</td><td>Query result tables + embedded charts (bar, pie, trend)</td></tr>
+<tr><td>9</td><td>Footer</td><td>Audit log S3 path, generator version</td></tr>
+</tbody>
+</table>
+
+<h3>10.2 Email Configuration</h3>
+
+<pre><code>{
+  "smtp_host": "10.19.10.29",
+  "smtp_port": 25,
+  "sender": "gid02061@aaa-calif.com",
+  "recipients": [
+    "Ganji.Srinivasu@ace.aaa.com",
+    "Ahmad.Imran@ace.aaa.com",
+    "Suresh.Namitha@ace.aaa.com",
+    "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+    "ramanan.swaminathan@ace.aaa.com"
+  ],
+  "subject_prefix": "Strands ETL Dashboard"
+}
+
+Subject Format: "Strands ETL Dashboard – FULL PIPELINE – PASS – 2026-03-16"</code></pre>
+
+<!-- ===== 11. CONFIG REFERENCE ===== -->
+<h2 id="config">11. Configuration Reference</h2>
+
+<h3>11.1 orchestrator_config.json Structure</h3>
+
+<details>
+<summary>Full Configuration Schema</summary>
+<div>
+<pre><code>{
+  "orchestrator": {
+    "name": "strands_etl_orchestrator",
+    "version": "1.1.0",
+    "run_mode": "full_pipeline | validation_only | summary"
+  },
+  "s3_monitoring": {
+    "defaults": {
+      "stale_subfolder_count_threshold": 3,
+      "stale_subfolder_hours_threshold": 3,
+      "no_subfolder_hours_threshold": 5
+    },
+    "sources": [
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/TABLE__ct/",
+        "label": "Friendly Name",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/table_config.json",
+          "archive_s3_path": "archive/TABLE__ct/",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      }
+    ]
+  },
+  "validations": {
+    "execution_mode": "parallel",
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "query_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "check_name",
+        "description": "Check description",
+        "database": "landing_db",
+        "query": "SELECT COUNT(*) as cnt FROM ...",
+        "check_type": "row_count | no_rows | threshold | rolling_average | source_reconciliation",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      }
+    ],
+    "comparison_checks": [
+      {
+        "name": "comparison_name",
+        "query_a": { "label": "Source A", "database": "db_a", "query": "..." },
+        "query_b": { "label": "Source B", "database": "db_b", "query": "..." },
+        "compare_column": "cnt",
+        "rule": "match | percentage_within | data_diff | a_not_zero | custom",
+        "tolerance": 5,
+        "abort_on_failure": false
+      }
+    ]
+  },
+  "summary": {
+    "max_parallel": 5,
+    "queries": [
+      {
+        "name": "query_name",
+        "database": "landing_db",
+        "query": "SELECT ...",
+        "chart": { "type": "bar | pie | trend", "title": "...", "x_column": "...", "y_column": "..." }
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/orchestrator/",
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": ["email@domain.com"],
+    "subject_prefix": "Strands ETL Dashboard"
+  }
+}</code></pre>
+</div>
+</details>
+
+<!-- ===== 12. VALIDATION QUERIES ===== -->
+<h2 id="queries">12. Validation Queries &amp; SQL Patterns</h2>
+
+<h3>12.1 Row Count Check</h3>
+<pre><code>SELECT COUNT(*) as cnt
+FROM landing_db.{table_name}
+WHERE load_date = current_date
+-- Condition: cnt > 0  |  Check type: row_count  |  Abort: YES</code></pre>
+
+<h3>12.2 Duplicate Detection</h3>
+<pre><code>SELECT primary_key, COUNT(*) as dup_cnt
+FROM landing_db.{table_name}
+GROUP BY primary_key
+HAVING COUNT(*) > 1
+LIMIT 10
+-- Condition: row_count == 0  |  Check type: no_rows  |  Abort: YES</code></pre>
+
+<h3>12.3 Null Key Check</h3>
+<pre><code>SELECT COUNT(*) as null_cnt
+FROM landing_db.{table_name}
+WHERE primary_key IS NULL
+-- Condition: null_cnt == 0  |  Check type: threshold  |  Abort: YES</code></pre>
+
+<h3>12.4 Freshness Check</h3>
+<pre><code>SELECT MAX(load_timestamp) as latest_ts,
+       date_diff('hour', MAX(load_timestamp), current_timestamp) as hours_since
+FROM landing_db.{table_name}
+-- Condition: hours_since < 24  |  Check type: threshold  |  Abort: NO</code></pre>
+
+<h3>12.5 Landing vs Source Row Count Match</h3>
+<pre><code>-- Query A (Landing):
+SELECT COUNT(*) AS cnt FROM landing_db.macp_address_tb
+WHERE cast(load_timestamp as date) = current_date
+
+-- Query B (Source Staging):
+SELECT COUNT(*) AS cnt FROM staging_db.macp_address_tb_stg
+WHERE cast(load_date as date) = current_date
+
+-- Rule: match  |  Compare: cnt  |  Abort: YES</code></pre>
+
+<h3>12.6 Percentage Tolerance Check</h3>
+<pre><code>-- Query A (Landing):
+SELECT COUNT(*) AS cnt FROM landing_db.mrd_mbr_info
+WHERE cast(load_timestamp as date) = current_date
+
+-- Query B (Curated):
+SELECT COUNT(*) AS cnt FROM curated_db.mrd_mbr_info
+WHERE cast(update_date as date) = current_date
+
+-- Rule: percentage_within  |  Tolerance: 5%  |  Abort: NO</code></pre>
+
+<h3>12.7 Data Diff (Row-Level Delta)</h3>
+<pre><code>-- Query A (Source Delta):
+SELECT membership_number, member_name, plan_code
+FROM landing_db.mbr_delta WHERE cast(load_timestamp as date) = current_date
+
+-- Query B (Target Delta):
+SELECT membership_number, member_name, plan_code
+FROM curated_db.mbr_delta WHERE cast(update_date as date) = current_date
+
+-- Rule: data_diff  |  Key: membership_number  |  Compare: member_name, plan_code
+-- Detects: missing rows, extra rows, value mismatches</code></pre>
+
+<h3>12.8 Summary: Daily Load Counts</h3>
+<pre><code>SELECT 'macp_address_tb' AS table_name, COUNT(*) AS row_count
+  FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date
+UNION ALL
+SELECT 'macp_cust_address', COUNT(*)
+  FROM landing_db.macp_cust_address WHERE cast(load_timestamp as date) = current_date
+UNION ALL
+SELECT 'macp_customer', COUNT(*)
+  FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date
+UNION ALL
+SELECT 'macp_cust_comm_pref', COUNT(*)
+  FROM landing_db.macp_cust_comm_pref WHERE cast(load_timestamp as date) = current_date
+UNION ALL
+SELECT 'mrd_mbr_info', COUNT(*)
+  FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date
+UNION ALL
+SELECT 'mrd_mbr_prd_dtl', COUNT(*)
+  FROM landing_db.mrd_mbr_prd_dtl WHERE cast(load_timestamp as date) = current_date
+-- Chart: bar  |  x: table_name  |  y: row_count</code></pre>
+
+<!-- ===== 13. S3 LAYOUT ===== -->
+<h2 id="s3layout">13. S3 Bucket Layout</h2>
+
+<pre><code>s3://cust-landing-us-west-2-xxxx/
+├── landing/
+│   ├── MACP.Mac_ADDRESS_TB__ct/
+│   │   ├── 2026-03-15-001/          (stale subfolder, 3h+ old)
+│   │   │   ├── address_001.csv
+│   │   │   └── address_002.csv
+│   │   ├── 2026-03-15-002/          (stale subfolder)
+│   │   └── 2026-03-16-001/          (current, < 3h old)
+│   ├── MACP.Mac_CUST_ADDRESS__ct/
+│   ├── MACP.Mac_CUSTOMER__ct/
+│   ├── MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/
+│   ├── MRDP.MRD_MBR_INFO__ct/
+│   └── MRDP.MRD_MBR_PRD_DTL__ct/
+├── archive/
+│   └── MACP.Mac_ADDRESS_TB__ct/     (processed files archived here)
+
+s3://strands-etl-data/
+├── landing/          (Iceberg tables)
+├── staging/          (Staging transformations)
+├── curated/          (Curated mart)
+└── datalake/         (Analytical datasets)
+
+s3://strands-etl-audit/
+├── audit_logs/
+│   └── orchestrator/
+│       ├── run_date=2026-03-15/
+│       │   └── audit_a1b2c3d4.csv   (pipe-delimited)
+│       └── run_date=2026-03-16/
+│           └── audit_e5f6g7h8.csv
+└── athena-results/                    (Athena query output)
+
+s3://strands-etl-scripts/
+├── etl_orchestrator.py
+├── trigger_glue.py
+└── customer_order_summary_glue.py
+
+s3://strands-etl-configs/
+└── configs/
+    ├── macp_address_tb.json
+    ├── macp_customer.json
+    ├── mrd_mbr_info.json
+    └── orchestrator_config.json</code></pre>
+
+<!-- ===== 14. TROUBLESHOOTING ===== -->
+<h2 id="troubleshoot">14. Troubleshooting Guide</h2>
+
+<table>
+<thead>
+<tr><th>Issue</th><th>Possible Cause</th><th>Resolution</th></tr>
+</thead>
+<tbody>
+<tr><td>Glue job timeout</td><td>Large CSV files, slow S3 reads</td><td>Increase <code>timeout_minutes</code> in source config; upgrade worker type</td></tr>
+<tr><td>Athena query slow / expensive</td><td>Full table scan without partitions</td><td>Add partition filters (<code>WHERE load_date = current_date</code>); review table format</td></tr>
+<tr><td>Athena cost spike</td><td>Unoptimized queries scanning full tables</td><td>Ensure partition pruning in all queries; convert to columnar format</td></tr>
+<tr><td>Stale folder not detected</td><td>Subfolder age below threshold</td><td>Lower <code>stale_subfolder_hours_threshold</code>; check source system delivery schedule</td></tr>
+<tr><td>MSCK REPAIR failure</td><td>Malformed partition path</td><td>Verify S3 path format <code>run_date=YYYY-MM-DD/</code>; run manually in Athena</td></tr>
+<tr><td>Email not received</td><td>SMTP connectivity / auth</td><td>Verify SMTP host/port reachable; check firewall rules for port 25</td></tr>
+<tr><td>Validation shows NOT_EXECUTED</td><td>Athena query failed after retry</td><td>Check <code>failure_reason</code> in audit; verify database/table names; check IAM permissions</td></tr>
+<tr><td>All comparisons ABORTED</td><td>Prior validation with <code>abort_on_failure</code> failed</td><td>Fix the critical validation first; remaining checks auto-abort</td></tr>
+<tr><td>Rolling average shows WARN</td><td>Today's count deviates &gt; tolerance%</td><td>Review source data volume; adjust <code>tolerance</code> if seasonal pattern</td></tr>
+<tr><td>Charts missing in email</td><td>matplotlib not installed</td><td>Install matplotlib; bar charts use HTML fallback, pie/trend require matplotlib</td></tr>
+<tr><td>Data diff finds mismatches</td><td>Timing difference between source and target loads</td><td>Ensure both queries use same date filter; verify transformation logic</td></tr>
+</tbody>
+</table>
+
+<div class="panel panel-warning">
+  <strong>Debug Tip:</strong> All events are logged to the audit table with <code>run_id</code> for traceability. Query the audit table filtered by <code>run_date</code> and <code>status IN ('FAIL', 'NOT_EXECUTED', 'ABORTED')</code> to quickly find issues.
+</div>
+
+<!-- ===== FOOTER ===== -->
+<hr style="border:none;border-top:2px solid #dfe1e6;margin-top:40px;">
+<div style="text-align:center;color:#8993a4;font-size:12px;padding:20px 0;">
+  <p><strong>Strands ETL Orchestrator Framework</strong> v1.1.0 | BIG DATA Team</p>
+  <p>Script: <code>pyscript/etl_orchestrator.py</code> | Config: <code>config/orchestrator_config.json</code> | Audit DDL: <code>config/audit_table_ddl.sql</code></p>
+  <p>Documentation generated March 2026</p>
+</div>
+
+</body>
+</html>
