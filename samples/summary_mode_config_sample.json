@@ -11,6 +11,11 @@
     "max_parallel": 5,
     "deviation_threshold_pct": 20,
 
+    "gif_urls": {
+      "header": "https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif",
+      "trend": "https://media.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif"
+    },
+
     "queries": [
       {
         "name": "statewise_club_counts",
@@ -110,8 +115,8 @@
 
   "_notes": {
     "usage": "python etl_orchestrator.py --config main_config.json --summary-config summary_mode_config_sample.json",
-    "deviation_alerts": "Rows where deviation_pct > 20% are flagged RED in the email. This requires code enhancement to etl_orchestrator.py (not yet implemented).",
-    "gifs": "Two decorative GIFs are embedded in the email: dashboard-analytics and alert-pulse. These require code enhancement to support CID attachments.",
+    "deviation_alerts": "Rows where deviation_pct > 20% are automatically flagged RED in the email with ALERT badges and deviation detail cards. Threshold is configurable via deviation_threshold_pct.",
+    "gifs": "Two decorative GIFs embedded via gif_urls config: 'header' (top of email) and 'trend' (before summary cards). Replace GIPHY URLs with your own S3-hosted GIFs for production use.",
     "table_names": "Replace curated_db.membership and curated_db.transactions with your actual table/column names."
   }
 }

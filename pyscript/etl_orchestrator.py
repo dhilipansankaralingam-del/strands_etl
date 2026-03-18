@@ -19,6 +19,7 @@
 # 01/2026       Dhilipan        Initial version
 # 03/2026       Dhilipan        Cross-query comparisons, summary mode, chart generation
 # 03/2026       Dhilipan        Athena retry, cost tracking, summary dashboard, streamlit
+# 03/2026       Dhilipan        Summary mode: deviation alerts (20%), GIF support, enhanced HTML
 #
 #=================================================================================================
 ###################################################################################################
@@ -1214,10 +1215,12 @@ def run_summary_queries(config):
                 "status": STATUS_FAIL, "detail": f"State: {result['state']}",
             }
         headers, data = parse_athena_rows(result["rows"])
+        # Carry deviation_alert config through to HTML renderer
         return {
             "name": qdef["name"], "description": qdef.get("description", ""),
             "chart": qdef.get("chart"), "headers": headers, "data": data,
             "status": STATUS_PASS, "detail": f"{len(data)} row(s) returned",
+            "deviation_alert": qdef.get("deviation_alert"),
         }
 
     results = []
@@ -1233,6 +1236,42 @@ def run_summary_queries(config):
     results.sort(key=lambda r: order.get(r["name"], 999))
 
     return results
+
+
+def detect_deviation_alerts(summary_results, default_threshold=20):
+    """
+    Scan summary results for rows exceeding the deviation threshold.
+    Returns a list of alert dicts:
+      {query_name, group_label, deviation_pct, threshold, direction}
+    Each summary result may carry a 'deviation_alert' config:
+      {enabled: true, threshold_pct: 20, compare_column: "deviation_pct",
+       group_columns: ["state_code", "club_id"]}
+    """
+    alerts = []
+    for sr in summary_results:
+        da = sr.get("deviation_alert")
+        if not da or not da.get("enabled") or sr["status"] != STATUS_PASS:
+            continue
+        threshold = da.get("threshold_pct", default_threshold)
+        compare_col = da.get("compare_column", "deviation_pct")
+        group_cols = da.get("group_columns", [])
+        for row in sr.get("data", []):
+            try:
+                dev_val = float(row.get(compare_col, 0))
+            except (ValueError, TypeError):
+                continue
+            if abs(dev_val) > threshold:
+                group_label = " / ".join(
+                    str(row.get(g, "")) for g in group_cols
+                ) if group_cols else sr["name"]
+                alerts.append({
+                    "query_name": sr["name"],
+                    "group_label": group_label,
+                    "deviation_pct": dev_val,
+                    "threshold": threshold,
+                    "direction": "above" if dev_val > 0 else "below",
+                })
+    return alerts
 
 
 # ============================================================================
@@ -1556,9 +1595,13 @@ def _status_color(status):
 def generate_dashboard_html(
     run_id, run_date, run_mode, stale_results, glue_results,
     validation_results, comparison_results, summary_results,
-    overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0
+    overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0,
+    deviation_alerts=None, summary_config=None
 ):
-    """Generate a full dashboard HTML email body with charts and KPI scorecards."""
+    """Generate a full dashboard HTML email body with charts, KPI scorecards,
+    deviation alerts, and optional GIF embeds."""
+    deviation_alerts = deviation_alerts or []
+    summary_config = summary_config or {}
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     overall_color = "#28a745" if overall_status == STATUS_PASS else "#dc3545"
 
@@ -1605,6 +1648,19 @@ def generate_dashboard_html(
         .mode-badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
                        background: #3498db; color: white; font-size: 11px;
                        font-weight: bold; margin-left: 10px; }}
+        .alert-banner {{ background: linear-gradient(135deg, #ff416c, #ff4b2b); color: white;
+                         padding: 18px 24px; border-radius: 10px; margin: 20px 0;
+                         display: flex; align-items: center; gap: 15px; }}
+        .alert-banner .alert-title {{ font-size: 16px; font-weight: bold; margin-bottom: 4px; }}
+        .alert-banner .alert-detail {{ font-size: 12px; opacity: 0.9; }}
+        .deviation-high {{ background-color: #fff0f0 !important; }}
+        .deviation-val-red {{ color: #dc3545; font-weight: bold; }}
+        .deviation-val-green {{ color: #28a745; font-weight: bold; }}
+        .gif-banner {{ text-align: center; margin: 15px 0; }}
+        .gif-banner img {{ border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }}
+        .deviation-gauge {{ background: #e9ecef; border-radius: 6px; height: 8px;
+                            overflow: hidden; margin-top: 6px; }}
+        .deviation-gauge-fill {{ height: 100%; border-radius: 6px; }}
     </style></head>
     <body><div class="container">
 
@@ -1639,7 +1695,42 @@ def generate_dashboard_html(
         <span class="summary-box" style="background-color: {'#28a745' if not comp_fail else '#dc3545'};">
             Comparisons: {comp_pass}/{comp_pass + comp_fail}</span>"""
 
+    if deviation_alerts:
+        html += f"""
+        <span class="summary-box" style="background-color: #dc3545;">
+            Deviations: {len(deviation_alerts)}</span>"""
+
     html += "</div>"
+
+    # ---- GIF 1: Header decorative GIF (summary mode) ----
+    gif_urls = summary_config.get("gif_urls", {})
+    gif_header_url = gif_urls.get("header", "")
+    if gif_header_url and run_mode == "summary":
+        html += f"""
+    <div class="gif-banner">
+      <img src="{gif_header_url}" alt="Analytics Dashboard"
+           style="width: 280px; height: auto;" title="ETL Summary Analytics" />
+      <p style="color: #888; font-size: 11px; margin-top: 6px;">Real-time ETL Analytics Summary</p>
+    </div>"""
+
+    # ---- Deviation Alert Banner ----
+    if deviation_alerts:
+        alert_items = []
+        for a in deviation_alerts[:10]:
+            sign = "+" if a["deviation_pct"] > 0 else ""
+            alert_items.append(
+                f"<b>{a['group_label']}</b> ({sign}{a['deviation_pct']:.1f}%)"
+            )
+        alert_detail = " &nbsp;|&nbsp; ".join(alert_items)
+        html += f"""
+    <div class="alert-banner">
+      <div style="font-size:36px;">&#9888;</div>
+      <div>
+        <div class="alert-title">DEVIATION ALERT: {len(deviation_alerts)} metric(s) exceed
+            {deviation_alerts[0]['threshold']}% threshold</div>
+        <div class="alert-detail">{alert_detail}</div>
+      </div>
+    </div>"""
 
     # ---- KPI Scorecard (shown when validations exist) ----
     if total_checks > 0:
@@ -1931,31 +2022,169 @@ def generate_dashboard_html(
         html += "</tbody></table>"
         section_num += 1
 
-    # ---- Section: Summary Results + Charts ----
+    # ---- Section: Summary Results + Charts (Enhanced with deviation alerts & GIFs) ----
     if summary_results:
         html += f"<h2>{section_num}. Summary Dashboard</h2>"
 
-        for sr in summary_results:
+        # Build a set of alerted group_labels for quick lookup
+        _alerted_groups = set()
+        for a in deviation_alerts:
+            _alerted_groups.add((a["query_name"], a["group_label"]))
+
+        # GIF 2: Trend decorative GIF (before summary cards)
+        gif_trend_url = gif_urls.get("trend", "")
+        if gif_trend_url:
+            html += f"""
+        <div class="gif-banner">
+          <img src="{gif_trend_url}" alt="Trend Analysis"
+               style="width: 240px; height: auto;" title="Trend Analysis Animation" />
+        </div>"""
+
+        for sr_idx, sr in enumerate(summary_results):
+            da = sr.get("deviation_alert") or {}
+            compare_col = da.get("compare_column", "deviation_pct")
+            group_cols = da.get("group_columns", [])
+            da_threshold = da.get("threshold_pct", 20)
+            da_enabled = da.get("enabled", False)
+
+            # Count deviations for this query
+            sr_alert_count = sum(
+                1 for a in deviation_alerts if a["query_name"] == sr["name"]
+            ) if da_enabled else 0
+
             html += f"""<div style="margin:20px 0; padding:15px; background:#fafbfc;
-                         border-radius:8px; border:1px solid #eee;">
-                <h3 style="color:#2c3e50;margin-top:0;">{sr['name']}</h3>
-                <p style="color:#666;font-size:12px;">{sr.get('description', '')}</p>"""
+                         border-radius:8px; border:1px solid #eee;
+                         {'border-left:4px solid #dc3545;' if sr_alert_count else ''}">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <h3 style="color:#2c3e50;margin-top:0;">
+                    {sr['name'].replace('_', ' ').title()}</h3>"""
+            if sr_alert_count:
+                html += f"""
+                  <span class="badge" style="background-color:#dc3545;">
+                    {sr_alert_count} DEVIATION(S)</span>"""
+            html += """</div>"""
+            html += f"""<p style="color:#666;font-size:12px;">{sr.get('description', '')}</p>"""
 
             if sr["status"] == STATUS_FAIL:
                 html += f'<p style="color:#dc3545;">Query failed: {sr["detail"]}</p>'
             else:
-                # Data table
+                # Data table with deviation-highlighted rows
                 if sr["data"]:
                     html += '<table style="margin-bottom:15px;"><thead><tr>'
                     for h in sr["headers"]:
                         html += f"<th>{h}</th>"
+                    if da_enabled:
+                        html += "<th>Status</th>"
                     html += "</tr></thead><tbody>"
-                    for row in sr["data"][:50]:  # limit to 50 rows in email
-                        html += "<tr>"
+
+                    for row in sr["data"][:50]:
+                        # Determine if this row is a deviation
+                        is_deviation = False
+                        dev_val = 0
+                        if da_enabled and compare_col in row:
+                            try:
+                                dev_val = float(row.get(compare_col, 0))
+                                is_deviation = abs(dev_val) > da_threshold
+                            except (ValueError, TypeError):
+                                pass
+
+                        row_class = ' class="deviation-high"' if is_deviation else ""
+                        html += f"<tr{row_class}>"
                         for h in sr["headers"]:
-                            html += f"<td>{row.get(h, '')}</td>"
+                            cell_val = row.get(h, "")
+                            # Colorize deviation percentage columns
+                            if h == compare_col:
+                                try:
+                                    fval = float(cell_val)
+                                    sign = "+" if fval > 0 else ""
+                                    css_class = "deviation-val-red" if abs(fval) > da_threshold else "deviation-val-green"
+                                    html += f'<td style="text-align:right;" class="{css_class}">{sign}{fval:.1f}%</td>'
+                                except (ValueError, TypeError):
+                                    html += f"<td>{cell_val}</td>"
+                            else:
+                                html += f"<td>{cell_val}</td>"
+                        if da_enabled:
+                            if is_deviation:
+                                html += '<td><span class="badge" style="background-color:#dc3545;">ALERT</span></td>'
+                            else:
+                                html += '<td><span class="badge" style="background-color:#28a745;">OK</span></td>'
                         html += "</tr>"
                     html += "</tbody></table>"
+
+                    # Deviation detail cards for alerted rows
+                    if da_enabled and sr_alert_count > 0:
+                        html += '<div style="display:flex;flex-wrap:wrap;gap:15px;margin:15px 0;">'
+                        for row in sr["data"][:50]:
+                            try:
+                                dv = float(row.get(compare_col, 0))
+                            except (ValueError, TypeError):
+                                continue
+                            if abs(dv) <= da_threshold:
+                                continue
+                            grp = " / ".join(str(row.get(g, "")) for g in group_cols) if group_cols else sr["name"]
+                            sign = "+" if dv > 0 else ""
+                            direction_text = "above" if dv > 0 else "below"
+                            gauge_pct = min(abs(dv) / max(da_threshold, 1) * 100, 100)
+
+                            # Try to find today vs baseline values from common column patterns
+                            today_val = None
+                            baseline_val = None
+                            for k in row:
+                                kl = k.lower()
+                                if "today" in kl and ("count" in kl or "amount" in kl):
+                                    try:
+                                        today_val = float(row[k])
+                                    except (ValueError, TypeError):
+                                        pass
+                                if ("avg" in kl or "baseline" in kl) and ("count" in kl or "amount" in kl):
+                                    try:
+                                        baseline_val = float(row[k])
+                                    except (ValueError, TypeError):
+                                        pass
+
+                            html += f"""
+                            <div style="flex:1;min-width:280px;max-width:450px;background:#fafbfc;
+                                        border:1px solid #eee;border-radius:10px;padding:18px;
+                                        border-top:4px solid #dc3545;">
+                              <div style="display:flex;justify-content:space-between;align-items:center;
+                                          margin-bottom:12px;">
+                                <div style="font-weight:bold;color:#2c3e50;font-size:14px;">{grp}</div>
+                                <span class="badge" style="background-color:#dc3545;">ALERT</span>
+                              </div>
+                              <p style="color:#888;font-size:11px;margin:0 0 12px 0;">
+                                {sign}{dv:.1f}% {direction_text} the {da_threshold}% threshold</p>"""
+
+                            if today_val is not None and baseline_val is not None:
+                                html += f"""
+                              <div style="display:flex;gap:12px;margin-bottom:12px;">
+                                <div style="flex:1;text-align:center;background:white;border-radius:8px;
+                                            padding:10px;border:1px solid #eef;">
+                                  <div style="color:#666;font-size:10px;font-weight:bold;">TODAY</div>
+                                  <div style="color:#dc3545;font-size:20px;font-weight:bold;">
+                                    {today_val:,.0f}</div>
+                                </div>
+                                <div style="flex:1;text-align:center;background:white;border-radius:8px;
+                                            padding:10px;border:1px solid #eef;">
+                                  <div style="color:#666;font-size:10px;font-weight:bold;">30-DAY AVG</div>
+                                  <div style="color:#3498db;font-size:20px;font-weight:bold;">
+                                    {baseline_val:,.0f}</div>
+                                </div>
+                              </div>"""
+
+                            html += f"""
+                              <div style="margin-bottom:8px;">
+                                <div style="display:flex;justify-content:space-between;font-size:11px;
+                                            color:#666;margin-bottom:4px;">
+                                  <span>Deviation: <b style="color:#dc3545;">{sign}{dv:.1f}%</b></span>
+                                  <span>Threshold: {da_threshold}%</span>
+                                </div>
+                                <div class="deviation-gauge">
+                                  <div class="deviation-gauge-fill"
+                                       style="background:#dc3545;width:{gauge_pct:.0f}%;"></div>
+                                </div>
+                              </div>
+                            </div>"""
+                        html += "</div>"
 
                 # Chart
                 if sr.get("chart") and sr["data"]:
@@ -1976,10 +2205,16 @@ def generate_dashboard_html(
             html += "</div>"
 
     # ---- Footer ----
+    dev_footer = ""
+    if deviation_alerts:
+        dev_footer = f"<b>Deviation Threshold:</b> {deviation_alerts[0]['threshold']}% | "
     html += f"""
     <div class="footer">
         <p><b>Audit Log:</b> {audit_s3_path or 'N/A'}</p>
-        <p>Generated by Strands ETL Orchestrator v1.1 &nbsp;|&nbsp; BIG DATA Team</p>
+        <p>{dev_footer}<b>Athena Cost:</b> ${total_cost_usd:.4f} |
+           <b>Queries:</b> {len(summary_results) if summary_results else 0}</p>
+        <p>Generated by Strands ETL Orchestrator v1.2 (Summary Mode Enhanced) &nbsp;|&nbsp;
+           BIG DATA Team</p>
     </div>
     </div></body></html>"""
 
@@ -2170,6 +2405,23 @@ def main():
             if sr["status"] == STATUS_FAIL:
                 logger.warning("Summary query '%s' failed: %s", sr["name"], sr["detail"])
 
+        # Detect deviation alerts across all summary results
+        default_threshold = effective_summary_config.get(
+            "summary", {}).get("deviation_threshold_pct", 20)
+        deviation_alerts = detect_deviation_alerts(summary_results, default_threshold)
+        if deviation_alerts:
+            logger.warning(
+                "DEVIATION ALERTS: %d metric(s) exceed threshold",
+                len(deviation_alerts),
+            )
+            for da in deviation_alerts:
+                sign = "+" if da["deviation_pct"] > 0 else ""
+                logger.warning(
+                    "  -> %s: %s (%s%.1f%% vs %d%% threshold)",
+                    da["query_name"], da["group_label"],
+                    sign, da["deviation_pct"], da["threshold"],
+                )
+
     else:
         logger.error("Unknown run_mode: %s", run_mode)
         sys.exit(1)
@@ -2201,12 +2453,21 @@ def main():
     total_cost_usd += sum(cr.get("cost_usd", 0) for cr in comparison_results)
     run_duration_sec = time.time() - run_start_time
 
+    # Deviation alerts (populated only in summary mode)
+    _deviation_alerts = locals().get("deviation_alerts", [])
+    _effective_summary_cfg = {}
+    if run_mode == "summary":
+        _esc = summary_config if summary_config else config
+        _effective_summary_cfg = _esc.get("summary", {})
+
     html = generate_dashboard_html(
         run_id, run_date, run_mode, stale_results, glue_results,
         validation_results, comparison_results, summary_results,
         overall_status, audit_s3_path,
         run_duration_sec=run_duration_sec,
-        total_cost_usd=total_cost_usd)
+        total_cost_usd=total_cost_usd,
+        deviation_alerts=_deviation_alerts,
+        summary_config=_effective_summary_cfg)
     send_email(html, email_cfg, overall_status, run_mode)
 
     # ---- Final Summary ----
