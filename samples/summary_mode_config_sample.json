@@ -1,0 +1,117 @@
+{
+  "orchestrator": {
+    "run_mode": "summary",
+    "description": "Summary mode – Statewise/Club/Product analytics with 30-day deviation alerts"
+  },
+
+  "summary": {
+    "athena_output_bucket": "your-athena-results-bucket",
+    "athena_output_prefix": "summary_results/",
+    "athena_workgroup": "primary",
+    "max_parallel": 5,
+    "deviation_threshold_pct": 20,
+
+    "queries": [
+      {
+        "name": "statewise_club_counts",
+        "description": "State x Club member counts – Today vs 30-day average with deviation %",
+        "database": "curated_db",
+        "query": "WITH today_data AS ( SELECT state_code, club_id, COUNT(*) AS today_count FROM curated_db.membership WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY state_code, club_id ), baseline AS ( SELECT state_code, club_id, ROUND(AVG(daily_count), 0) AS avg_30d FROM ( SELECT state_code, club_id, load_date, COUNT(*) AS daily_count FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY state_code, club_id, load_date ) GROUP BY state_code, club_id ) SELECT t.state_code, t.club_id, t.today_count, COALESCE(b.avg_30d, 0) AS avg_30d_count, CASE WHEN b.avg_30d > 0 THEN ROUND((CAST(t.today_count AS DOUBLE) - b.avg_30d) / b.avg_30d * 100, 1) ELSE 0 END AS deviation_pct FROM today_data t LEFT JOIN baseline b ON t.state_code = b.state_code AND t.club_id = b.club_id ORDER BY ABS(CASE WHEN b.avg_30d > 0 THEN (CAST(t.today_count AS DOUBLE) - b.avg_30d) / b.avg_30d * 100 ELSE 0 END) DESC",
+        "chart": {
+          "type": "bar",
+          "title": "State x Club – Today vs 30-Day Avg",
+          "x_column": "state_code",
+          "y_column": "today_count"
+        },
+        "deviation_alert": {
+          "enabled": true,
+          "threshold_pct": 20,
+          "compare_column": "deviation_pct",
+          "group_columns": ["state_code", "club_id"]
+        }
+      },
+      {
+        "name": "club_bill_plans",
+        "description": "Bill plan breakdown for each club – plan types, member count, total amount",
+        "database": "curated_db",
+        "query": "SELECT m.club_id, m.bill_plan, COUNT(*) AS member_count, ROUND(SUM(m.bill_amount), 2) AS total_amount, ROUND(AVG(m.bill_amount), 2) AS avg_amount FROM curated_db.membership m WHERE m.load_date = CAST(current_date AS VARCHAR) GROUP BY m.club_id, m.bill_plan ORDER BY m.club_id, total_amount DESC",
+        "chart": {
+          "type": "bar",
+          "title": "Bill Plans by Club – Total Amount",
+          "x_column": "club_id",
+          "y_column": "total_amount"
+        }
+      },
+      {
+        "name": "product_cost_by_state",
+        "description": "Product amount/cost by product and state – Today vs 30-day avg with deviation",
+        "database": "curated_db",
+        "query": "WITH today_data AS ( SELECT product_code, state_code, ROUND(SUM(amount), 2) AS today_amount, COUNT(*) AS today_txn_count FROM curated_db.transactions WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY product_code, state_code ), baseline AS ( SELECT product_code, state_code, ROUND(AVG(daily_amount), 2) AS avg_30d_amount, ROUND(AVG(daily_txn_count), 0) AS avg_30d_txn_count FROM ( SELECT product_code, state_code, load_date, SUM(amount) AS daily_amount, COUNT(*) AS daily_txn_count FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY product_code, state_code, load_date ) GROUP BY product_code, state_code ) SELECT t.product_code, t.state_code, t.today_amount, t.today_txn_count, COALESCE(b.avg_30d_amount, 0) AS avg_30d_amount, COALESCE(b.avg_30d_txn_count, 0) AS avg_30d_txn_count, CASE WHEN b.avg_30d_amount > 0 THEN ROUND((t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100, 1) ELSE 0 END AS amount_deviation_pct, CASE WHEN b.avg_30d_txn_count > 0 THEN ROUND((CAST(t.today_txn_count AS DOUBLE) - b.avg_30d_txn_count) / b.avg_30d_txn_count * 100, 1) ELSE 0 END AS txn_deviation_pct FROM today_data t LEFT JOIN baseline b ON t.product_code = b.product_code AND t.state_code = b.state_code ORDER BY ABS(CASE WHEN b.avg_30d_amount > 0 THEN (t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100 ELSE 0 END) DESC",
+        "chart": {
+          "type": "bar",
+          "title": "Product Cost by State – Today vs 30-Day Avg",
+          "x_column": "product_code",
+          "y_column": "today_amount"
+        },
+        "deviation_alert": {
+          "enabled": true,
+          "threshold_pct": 20,
+          "compare_column": "amount_deviation_pct",
+          "group_columns": ["product_code", "state_code"]
+        }
+      },
+      {
+        "name": "product_cost_overall",
+        "description": "Product cost summary across all states – Today vs 30-day trend",
+        "database": "curated_db",
+        "query": "WITH today_data AS ( SELECT product_code, ROUND(SUM(amount), 2) AS today_amount, COUNT(*) AS today_txn_count, COUNT(DISTINCT state_code) AS states_active FROM curated_db.transactions WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY product_code ), baseline AS ( SELECT product_code, ROUND(AVG(daily_amount), 2) AS avg_30d_amount FROM ( SELECT product_code, load_date, SUM(amount) AS daily_amount FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY product_code, load_date ) GROUP BY product_code ) SELECT t.product_code, t.today_amount, t.today_txn_count, t.states_active, COALESCE(b.avg_30d_amount, 0) AS avg_30d_amount, CASE WHEN b.avg_30d_amount > 0 THEN ROUND((t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100, 1) ELSE 0 END AS deviation_pct FROM today_data t LEFT JOIN baseline b ON t.product_code = b.product_code ORDER BY t.today_amount DESC",
+        "chart": {
+          "type": "pie",
+          "title": "Product Cost Distribution (Today)",
+          "label_column": "product_code",
+          "value_column": "today_amount"
+        },
+        "deviation_alert": {
+          "enabled": true,
+          "threshold_pct": 20,
+          "compare_column": "deviation_pct",
+          "group_columns": ["product_code"]
+        }
+      },
+      {
+        "name": "daily_trend_30d",
+        "description": "30-day daily trend – total count and amount across all products/states",
+        "database": "curated_db",
+        "query": "SELECT load_date, COUNT(*) AS total_records, ROUND(SUM(amount), 2) AS total_amount, COUNT(DISTINCT state_code) AS active_states, COUNT(DISTINCT club_id) AS active_clubs FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY load_date ORDER BY load_date",
+        "chart": {
+          "type": "trend",
+          "title": "30-Day Daily Trend – Total Records",
+          "x_column": "load_date",
+          "y_column": "total_records"
+        }
+      }
+    ]
+  },
+
+  "audit": {
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "s3_bucket": "your-audit-bucket",
+    "s3_prefix": "etl_audit/orchestrator"
+  },
+
+  "email": {
+    "sender": "etl-bot@yourcompany.com",
+    "recipients": ["team@yourcompany.com"],
+    "smtp_host": "mail.yourcompany.com",
+    "smtp_port": 25,
+    "subject_prefix": "ETL Summary Dashboard"
+  },
+
+  "_notes": {
+    "usage": "python etl_orchestrator.py --config main_config.json --summary-config summary_mode_config_sample.json",
+    "deviation_alerts": "Rows where deviation_pct > 20% are flagged RED in the email. This requires code enhancement to etl_orchestrator.py (not yet implemented).",
+    "gifs": "Two decorative GIFs are embedded in the email: dashboard-analytics and alert-pulse. These require code enhancement to support CID attachments.",
+    "table_names": "Replace curated_db.membership and curated_db.transactions with your actual table/column names."
+  }
+}
