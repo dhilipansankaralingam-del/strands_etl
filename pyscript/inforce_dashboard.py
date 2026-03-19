@@ -90,7 +90,6 @@ KPI_ICONS = {
     "deduct": "&#x2796;",        # heavy minus sign
     "net": "&#x1F4B9;",          # chart with upwards trend and yen
     "product": "&#x1F4E6;",      # package
-    "retention": "&#x1F6E1;",    # shield
     "default": "&#x2B50;",       # star
 }
 
@@ -746,17 +745,42 @@ def generate_dashboard_html(
                         transition: transform 0.2s; }}
         .summary-pill .pill-icon {{ font-size: 18px; }}
 
-        .kpi-row {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 22px 0; }}
-        .kpi-card {{ flex: 1; min-width: 130px; border-radius: 14px; padding: 20px 14px;
+        .kpi-row {{ display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                    gap: 16px; margin: 22px 0; }}
+        .kpi-card {{ border-radius: 16px; padding: 22px 16px;
                      text-align: center; position: relative;
-                     overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-                     border: 1px solid #e8eaf0; }}
-        .kpi-icon {{ font-size: 30px; margin-bottom: 8px; position: relative; }}
+                     overflow: hidden; box-shadow: 0 6px 20px rgba(0,0,0,0.10);
+                     border: none; }}
+        .kpi-card::before {{
+            content: ''; position: absolute; top: -50%; left: -50%;
+            width: 200%; height: 200%;
+            background: linear-gradient(45deg,
+                transparent 30%, rgba(255,255,255,0.15) 50%, transparent 70%);
+            animation: kpi-shimmer 3s ease-in-out infinite;
+        }}
+        @keyframes kpi-shimmer {{
+            0% {{ transform: translateX(-100%) rotate(25deg); }}
+            100% {{ transform: translateX(100%) rotate(25deg); }}
+        }}
+        @keyframes kpi-float {{
+            0%, 100% {{ transform: translateY(0px); }}
+            50% {{ transform: translateY(-6px); }}
+        }}
+        @keyframes kpi-pulse {{
+            0%, 100% {{ transform: scale(1); opacity: 1; }}
+            50% {{ transform: scale(1.05); opacity: 0.9; }}
+        }}
+        .kpi-icon {{ font-size: 34px; margin-bottom: 10px; position: relative;
+                     display: inline-block;
+                     animation: kpi-float 3s ease-in-out infinite; }}
         .kpi-label {{ font-size: 10px; font-weight: bold;
-                      text-transform: uppercase; letter-spacing: 0.6px;
-                      position: relative; color: #666; }}
-        .kpi-value {{ font-size: 30px; font-weight: bold; margin: 8px 0 4px 0;
-                      position: relative; }}
+                      text-transform: uppercase; letter-spacing: 0.8px;
+                      position: relative; color: rgba(255,255,255,0.85); }}
+        .kpi-value {{ font-size: 32px; font-weight: bold; margin: 10px 0 4px 0;
+                      position: relative; color: #fff;
+                      text-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                      animation: kpi-pulse 4s ease-in-out infinite; }}
 
         .chart-container {{ margin: 22px 0; text-align: center; }}
         .chart-container img {{ max-width: 100%; border-radius: 10px;
@@ -829,14 +853,32 @@ def generate_dashboard_html(
 
     <div class="spacer"></div>"""
 
-    # ---- KPI Scorecard ----
-    if kpi_results:
+    # ---- KPI Scorecard (animated parallel tiles) ----
+    # Distinct gradient palettes for each tile position
+    KPI_TILE_GRADIENTS = [
+        ("linear-gradient(135deg, #667eea 0%, #764ba2 100%)", "#667eea"),  # purple-indigo
+        ("linear-gradient(135deg, #f093fb 0%, #f5576c 100%)", "#f5576c"),  # pink-rose
+        ("linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)", "#4facfe"),  # blue-cyan
+        ("linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)", "#43e97b"),  # green-teal
+        ("linear-gradient(135deg, #fa709a 0%, #fee140 100%)", "#fa709a"),  # pink-yellow
+        ("linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)", "#a18cd1"),  # lavender-pink
+        ("linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)", "#d57eeb"),  # peach-purple
+        ("linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)", "#8ec5fc"),  # lilac-sky
+    ]
+
+    # Filter out "retention" KPIs
+    filtered_kpis = [
+        kpi for kpi in kpi_results
+        if "retention" not in kpi.get("name", "").lower()
+        and "retention" not in kpi.get("display_name", "").lower()
+    ]
+
+    if filtered_kpis:
         html += f'<h2><span class="section-icon">{SECTION_ICONS["kpi"]}</span> 1. Membership KPIs</h2>'
         html += '<div class="spacer-sm"></div>'
         html += '<div class="kpi-row">'
-        for kpi in kpi_results:
+        for idx, kpi in enumerate(filtered_kpis):
             val = kpi.get("value")
-            color = kpi.get("color", "#3498db")
             icon_key = kpi.get("name", "default")
             # Map KPI name to icon
             kpi_icon = KPI_ICONS.get("default")
@@ -850,12 +892,17 @@ def generate_dashboard_html(
                 val_str = f"{val:.1f}%"
             else:
                 val_str = f"{val:,.0f}"
+
+            # Cycle through gradient palettes
+            gradient, _ = KPI_TILE_GRADIENTS[idx % len(KPI_TILE_GRADIENTS)]
+            # Stagger the animation delay per tile for a cascade effect
+            anim_delay = f"{idx * 0.4:.1f}s"
+
             html += f"""
-            <div class="kpi-card" style="background:linear-gradient(135deg, {color}12 0%,
-                        {color}20 100%); border-color:{color}40;">
-                <div class="kpi-icon">{kpi_icon}</div>
+            <div class="kpi-card" style="background:{gradient};">
+                <div class="kpi-icon" style="animation-delay:{anim_delay};">{kpi_icon}</div>
                 <div class="kpi-label">{kpi['display_name']}</div>
-                <div class="kpi-value" style="color:{color};">{val_str}</div>
+                <div class="kpi-value" style="animation-delay:{anim_delay};">{val_str}</div>
             </div>"""
         html += "</div>"
         html += '<div class="spacer"></div>'
