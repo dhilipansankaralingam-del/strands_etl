@@ -102,9 +102,194 @@
 </div>
 
 <!-- ============================================================ -->
-<!-- SECTION 1: STATE x CLUB COUNTS -->
+<!-- SECTION 0: TODAY'S OVERALL AUDIT SUMMARY -->
 <!-- ============================================================ -->
-<h2>1. Statewise Club Counts – Today vs 30-Day Average</h2>
+<h2>1. Today's Overall Audit Summary</h2>
+<p style="color:#666;font-size:12px;">
+  Aggregated from <b>4</b> run(s) recorded in
+  <code>audit_db.etl_orchestrator_audit</code> for 2026-03-18.</p>
+
+<!-- KPI cards -->
+<div style="display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;">
+  <div style="flex:1;min-width:130px;background:#f0fff0;border-left:4px solid #28a745;
+              border-radius:8px;padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">TOTAL CHECKS</div>
+    <div style="color:#2c3e50;font-size:26px;font-weight:bold;">47</div>
+    <div style="color:#888;font-size:10px;">across all runs</div>
+  </div>
+  <div style="flex:1;min-width:130px;background:#f0fff0;border-left:4px solid #28a745;
+              border-radius:8px;padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">PASSED</div>
+    <div style="color:#28a745;font-size:26px;font-weight:bold;">39</div>
+    <div style="color:#888;font-size:10px;">83.0%</div>
+  </div>
+  <div style="flex:1;min-width:130px;background:#fff0f0;border-left:4px solid #dc3545;
+              border-radius:8px;padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">FAILED</div>
+    <div style="color:#dc3545;font-size:26px;font-weight:bold;">3</div>
+    <div style="color:#888;font-size:10px;">6.4%</div>
+  </div>
+  <div style="flex:1;min-width:130px;background:#fff8e1;border-left:4px solid #fd7e14;
+              border-radius:8px;padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">WARNINGS</div>
+    <div style="color:#fd7e14;font-size:26px;font-weight:bold;">2</div>
+    <div style="color:#888;font-size:10px;">4.3%</div>
+  </div>
+  <div style="flex:1;min-width:130px;background:#f5f5f5;border-left:4px solid #6c757d;
+              border-radius:8px;padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">NOT EXECUTED</div>
+    <div style="color:#6c757d;font-size:26px;font-weight:bold;">3</div>
+    <div style="color:#888;font-size:10px;">6.4%</div>
+  </div>
+</div>
+
+<!-- Pass rate gauge + cost -->
+<div style="display:flex;gap:15px;margin-bottom:20px;">
+  <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+              padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">OVERALL PASS RATE (TODAY)</div>
+    <div style="margin:8px 0;">
+      <div style="background:#e9ecef;border-radius:10px;height:20px;overflow:hidden;">
+        <div style="background:#28a745;height:100%;width:83%;border-radius:10px;"></div>
+      </div>
+    </div>
+    <div style="color:#28a745;font-size:22px;font-weight:bold;">83.0%</div>
+  </div>
+  <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+              padding:15px;text-align:center;">
+    <div style="color:#666;font-size:10px;font-weight:bold;">TOTAL ATHENA COST (TODAY)</div>
+    <div style="color:#8e44ad;font-size:22px;font-weight:bold;margin-top:12px;">$0.0384</div>
+    <div style="color:#888;font-size:10px;margin-top:4px;">4 run(s)</div>
+  </div>
+</div>
+
+<!-- By-layer breakdown -->
+<h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
+           border-left:3px solid #8e44ad;padding-left:10px;">
+           Breakdown by Layer / Event Type</h3>
+<table>
+<thead><tr>
+  <th>Layer / Event Type</th><th>Total</th><th>Passed</th>
+  <th>Failed</th><th>Warnings</th><th>Not Executed</th>
+  <th>Pass Rate</th><th>Cost (USD)</th>
+</tr></thead>
+<tbody>
+  <tr>
+    <td><b>STALE_CHECK</b></td>
+    <td style="text-align:center;">6</td>
+    <td style="text-align:center;color:#28a745;font-weight:bold;">5</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;">1</td>
+    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">83.3%</span></td>
+    <td style="text-align:right;">$0.0000</td>
+  </tr>
+  <tr>
+    <td><b>GLUE_TRIGGER</b></td>
+    <td style="text-align:center;">4</td>
+    <td style="text-align:center;color:#28a745;font-weight:bold;">3</td>
+    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;"><span style="color:#fd7e14;font-weight:bold;">75.0%</span></td>
+    <td style="text-align:right;">$0.0000</td>
+  </tr>
+  <tr>
+    <td><b>VALIDATION</b></td>
+    <td style="text-align:center;">18</td>
+    <td style="text-align:center;color:#28a745;font-weight:bold;">14</td>
+    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
+    <td style="text-align:center;">1</td>
+    <td style="text-align:center;">2</td>
+    <td style="text-align:center;"><span style="color:#fd7e14;font-weight:bold;">77.8%</span></td>
+    <td style="text-align:right;">$0.0212</td>
+  </tr>
+  <tr>
+    <td><b>COMPARISON</b></td>
+    <td style="text-align:center;">12</td>
+    <td style="text-align:center;color:#28a745;font-weight:bold;">11</td>
+    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">91.7%</span></td>
+    <td style="text-align:right;">$0.0130</td>
+  </tr>
+  <tr>
+    <td><b>SUMMARY_QUERY</b></td>
+    <td style="text-align:center;">7</td>
+    <td style="text-align:center;color:#28a745;font-weight:bold;">6</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;">1</td>
+    <td style="text-align:center;">0</td>
+    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">85.7%</span></td>
+    <td style="text-align:right;">$0.0042</td>
+  </tr>
+  <tr style="background:#e8f4fd;font-weight:bold;">
+    <td>TOTAL</td>
+    <td style="text-align:center;">47</td>
+    <td style="text-align:center;color:#28a745;">39</td>
+    <td style="text-align:center;color:#dc3545;">3</td>
+    <td style="text-align:center;">2</td>
+    <td style="text-align:center;">3</td>
+    <td style="text-align:center;"><span style="color:#28a745;">83.0%</span></td>
+    <td style="text-align:right;">$0.0384</td>
+  </tr>
+</tbody>
+</table>
+
+<!-- Today's Runs -->
+<h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
+           border-left:3px solid #3498db;padding-left:10px;">
+           Today's Runs</h3>
+<table>
+<thead><tr>
+  <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
+  <th>Cost (USD)</th><th>First Event</th><th>Last Event</th>
+</tr></thead>
+<tbody>
+  <tr>
+    <td>1</td>
+    <td><code style="font-size:11px;">run-20260318-abc123</code></td>
+    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+    <td style="text-align:center;">14</td>
+    <td style="text-align:right;">$0.0142</td>
+    <td style="font-size:11px;">2026-03-18T14:00:05Z</td>
+    <td style="font-size:11px;">2026-03-18T14:30:00Z</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><code style="font-size:11px;">run-20260318-def456</code></td>
+    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+    <td style="text-align:center;">12</td>
+    <td style="text-align:right;">$0.0098</td>
+    <td style="font-size:11px;">2026-03-18T10:00:03Z</td>
+    <td style="font-size:11px;">2026-03-18T10:25:42Z</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><code style="font-size:11px;">run-20260318-ghi789</code></td>
+    <td><span class="badge" style="background-color:#dc3545;">FAIL</span></td>
+    <td style="text-align:center;">11</td>
+    <td style="text-align:right;">$0.0088</td>
+    <td style="font-size:11px;">2026-03-18T06:00:01Z</td>
+    <td style="font-size:11px;">2026-03-18T06:18:33Z</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><code style="font-size:11px;">run-20260318-jkl012</code></td>
+    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+    <td style="text-align:center;">10</td>
+    <td style="text-align:right;">$0.0056</td>
+    <td style="font-size:11px;">2026-03-18T02:00:02Z</td>
+    <td style="font-size:11px;">2026-03-18T02:12:15Z</td>
+  </tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<!-- SECTION 2: STATE x CLUB COUNTS (was section 1) -->
+<!-- ============================================================ -->
+<h2>2. Statewise Club Counts – Today vs 30-Day Average</h2>
 <p style="color:#666;font-size:12px;">Member counts grouped by State and Club. Rows highlighted in red have deviation &gt; 20%.</p>
 
 <div class="trend-card">
@@ -241,7 +426,7 @@
 <!-- ============================================================ -->
 <!-- SECTION 2: CLUB BILL PLANS -->
 <!-- ============================================================ -->
-<h2>2. Bill Plans by Club</h2>
+<h2>3. Bill Plans by Club</h2>
 <p style="color:#666;font-size:12px;">Bill plan breakdown showing plan type, member count, and total billed amount per club.</p>
 
 <table>
@@ -309,7 +494,7 @@
 <!-- ============================================================ -->
 <!-- SECTION 3: PRODUCT COST BY STATE -->
 <!-- ============================================================ -->
-<h2>3. Product Amount/Cost by State – Today vs 30-Day Average</h2>
+<h2>4. Product Amount/Cost by State – Today vs 30-Day Average</h2>
 <p style="color:#666;font-size:12px;">Product cost aggregated by product and state. Rows with &gt; 20% deviation are flagged.</p>
 
 <table>
@@ -444,7 +629,7 @@
 <!-- ============================================================ -->
 <!-- SECTION 4: PRODUCT COST OVERALL -->
 <!-- ============================================================ -->
-<h2>4. Product Cost Summary – All States</h2>
+<h2>5. Product Cost Summary – All States</h2>
 <p style="color:#666;font-size:12px;">Aggregated product cost across all states with 30-day comparison.</p>
 
 <table>
@@ -511,7 +696,7 @@
 <!-- ============================================================ -->
 <!-- SECTION 5: 30-DAY TREND -->
 <!-- ============================================================ -->
-<h2>5. 30-Day Daily Trend</h2>
+<h2>6. 30-Day Daily Trend</h2>
 <p style="color:#666;font-size:12px;">Daily record count and total amount trend over the past 30 days.</p>
 
 <!-- GIF 2: Trend/pulse animation -->

@@ -1274,6 +1274,120 @@ def detect_deviation_alerts(summary_results, default_threshold=20):
     return alerts
 
 
+def fetch_audit_summary_for_today(audit_cfg, run_date, output_location, workgroup="primary"):
+    """
+    Query the audit table for ALL runs today (not just current run) and return
+    an overall summary: pass/fail/warn/not_exec counts by event_type (layer),
+    total cost, distinct run_ids, etc.
+
+    Returns dict:
+      {
+        "by_layer": [
+          {"event_type": "VALIDATION", "total": 10, "pass": 8, "fail": 1,
+           "warn": 0, "not_exec": 1, "cost_usd": 0.0042},
+          ...
+        ],
+        "totals": {"total": N, "pass": N, "fail": N, "warn": N,
+                   "not_exec": N, "cost_usd": F, "distinct_runs": N},
+        "runs": [
+          {"run_id": "abc", "overall_status": "PASS", "event_count": N, "cost_usd": F},
+          ...
+        ],
+        "status": "PASS" | "FAIL"
+      }
+    Returns None if the query fails or audit config is missing.
+    """
+    database = audit_cfg.get("database", "audit_db")
+    table = audit_cfg.get("table", "etl_orchestrator_audit")
+
+    # Query 1: Summary by event_type (layer)
+    sql_by_layer = f"""
+        SELECT
+            event_type,
+            COUNT(*) AS total_checks,
+            SUM(CASE WHEN status = 'PASS' THEN 1 ELSE 0 END) AS pass_count,
+            SUM(CASE WHEN status = 'FAIL' THEN 1 ELSE 0 END) AS fail_count,
+            SUM(CASE WHEN status = 'WARN' THEN 1 ELSE 0 END) AS warn_count,
+            SUM(CASE WHEN status = 'NOT_EXECUTED' THEN 1 ELSE 0 END) AS not_exec_count,
+            ROUND(SUM(CAST(COALESCE(NULLIF(cost_usd, ''), '0') AS DOUBLE)), 4) AS total_cost
+        FROM {database}.{table}
+        WHERE run_date = '{run_date}'
+        GROUP BY event_type
+        ORDER BY event_type
+    """
+
+    # Query 2: Summary by run_id
+    sql_by_run = f"""
+        SELECT
+            run_id,
+            MAX(overall_status) AS overall_status,
+            COUNT(*) AS event_count,
+            ROUND(SUM(CAST(COALESCE(NULLIF(cost_usd, ''), '0') AS DOUBLE)), 4) AS total_cost,
+            MIN(event_timestamp) AS first_event,
+            MAX(event_timestamp) AS last_event
+        FROM {database}.{table}
+        WHERE run_date = '{run_date}'
+        GROUP BY run_id
+        ORDER BY MIN(event_timestamp) DESC
+    """
+
+    try:
+        result_layer = run_athena_query(sql_by_layer, database, output_location, workgroup)
+        result_run = run_athena_query(sql_by_run, database, output_location, workgroup)
+    except Exception as exc:
+        logger.warning("Audit summary query failed (non-fatal): %s", exc)
+        return None
+
+    if result_layer["state"] != "SUCCEEDED" or result_run["state"] != "SUCCEEDED":
+        logger.warning("Audit summary query did not succeed")
+        return None
+
+    # Parse layer results
+    layer_headers, layer_data = parse_athena_rows(result_layer["rows"])
+    by_layer = []
+    totals = {"total": 0, "pass": 0, "fail": 0, "warn": 0, "not_exec": 0,
+              "cost_usd": 0.0, "distinct_runs": 0}
+    for row in layer_data:
+        entry = {
+            "event_type": row.get("event_type", ""),
+            "total": int(float(row.get("total_checks", 0))),
+            "pass": int(float(row.get("pass_count", 0))),
+            "fail": int(float(row.get("fail_count", 0))),
+            "warn": int(float(row.get("warn_count", 0))),
+            "not_exec": int(float(row.get("not_exec_count", 0))),
+            "cost_usd": float(row.get("total_cost", 0)),
+        }
+        by_layer.append(entry)
+        totals["total"] += entry["total"]
+        totals["pass"] += entry["pass"]
+        totals["fail"] += entry["fail"]
+        totals["warn"] += entry["warn"]
+        totals["not_exec"] += entry["not_exec"]
+        totals["cost_usd"] += entry["cost_usd"]
+
+    # Parse run results
+    run_headers, run_data = parse_athena_rows(result_run["rows"])
+    runs = []
+    for row in run_data:
+        runs.append({
+            "run_id": row.get("run_id", ""),
+            "overall_status": row.get("overall_status", ""),
+            "event_count": int(float(row.get("event_count", 0))),
+            "cost_usd": float(row.get("total_cost", 0)),
+            "first_event": row.get("first_event", ""),
+            "last_event": row.get("last_event", ""),
+        })
+    totals["distinct_runs"] = len(runs)
+
+    overall = "PASS" if totals["fail"] == 0 else "FAIL"
+    return {
+        "by_layer": by_layer,
+        "totals": totals,
+        "runs": runs,
+        "status": overall,
+    }
+
+
 # ============================================================================
 # 7. CHART GENERATION (matplotlib → base64 PNG)
 # ============================================================================
@@ -1596,10 +1710,10 @@ def generate_dashboard_html(
     run_id, run_date, run_mode, stale_results, glue_results,
     validation_results, comparison_results, summary_results,
     overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0,
-    deviation_alerts=None, summary_config=None
+    deviation_alerts=None, summary_config=None, audit_day_summary=None
 ):
     """Generate a full dashboard HTML email body with charts, KPI scorecards,
-    deviation alerts, and optional GIF embeds."""
+    deviation alerts, optional GIF embeds, and today's audit summary."""
     deviation_alerts = deviation_alerts or []
     summary_config = summary_config or {}
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -2020,6 +2134,141 @@ def generate_dashboard_html(
                 html += '</div></td></tr>'
 
         html += "</tbody></table>"
+        section_num += 1
+
+    # ---- Section: Today's Audit Summary (all runs across all layers) ----
+    if audit_day_summary and run_mode == "summary":
+        ads = audit_day_summary
+        tot = ads["totals"]
+        html += f"<h2>{section_num}. Today's Overall Audit Summary</h2>"
+        html += f"""<p style="color:#666;font-size:12px;">
+            Aggregated from <b>{tot['distinct_runs']}</b> run(s) recorded in
+            <code>audit_db.etl_orchestrator_audit</code> for {run_date}.</p>"""
+
+        # KPI cards for audit totals
+        aud_pass_rate = (tot["pass"] / tot["total"] * 100) if tot["total"] > 0 else 0
+        aud_pass_color = "#28a745" if aud_pass_rate >= 80 else (
+            "#fd7e14" if aud_pass_rate >= 60 else "#dc3545")
+        html += f"""
+        <div style="display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;">
+          <div style="flex:1;min-width:130px;background:#f0fff0;border-left:4px solid #28a745;
+                      border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">TOTAL CHECKS</div>
+            <div style="color:#2c3e50;font-size:26px;font-weight:bold;">{tot['total']}</div>
+            <div style="color:#888;font-size:10px;">across all runs</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:#f0fff0;border-left:4px solid #28a745;
+                      border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">PASSED</div>
+            <div style="color:#28a745;font-size:26px;font-weight:bold;">{tot['pass']}</div>
+            <div style="color:#888;font-size:10px;">{aud_pass_rate:.1f}%</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:#fff0f0;border-left:4px solid #dc3545;
+                      border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">FAILED</div>
+            <div style="color:#dc3545;font-size:26px;font-weight:bold;">{tot['fail']}</div>
+            <div style="color:#888;font-size:10px;">{(tot['fail']/tot['total']*100) if tot['total'] else 0:.1f}%</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:#fff8e1;border-left:4px solid #fd7e14;
+                      border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">WARNINGS</div>
+            <div style="color:#fd7e14;font-size:26px;font-weight:bold;">{tot['warn']}</div>
+            <div style="color:#888;font-size:10px;">{(tot['warn']/tot['total']*100) if tot['total'] else 0:.1f}%</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:#f5f5f5;border-left:4px solid #6c757d;
+                      border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">NOT EXECUTED</div>
+            <div style="color:#6c757d;font-size:26px;font-weight:bold;">{tot['not_exec']}</div>
+            <div style="color:#888;font-size:10px;">{(tot['not_exec']/tot['total']*100) if tot['total'] else 0:.1f}%</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:15px;margin-bottom:20px;">
+          <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+                      padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">OVERALL PASS RATE (TODAY)</div>
+            <div style="margin:8px 0;">
+              <div style="background:#e9ecef;border-radius:10px;height:20px;overflow:hidden;">
+                <div style="background:{aud_pass_color};height:100%;width:{aud_pass_rate:.0f}%;
+                            border-radius:10px;"></div>
+              </div>
+            </div>
+            <div style="color:{aud_pass_color};font-size:22px;font-weight:bold;">{aud_pass_rate:.1f}%</div>
+          </div>
+          <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+                      padding:15px;text-align:center;">
+            <div style="color:#666;font-size:10px;font-weight:bold;">TOTAL ATHENA COST (TODAY)</div>
+            <div style="color:#8e44ad;font-size:22px;font-weight:bold;margin-top:12px;">
+              ${tot['cost_usd']:.4f}</div>
+            <div style="color:#888;font-size:10px;margin-top:4px;">
+              {tot['distinct_runs']} run(s)</div>
+          </div>
+        </div>"""
+
+        # By-layer breakdown table
+        if ads["by_layer"]:
+            html += """<h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
+                        border-left:3px solid #8e44ad;padding-left:10px;">
+                        Breakdown by Layer / Event Type</h3>"""
+            html += """<table><thead><tr>
+                <th>Layer / Event Type</th><th>Total</th><th>Passed</th>
+                <th>Failed</th><th>Warnings</th><th>Not Executed</th>
+                <th>Pass Rate</th><th>Cost (USD)</th>
+                </tr></thead><tbody>"""
+            for layer in ads["by_layer"]:
+                lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
+                pr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
+                fail_style = ' style="color:#dc3545;font-weight:bold;"' if layer["fail"] > 0 else ""
+                html += f"""<tr>
+                    <td><b>{layer['event_type']}</b></td>
+                    <td style="text-align:center;">{layer['total']}</td>
+                    <td style="text-align:center;color:#28a745;font-weight:bold;">{layer['pass']}</td>
+                    <td style="text-align:center;"{fail_style}>{layer['fail']}</td>
+                    <td style="text-align:center;">{layer['warn']}</td>
+                    <td style="text-align:center;">{layer['not_exec']}</td>
+                    <td style="text-align:center;">
+                      <span style="color:{pr_color};font-weight:bold;">{lpr:.1f}%</span>
+                    </td>
+                    <td style="text-align:right;">${layer['cost_usd']:.4f}</td>
+                    </tr>"""
+            # Totals row
+            html += f"""<tr style="background:#e8f4fd;font-weight:bold;">
+                <td>TOTAL</td>
+                <td style="text-align:center;">{tot['total']}</td>
+                <td style="text-align:center;color:#28a745;">{tot['pass']}</td>
+                <td style="text-align:center;color:#dc3545;">{tot['fail']}</td>
+                <td style="text-align:center;">{tot['warn']}</td>
+                <td style="text-align:center;">{tot['not_exec']}</td>
+                <td style="text-align:center;">
+                  <span style="color:{aud_pass_color};">{aud_pass_rate:.1f}%</span>
+                </td>
+                <td style="text-align:right;">${tot['cost_usd']:.4f}</td>
+                </tr>"""
+            html += "</tbody></table>"
+
+        # Runs breakdown table
+        if ads["runs"]:
+            html += """<h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
+                        border-left:3px solid #3498db;padding-left:10px;">
+                        Today's Runs</h3>"""
+            html += """<table><thead><tr>
+                <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
+                <th>Cost (USD)</th><th>First Event</th><th>Last Event</th>
+                </tr></thead><tbody>"""
+            for i, r in enumerate(ads["runs"], 1):
+                r_color = "#28a745" if r["overall_status"] == "PASS" else "#dc3545"
+                html += f"""<tr>
+                    <td>{i}</td>
+                    <td><code style="font-size:11px;">{r['run_id']}</code></td>
+                    <td><span class="badge" style="background-color:{r_color};">
+                        {r['overall_status']}</span></td>
+                    <td style="text-align:center;">{r['event_count']}</td>
+                    <td style="text-align:right;">${r['cost_usd']:.4f}</td>
+                    <td style="font-size:11px;">{r['first_event']}</td>
+                    <td style="font-size:11px;">{r['last_event']}</td>
+                    </tr>"""
+            html += "</tbody></table>"
+
         section_num += 1
 
     # ---- Section: Summary Results + Charts (Enhanced with deviation alerts & GIFs) ----
@@ -2453,6 +2702,33 @@ def main():
     total_cost_usd += sum(cr.get("cost_usd", 0) for cr in comparison_results)
     run_duration_sec = time.time() - run_start_time
 
+    # Fetch today's audit summary (all runs, all layers) for the summary section
+    audit_day_summary = None
+    if run_mode == "summary" and audit_cfg.get("database") and audit_cfg.get("table"):
+        try:
+            val_cfg = config.get("validations", {})
+            aud_output_bucket = val_cfg.get("athena_output_bucket", "")
+            if not aud_output_bucket:
+                _esc = summary_config if summary_config else config
+                aud_output_bucket = _esc.get("summary", {}).get("athena_output_bucket", "")
+            aud_output_location = f"s3://{aud_output_bucket}/audit_summary/"
+            aud_workgroup = val_cfg.get("athena_workgroup", "primary")
+            logger.info("Fetching today's audit summary from %s.%s",
+                        audit_cfg["database"], audit_cfg["table"])
+            audit_day_summary = fetch_audit_summary_for_today(
+                audit_cfg, run_date, aud_output_location, aud_workgroup)
+            if audit_day_summary:
+                logger.info(
+                    "Audit summary: %d runs, %d total checks, %d pass, %d fail, cost $%.4f",
+                    audit_day_summary["totals"]["distinct_runs"],
+                    audit_day_summary["totals"]["total"],
+                    audit_day_summary["totals"]["pass"],
+                    audit_day_summary["totals"]["fail"],
+                    audit_day_summary["totals"]["cost_usd"],
+                )
+        except Exception as exc:
+            logger.warning("Audit summary fetch failed (non-fatal): %s", exc)
+
     # Deviation alerts (populated only in summary mode)
     _deviation_alerts = locals().get("deviation_alerts", [])
     _effective_summary_cfg = {}
@@ -2467,7 +2743,8 @@ def main():
         run_duration_sec=run_duration_sec,
         total_cost_usd=total_cost_usd,
         deviation_alerts=_deviation_alerts,
-        summary_config=_effective_summary_cfg)
+        summary_config=_effective_summary_cfg,
+        audit_day_summary=audit_day_summary)
     send_email(html, email_cfg, overall_status, run_mode)
 
     # ---- Final Summary ----
