@@ -487,6 +487,38 @@ def generate_trend_chart(chart_cfg, data, columns):
             ax.annotate(f"{v:,.0f}", (i, v), textcoords="offset points",
                         xytext=(0, 5), ha="center", fontsize=8, fontweight="bold")
 
+    elif chart_type == "pie":
+        label_col = chart_cfg.get("label_column", x_col)
+        value_col = chart_cfg.get("value_column", y_col)
+        labels = df[label_col].astype(str).tolist()
+        values = pd.to_numeric(df[value_col], errors="coerce").fillna(0).tolist()
+        if top_n and len(labels) > top_n:
+            # Keep top N, group rest as "Others"
+            paired = sorted(zip(values, labels), reverse=True)
+            top_vals = [v for v, _ in paired[:top_n]]
+            top_labels = [l for _, l in paired[:top_n]]
+            others_sum = sum(v for v, _ in paired[top_n:])
+            if others_sum > 0:
+                top_vals.append(others_sum)
+                top_labels.append("Others")
+            values, labels = top_vals, top_labels
+        colors = [VIBRANT_COLORS[i % len(VIBRANT_COLORS)] for i in range(len(labels))]
+        wedges, texts, autotexts = ax.pie(
+            values, labels=labels, colors=colors,
+            autopct="%1.1f%%", startangle=140, pctdistance=0.78,
+            wedgeprops={"edgecolor": "white", "linewidth": 2},
+        )
+        for t in autotexts:
+            t.set_fontsize(9)
+            t.set_fontweight("bold")
+            t.set_color("white")
+        for t in texts:
+            t.set_fontsize(9)
+            t.set_color("#2c3e50")
+        ax.set_title(title, fontsize=13, fontweight="bold", color="#2c3e50", pad=15)
+        plt.tight_layout()
+        return _to_b64_png(fig)
+
     else:
         plt.close(fig)
         return None
@@ -745,9 +777,7 @@ def generate_dashboard_html(
                         transition: transform 0.2s; }}
         .summary-pill .pill-icon {{ font-size: 18px; }}
 
-        .kpi-row {{ display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                    gap: 16px; margin: 22px 0; }}
+        .kpi-row {{ margin: 22px 0; }}
         .kpi-card {{ border-radius: 16px; padding: 22px 16px;
                      text-align: center; position: relative;
                      overflow: hidden; box-shadow: 0 6px 20px rgba(0,0,0,0.10);
@@ -774,12 +804,12 @@ def generate_dashboard_html(
         .kpi-icon {{ font-size: 34px; margin-bottom: 10px; position: relative;
                      display: inline-block;
                      animation: kpi-float 3s ease-in-out infinite; }}
-        .kpi-label {{ font-size: 10px; font-weight: bold;
+        .kpi-label {{ font-size: 11px; font-weight: bold;
                       text-transform: uppercase; letter-spacing: 0.8px;
-                      position: relative; color: rgba(255,255,255,0.85); }}
+                      position: relative; }}
         .kpi-value {{ font-size: 32px; font-weight: bold; margin: 10px 0 4px 0;
-                      position: relative; color: #fff;
-                      text-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                      position: relative;
+                      text-shadow: 0 2px 8px rgba(0,0,0,0.08);
                       animation: kpi-pulse 4s ease-in-out infinite; }}
 
         .chart-container {{ margin: 22px 0; text-align: center; }}
@@ -853,17 +883,18 @@ def generate_dashboard_html(
 
     <div class="spacer"></div>"""
 
-    # ---- KPI Scorecard (animated parallel tiles) ----
-    # Distinct gradient palettes for each tile position
-    KPI_TILE_GRADIENTS = [
-        ("linear-gradient(135deg, #667eea 0%, #764ba2 100%)", "#667eea"),  # purple-indigo
-        ("linear-gradient(135deg, #f093fb 0%, #f5576c 100%)", "#f5576c"),  # pink-rose
-        ("linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)", "#4facfe"),  # blue-cyan
-        ("linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)", "#43e97b"),  # green-teal
-        ("linear-gradient(135deg, #fa709a 0%, #fee140 100%)", "#fa709a"),  # pink-yellow
-        ("linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)", "#a18cd1"),  # lavender-pink
-        ("linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)", "#d57eeb"),  # peach-purple
-        ("linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)", "#8ec5fc"),  # lilac-sky
+    # ---- KPI Scorecard (animated parallel tiles via HTML table) ----
+    # Each tile: gradient background, dark contrasting value, animated icon
+    KPI_TILE_STYLES = [
+        # (background_gradient, value_color, label_color, fallback_bg)
+        ("linear-gradient(135deg, #e8f0fe 0%, #d4e4ff 100%)", "#1a237e", "#3949ab", "#d4e4ff"),
+        ("linear-gradient(135deg, #fce4ec 0%, #f8bbd0 100%)", "#880e4f", "#ad1457", "#f8bbd0"),
+        ("linear-gradient(135deg, #e0f7fa 0%, #b2ebf2 100%)", "#006064", "#00838f", "#b2ebf2"),
+        ("linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%)", "#1b5e20", "#2e7d32", "#c8e6c9"),
+        ("linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%)", "#e65100", "#ef6c00", "#ffe0b2"),
+        ("linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%)", "#4a148c", "#6a1b9a", "#e1bee7"),
+        ("linear-gradient(135deg, #fbe9e7 0%, #ffccbc 100%)", "#bf360c", "#d84315", "#ffccbc"),
+        ("linear-gradient(135deg, #e8eaf6 0%, #c5cae9 100%)", "#283593", "#3949ab", "#c5cae9"),
     ]
 
     # Filter out "retention" KPIs
@@ -876,7 +907,11 @@ def generate_dashboard_html(
     if filtered_kpis:
         html += f'<h2><span class="section-icon">{SECTION_ICONS["kpi"]}</span> 1. Membership KPIs</h2>'
         html += '<div class="spacer-sm"></div>'
-        html += '<div class="kpi-row">'
+        # Use HTML table for guaranteed side-by-side rendering in all email clients
+        n_kpis = len(filtered_kpis)
+        td_width = max(int(100 / n_kpis), 15)
+        html += f'<table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:22px 0;"><tr>'
+
         for idx, kpi in enumerate(filtered_kpis):
             val = kpi.get("value")
             icon_key = kpi.get("name", "default")
@@ -893,18 +928,21 @@ def generate_dashboard_html(
             else:
                 val_str = f"{val:,.0f}"
 
-            # Cycle through gradient palettes
-            gradient, _ = KPI_TILE_GRADIENTS[idx % len(KPI_TILE_GRADIENTS)]
-            # Stagger the animation delay per tile for a cascade effect
+            # Cycle through tile styles
+            gradient, val_color, lbl_color, fallback_bg = KPI_TILE_STYLES[idx % len(KPI_TILE_STYLES)]
             anim_delay = f"{idx * 0.4:.1f}s"
 
             html += f"""
-            <div class="kpi-card" style="background:{gradient};">
+            <td width="{td_width}%" valign="top" style="padding:0 8px;">
+              <div class="kpi-card" style="background:{gradient};
+                          background-color:{fallback_bg};">
                 <div class="kpi-icon" style="animation-delay:{anim_delay};">{kpi_icon}</div>
-                <div class="kpi-label">{kpi['display_name']}</div>
-                <div class="kpi-value" style="animation-delay:{anim_delay};">{val_str}</div>
-            </div>"""
-        html += "</div>"
+                <div class="kpi-label" style="color:{lbl_color};">{kpi['display_name']}</div>
+                <div class="kpi-value" style="color:{val_color};animation-delay:{anim_delay};">
+                    {val_str}</div>
+              </div>
+            </td>"""
+        html += "</tr></table>"
         html += '<div class="spacer"></div>'
 
     # ---- Pass Rate + Category Charts ----
@@ -1056,6 +1094,7 @@ def generate_dashboard_html(
             "grouped_bar": "&#x1F4CA;",   # bar chart
             "stacked_bar": "&#x1F4CA;",   # bar chart
             "bar": "&#x1F4CA;",           # bar chart
+            "pie": "&#x1F967;",           # pie
         }
 
         for idx, tr in enumerate(trend_results):
