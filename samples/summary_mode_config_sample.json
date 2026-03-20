@@ -1,7 +1,7 @@
 {
   "orchestrator": {
     "run_mode": "summary",
-    "description": "Summary mode – Statewise/Club/Product analytics with 30-day deviation alerts"
+    "description": "Summary mode – Audit summary, Z-score analysis (7d vs 30d rolling), Trends charts (state-wise)"
   },
 
   "summary": {
@@ -9,78 +9,77 @@
     "athena_output_prefix": "summary_results/",
     "athena_workgroup": "primary",
     "max_parallel": 5,
-    "deviation_threshold_pct": 20,
 
     "gif_urls": {
       "header": "https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif",
       "trend": "https://media.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif"
     },
 
+    "zscore_queries": [
+      {
+        "name": "membership_zscore_7d",
+        "description": "Daily membership counts – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_count",
+        "avg_column": "avg_30d",
+        "stddev_column": "stddev_30d",
+        "query": "WITH daily_counts AS ( SELECT load_date, COUNT(*) AS daily_count FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_count AS today_count, ROUND(AVG(r.daily_count), 0) AS avg_30d, ROUND(STDDEV(r.daily_count), 2) AS stddev_30d FROM daily_counts d JOIN daily_counts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_count ) SELECT load_date, today_count, avg_30d, stddev_30d FROM rolling_stats ORDER BY load_date DESC"
+      },
+      {
+        "name": "transaction_zscore_7d",
+        "description": "Daily transaction counts – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_count",
+        "avg_column": "avg_30d",
+        "stddev_column": "stddev_30d",
+        "query": "WITH daily_counts AS ( SELECT load_date, COUNT(*) AS daily_count FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_count AS today_count, ROUND(AVG(r.daily_count), 0) AS avg_30d, ROUND(STDDEV(r.daily_count), 2) AS stddev_30d FROM daily_counts d JOIN daily_counts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_count ) SELECT load_date, today_count, avg_30d, stddev_30d FROM rolling_stats ORDER BY load_date DESC"
+      },
+      {
+        "name": "transaction_amount_zscore_7d",
+        "description": "Daily transaction amounts ($) – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_amount",
+        "avg_column": "avg_30d_amount",
+        "stddev_column": "stddev_30d_amount",
+        "query": "WITH daily_amounts AS ( SELECT load_date, ROUND(SUM(amount), 2) AS daily_amount FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_amount AS today_amount, ROUND(AVG(r.daily_amount), 2) AS avg_30d_amount, ROUND(STDDEV(r.daily_amount), 2) AS stddev_30d_amount FROM daily_amounts d JOIN daily_amounts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_amount ) SELECT load_date, today_amount, avg_30d_amount, stddev_30d_amount FROM rolling_stats ORDER BY load_date DESC"
+      }
+    ],
+
     "queries": [
       {
-        "name": "statewise_club_counts",
-        "description": "State x Club member counts – Today vs 30-day average with deviation %",
+        "name": "statewise_member_counts",
+        "description": "State-wise member count distribution – last 30 days aggregate",
         "database": "curated_db",
-        "query": "WITH today_data AS ( SELECT state_code, club_id, COUNT(*) AS today_count FROM curated_db.membership WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY state_code, club_id ), baseline AS ( SELECT state_code, club_id, ROUND(AVG(daily_count), 0) AS avg_30d FROM ( SELECT state_code, club_id, load_date, COUNT(*) AS daily_count FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY state_code, club_id, load_date ) GROUP BY state_code, club_id ) SELECT t.state_code, t.club_id, t.today_count, COALESCE(b.avg_30d, 0) AS avg_30d_count, CASE WHEN b.avg_30d > 0 THEN ROUND((CAST(t.today_count AS DOUBLE) - b.avg_30d) / b.avg_30d * 100, 1) ELSE 0 END AS deviation_pct FROM today_data t LEFT JOIN baseline b ON t.state_code = b.state_code AND t.club_id = b.club_id ORDER BY ABS(CASE WHEN b.avg_30d > 0 THEN (CAST(t.today_count AS DOUBLE) - b.avg_30d) / b.avg_30d * 100 ELSE 0 END) DESC",
-        "chart": {
-          "type": "bar",
-          "title": "State x Club – Today vs 30-Day Avg",
-          "x_column": "state_code",
-          "y_column": "today_count"
-        },
-        "deviation_alert": {
-          "enabled": true,
-          "threshold_pct": 20,
-          "compare_column": "deviation_pct",
-          "group_columns": ["state_code", "club_id"]
-        }
-      },
-      {
-        "name": "club_bill_plans",
-        "description": "Bill plan breakdown for each club – plan types, member count, total amount",
-        "database": "curated_db",
-        "query": "SELECT m.club_id, m.bill_plan, COUNT(*) AS member_count, ROUND(SUM(m.bill_amount), 2) AS total_amount, ROUND(AVG(m.bill_amount), 2) AS avg_amount FROM curated_db.membership m WHERE m.load_date = CAST(current_date AS VARCHAR) GROUP BY m.club_id, m.bill_plan ORDER BY m.club_id, total_amount DESC",
-        "chart": {
-          "type": "bar",
-          "title": "Bill Plans by Club – Total Amount",
-          "x_column": "club_id",
-          "y_column": "total_amount"
-        }
-      },
-      {
-        "name": "product_cost_by_state",
-        "description": "Product amount/cost by product and state – Today vs 30-day avg with deviation",
-        "database": "curated_db",
-        "query": "WITH today_data AS ( SELECT product_code, state_code, ROUND(SUM(amount), 2) AS today_amount, COUNT(*) AS today_txn_count FROM curated_db.transactions WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY product_code, state_code ), baseline AS ( SELECT product_code, state_code, ROUND(AVG(daily_amount), 2) AS avg_30d_amount, ROUND(AVG(daily_txn_count), 0) AS avg_30d_txn_count FROM ( SELECT product_code, state_code, load_date, SUM(amount) AS daily_amount, COUNT(*) AS daily_txn_count FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY product_code, state_code, load_date ) GROUP BY product_code, state_code ) SELECT t.product_code, t.state_code, t.today_amount, t.today_txn_count, COALESCE(b.avg_30d_amount, 0) AS avg_30d_amount, COALESCE(b.avg_30d_txn_count, 0) AS avg_30d_txn_count, CASE WHEN b.avg_30d_amount > 0 THEN ROUND((t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100, 1) ELSE 0 END AS amount_deviation_pct, CASE WHEN b.avg_30d_txn_count > 0 THEN ROUND((CAST(t.today_txn_count AS DOUBLE) - b.avg_30d_txn_count) / b.avg_30d_txn_count * 100, 1) ELSE 0 END AS txn_deviation_pct FROM today_data t LEFT JOIN baseline b ON t.product_code = b.product_code AND t.state_code = b.state_code ORDER BY ABS(CASE WHEN b.avg_30d_amount > 0 THEN (t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100 ELSE 0 END) DESC",
-        "chart": {
-          "type": "bar",
-          "title": "Product Cost by State – Today vs 30-Day Avg",
-          "x_column": "product_code",
-          "y_column": "today_amount"
-        },
-        "deviation_alert": {
-          "enabled": true,
-          "threshold_pct": 20,
-          "compare_column": "amount_deviation_pct",
-          "group_columns": ["product_code", "state_code"]
-        }
-      },
-      {
-        "name": "product_cost_overall",
-        "description": "Product cost summary across all states – Today vs 30-day trend",
-        "database": "curated_db",
-        "query": "WITH today_data AS ( SELECT product_code, ROUND(SUM(amount), 2) AS today_amount, COUNT(*) AS today_txn_count, COUNT(DISTINCT state_code) AS states_active FROM curated_db.transactions WHERE load_date = CAST(current_date AS VARCHAR) GROUP BY product_code ), baseline AS ( SELECT product_code, ROUND(AVG(daily_amount), 2) AS avg_30d_amount FROM ( SELECT product_code, load_date, SUM(amount) AS daily_amount FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) AND load_date < CAST(current_date AS VARCHAR) GROUP BY product_code, load_date ) GROUP BY product_code ) SELECT t.product_code, t.today_amount, t.today_txn_count, t.states_active, COALESCE(b.avg_30d_amount, 0) AS avg_30d_amount, CASE WHEN b.avg_30d_amount > 0 THEN ROUND((t.today_amount - b.avg_30d_amount) / b.avg_30d_amount * 100, 1) ELSE 0 END AS deviation_pct FROM today_data t LEFT JOIN baseline b ON t.product_code = b.product_code ORDER BY t.today_amount DESC",
+        "query": "SELECT state_code, COUNT(*) AS total_members, COUNT(DISTINCT club_id) AS clubs_active, COUNT(DISTINCT load_date) AS days_active FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY state_code ORDER BY total_members DESC",
         "chart": {
           "type": "pie",
-          "title": "Product Cost Distribution (Today)",
-          "label_column": "product_code",
-          "value_column": "today_amount"
-        },
-        "deviation_alert": {
-          "enabled": true,
-          "threshold_pct": 20,
-          "compare_column": "deviation_pct",
-          "group_columns": ["product_code"]
+          "title": "State-wise Member Distribution (30 Days)",
+          "label_column": "state_code",
+          "value_column": "total_members"
+        }
+      },
+      {
+        "name": "statewise_transaction_counts",
+        "description": "State-wise transaction count and amount – last 30 days",
+        "database": "curated_db",
+        "query": "SELECT state_code, COUNT(*) AS txn_count, ROUND(SUM(amount), 2) AS total_amount, COUNT(DISTINCT product_code) AS products_active FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY state_code ORDER BY txn_count DESC",
+        "chart": {
+          "type": "bar",
+          "title": "State-wise Transaction Counts (30 Days)",
+          "x_column": "state_code",
+          "y_column": "txn_count"
+        }
+      },
+      {
+        "name": "club_wise_member_counts",
+        "description": "Club-wise member counts – last 30 days",
+        "database": "curated_db",
+        "query": "SELECT club_id, COUNT(*) AS total_members, COUNT(DISTINCT state_code) AS states_present, COUNT(DISTINCT bill_plan) AS plan_types FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY club_id ORDER BY total_members DESC",
+        "chart": {
+          "type": "bar",
+          "title": "Club-wise Member Counts (30 Days)",
+          "x_column": "club_id",
+          "y_column": "total_members"
         }
       },
       {
@@ -114,9 +113,10 @@
   },
 
   "_notes": {
-    "usage": "python etl_orchestrator.py --config main_config.json --summary-config summary_mode_config_sample.json",
-    "deviation_alerts": "Rows where deviation_pct > 20% are automatically flagged RED in the email with ALERT badges and deviation detail cards. Threshold is configurable via deviation_threshold_pct.",
-    "gifs": "Two decorative GIFs embedded via gif_urls config: 'header' (top of email) and 'trend' (before summary cards). Replace GIPHY URLs with your own S3-hosted GIFs for production use.",
+    "usage": "python etl_orchestrator.py --config summary_mode_config_sample.json",
+    "zscore": "Z-score queries run for last 7 days. z_score and z_flag (CRITICAL/WARNING/NORMAL) are computed in Python. |z|>=3 CRITICAL, |z|>=2 WARNING.",
+    "trends": "Trend queries show state/club-wise counts for last 30 days. Charts rendered as animated GIF (bar growing, pie expanding, trend drawing) if Pillow is installed, else static PNG.",
+    "gifs": "Two decorative GIFs embedded via gif_urls: 'header' (top of email) and 'trend' (before trend charts). Replace with your own S3-hosted GIFs for production.",
     "table_names": "Replace curated_db.membership and curated_db.transactions with your actual table/column names."
   }
 }

@@ -20,6 +20,7 @@
 # 03/2026       Dhilipan        Cross-query comparisons, summary mode, chart generation
 # 03/2026       Dhilipan        Athena retry, cost tracking, summary dashboard, streamlit
 # 03/2026       Dhilipan        Summary mode: deviation alerts (20%), GIF support, enhanced HTML
+# 03/2026       Dhilipan        Summary v2: Z-score analysis, trends charts, animated GIF output
 #
 #=================================================================================================
 ###################################################################################################
@@ -51,6 +52,13 @@ try:
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
+
+# Optional: Pillow for animated GIF generation
+try:
+    from PIL import Image as PILImage
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1215,12 +1223,10 @@ def run_summary_queries(config):
                 "status": STATUS_FAIL, "detail": f"State: {result['state']}",
             }
         headers, data = parse_athena_rows(result["rows"])
-        # Carry deviation_alert config through to HTML renderer
         return {
             "name": qdef["name"], "description": qdef.get("description", ""),
             "chart": qdef.get("chart"), "headers": headers, "data": data,
             "status": STATUS_PASS, "detail": f"{len(data)} row(s) returned",
-            "deviation_alert": qdef.get("deviation_alert"),
         }
 
     results = []
@@ -1238,40 +1244,91 @@ def run_summary_queries(config):
     return results
 
 
-def detect_deviation_alerts(summary_results, default_threshold=20):
+def run_zscore_analysis(config, output_location, workgroup="primary"):
     """
-    Scan summary results for rows exceeding the deviation threshold.
-    Returns a list of alert dicts:
-      {query_name, group_label, deviation_pct, threshold, direction}
-    Each summary result may carry a 'deviation_alert' config:
-      {enabled: true, threshold_pct: 20, compare_column: "deviation_pct",
-       group_columns: ["state_code", "club_id"]}
+    Execute z-score queries defined in config["summary"]["zscore_queries"].
+    Each query should return rows with columns for the past 7 days:
+      date, metric_name, today_count, avg_30d, stddev_30d
+    Z-score is computed in Python: (today_count - avg_30d) / stddev_30d
+
+    Returns list of dicts:
+      {name, description, headers, data, status, detail}
+    where each data row gets an extra 'z_score' and 'z_flag' field.
     """
-    alerts = []
-    for sr in summary_results:
-        da = sr.get("deviation_alert")
-        if not da or not da.get("enabled") or sr["status"] != STATUS_PASS:
-            continue
-        threshold = da.get("threshold_pct", default_threshold)
-        compare_col = da.get("compare_column", "deviation_pct")
-        group_cols = da.get("group_columns", [])
-        for row in sr.get("data", []):
+    sum_cfg = config.get("summary", {})
+    zscore_queries = sum_cfg.get("zscore_queries", [])
+    max_parallel = sum_cfg.get("max_parallel", 5)
+    output_bucket = sum_cfg.get("athena_output_bucket", "")
+    output_prefix = sum_cfg.get("athena_output_prefix", "summary_results/")
+    if not output_location:
+        output_location = f"s3://{output_bucket}/{output_prefix}"
+
+    if not zscore_queries:
+        return []
+
+    logger.info("Running %d z-score queries", len(zscore_queries))
+
+    def _run_one(qdef):
+        count_col = qdef.get("count_column", "today_count")
+        avg_col = qdef.get("avg_column", "avg_30d")
+        stddev_col = qdef.get("stddev_column", "stddev_30d")
+        try:
+            result = run_athena_query(
+                qdef["query"], qdef.get("database", "default"),
+                output_location, workgroup)
+        except Exception as exc:
+            return {
+                "name": qdef["name"], "description": qdef.get("description", ""),
+                "headers": [], "data": [],
+                "status": STATUS_FAIL, "detail": str(exc),
+            }
+        if result["state"] != "SUCCEEDED":
+            return {
+                "name": qdef["name"], "description": qdef.get("description", ""),
+                "headers": [], "data": [],
+                "status": STATUS_FAIL, "detail": f"State: {result['state']}",
+            }
+        headers, data = parse_athena_rows(result["rows"])
+
+        # Compute z-score for each row in Python
+        for row in data:
             try:
-                dev_val = float(row.get(compare_col, 0))
+                val = float(row.get(count_col, 0))
+                avg = float(row.get(avg_col, 0))
+                std = float(row.get(stddev_col, 0))
+                z = round((val - avg) / std, 2) if std > 0 else 0.0
             except (ValueError, TypeError):
-                continue
-            if abs(dev_val) > threshold:
-                group_label = " / ".join(
-                    str(row.get(g, "")) for g in group_cols
-                ) if group_cols else sr["name"]
-                alerts.append({
-                    "query_name": sr["name"],
-                    "group_label": group_label,
-                    "deviation_pct": dev_val,
-                    "threshold": threshold,
-                    "direction": "above" if dev_val > 0 else "below",
-                })
-    return alerts
+                z = 0.0
+            row["z_score"] = str(z)
+            abs_z = abs(z)
+            if abs_z >= 3:
+                row["z_flag"] = "CRITICAL"
+            elif abs_z >= 2:
+                row["z_flag"] = "WARNING"
+            else:
+                row["z_flag"] = "NORMAL"
+
+        if "z_score" not in headers:
+            headers.append("z_score")
+        if "z_flag" not in headers:
+            headers.append("z_flag")
+
+        return {
+            "name": qdef["name"], "description": qdef.get("description", ""),
+            "headers": headers, "data": data,
+            "status": STATUS_PASS, "detail": f"{len(data)} row(s) returned",
+        }
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        futures = {executor.submit(_run_one, qdef): qdef for qdef in zscore_queries}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    # Re-order to match config order
+    order = {q["name"]: i for i, q in enumerate(zscore_queries)}
+    results.sort(key=lambda r: order.get(r["name"], 999))
+    return results
 
 
 def fetch_audit_summary_for_today(audit_cfg, run_date, output_location, workgroup="primary"):
@@ -1389,24 +1446,11 @@ def fetch_audit_summary_for_today(audit_cfg, run_date, output_location, workgrou
 
 
 # ============================================================================
-# 7. CHART GENERATION (matplotlib → base64 PNG)
+# 7. CHART GENERATION (matplotlib → animated GIF via Pillow)
 # ============================================================================
-def generate_chart_base64(chart_cfg, headers, data):
-    """
-    Generate a chart as a base64-encoded PNG string.
-    Returns base64 string or None if matplotlib is unavailable or data is empty.
-
-    chart_cfg keys:
-      type         : "bar" | "pie" | "trend"
-      title        : chart title
-      x_column     : column for X axis (bar, trend)
-      y_column     : column for Y axis (bar, trend)
-      label_column : column for pie labels
-      value_column : column for pie values
-    """
-    if not HAS_MATPLOTLIB or not data:
-        return None
-
+def _render_chart_frame(chart_cfg, headers, data, fraction=1.0):
+    """Render a single matplotlib chart frame with data scaled by fraction (0..1).
+    Returns a matplotlib Figure object."""
     chart_type = chart_cfg.get("type", "bar")
     title = chart_cfg.get("title", "Chart")
 
@@ -1415,7 +1459,6 @@ def generate_chart_base64(chart_cfg, headers, data):
     ax.set_facecolor(CHART_BG)
 
     colors = VIBRANT_COLORS[:len(data)]
-    # Extend colours if we have more data points than palette entries
     while len(colors) < len(data):
         colors += VIBRANT_COLORS
 
@@ -1423,25 +1466,31 @@ def generate_chart_base64(chart_cfg, headers, data):
         x_col = chart_cfg.get("x_column", headers[0] if headers else "")
         y_col = chart_cfg.get("y_column", headers[1] if len(headers) > 1 else "")
         labels = [str(row.get(x_col, "")) for row in data]
-        values = []
+        full_values = []
         for row in data:
             try:
-                values.append(float(row.get(y_col, 0)))
+                full_values.append(float(row.get(y_col, 0)))
             except (ValueError, TypeError):
-                values.append(0)
+                full_values.append(0)
+        values = [v * fraction for v in full_values]
+        max_val = max(full_values) if full_values else 1
 
-        bars = ax.barh(labels, values, color=colors[:len(labels)], edgecolor="white", linewidth=0.8)
+        bars = ax.barh(labels, values, color=colors[:len(labels)],
+                       edgecolor="white", linewidth=0.8)
         ax.set_xlabel(y_col, fontsize=11, fontweight="bold", color="#2c3e50")
         ax.set_title(title, fontsize=14, fontweight="bold", color="#2c3e50", pad=15)
+        ax.set_xlim(0, max_val * 1.15)
         ax.invert_yaxis()
         ax.grid(axis="x", color=CHART_GRID, linestyle="--", linewidth=0.5)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Value labels on bars
-        for bar, val in zip(bars, values):
-            ax.text(bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
-                    f"{val:,.0f}", va="center", fontsize=10, fontweight="bold", color="#2c3e50")
+        if fraction >= 1.0:
+            for bar, val in zip(bars, values):
+                ax.text(bar.get_width() + max_val * 0.01,
+                        bar.get_y() + bar.get_height() / 2,
+                        f"{val:,.0f}", va="center", fontsize=10,
+                        fontweight="bold", color="#2c3e50")
 
     elif chart_type == "pie":
         label_col = chart_cfg.get("label_column", headers[0] if headers else "")
@@ -1454,8 +1503,14 @@ def generate_chart_base64(chart_cfg, headers, data):
             except (ValueError, TypeError):
                 values.append(0)
 
+        # For pie, animate by showing only first N slices
+        n_show = max(1, int(len(values) * fraction))
+        show_vals = values[:n_show] + [sum(values[n_show:])] if n_show < len(values) else values
+        show_labels = labels[:n_show] + (["..."] if n_show < len(values) else [])
+        show_colors = colors[:len(show_labels)]
+
         wedges, texts, autotexts = ax.pie(
-            values, labels=labels, colors=colors[:len(labels)],
+            show_vals, labels=show_labels, colors=show_colors,
             autopct="%1.1f%%", startangle=140, pctdistance=0.75,
             wedgeprops={"edgecolor": "white", "linewidth": 2},
         )
@@ -1479,8 +1534,13 @@ def generate_chart_base64(chart_cfg, headers, data):
             except (ValueError, TypeError):
                 y_vals.append(0)
 
-        ax.fill_between(range(len(x_vals)), y_vals, alpha=0.15, color="#45B7D1")
-        ax.plot(range(len(x_vals)), y_vals, color="#45B7D1", linewidth=3,
+        # Animate by drawing progressively more points
+        n_points = max(1, int(len(x_vals) * fraction))
+        x_draw = list(range(n_points))
+        y_draw = y_vals[:n_points]
+
+        ax.fill_between(x_draw, y_draw, alpha=0.15, color="#45B7D1")
+        ax.plot(x_draw, y_draw, color="#45B7D1", linewidth=3,
                 marker="o", markersize=8, markerfacecolor="#FF6B6B",
                 markeredgecolor="white", markeredgewidth=2)
 
@@ -1488,28 +1548,94 @@ def generate_chart_base64(chart_cfg, headers, data):
         ax.set_xticklabels(x_vals, rotation=45, ha="right", fontsize=9)
         ax.set_ylabel(y_col, fontsize=11, fontweight="bold", color="#2c3e50")
         ax.set_title(title, fontsize=14, fontweight="bold", color="#2c3e50", pad=15)
+        if y_vals:
+            ax.set_ylim(0, max(y_vals) * 1.2)
         ax.grid(axis="y", color=CHART_GRID, linestyle="--", linewidth=0.5)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Value labels on points
-        for i, val in enumerate(y_vals):
-            ax.annotate(f"{val:,.0f}", (i, val), textcoords="offset points",
-                        xytext=(0, 12), ha="center", fontsize=9,
-                        fontweight="bold", color="#2c3e50")
+        if fraction >= 1.0:
+            for i, val in enumerate(y_vals):
+                ax.annotate(f"{val:,.0f}", (i, val), textcoords="offset points",
+                            xytext=(0, 12), ha="center", fontsize=9,
+                            fontweight="bold", color="#2c3e50")
     else:
-        logger.warning("Unknown chart type: %s", chart_type)
         plt.close(fig)
         return None
 
     plt.tight_layout()
+    return fig
 
+
+def _fig_to_pil(fig, dpi=100):
+    """Convert a matplotlib figure to a PIL Image (RGBA → RGB with white bg)."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    img = PILImage.open(buf).convert("RGBA")
+    background = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+    background.paste(img, mask=img)
+    return background.convert("RGB")
+
+
+def generate_chart_gif_base64(chart_cfg, headers, data, n_frames=10):
+    """
+    Generate an animated GIF of the chart (bars growing, trend drawing, pie expanding).
+    Returns (base64_string, mime_type) or (None, None).
+    Falls back to static PNG if Pillow is unavailable.
+    """
+    if not HAS_MATPLOTLIB or not data:
+        return None, None
+
+    # If Pillow not available, fall back to static PNG
+    if not HAS_PIL:
+        return generate_chart_base64_static(chart_cfg, headers, data), "image/png"
+
+    frames = []
+    for i in range(n_frames + 1):
+        frac = i / n_frames
+        fig = _render_chart_frame(chart_cfg, headers, data, fraction=frac)
+        if fig is None:
+            return None, None
+        frames.append(_fig_to_pil(fig, dpi=100))
+
+    # Hold the final frame longer
+    durations = [80] * n_frames + [2000]
+
+    gif_buf = io.BytesIO()
+    frames[0].save(gif_buf, format="GIF", save_all=True,
+                   append_images=frames[1:], duration=durations, loop=0)
+    gif_buf.seek(0)
+    return base64.b64encode(gif_buf.read()).decode("utf-8"), "image/gif"
+
+
+def generate_chart_base64_static(chart_cfg, headers, data):
+    """Generate a static chart as base64-encoded PNG (fallback when PIL unavailable)."""
+    fig = _render_chart_frame(chart_cfg, headers, data, fraction=1.0)
+    if fig is None:
+        return None
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
+
+
+def generate_chart_base64(chart_cfg, headers, data):
+    """Generate chart — animated GIF if Pillow available, else static PNG.
+    Returns base64 string or None. MIME type is stored in chart_cfg['_mime']."""
+    b64, mime = generate_chart_gif_base64(chart_cfg, headers, data)
+    if b64:
+        chart_cfg["_mime"] = mime
+        return b64
+    # Final fallback
+    result = generate_chart_base64_static(chart_cfg, headers, data)
+    if result:
+        chart_cfg["_mime"] = "image/png"
+    return result
 
 
 def generate_html_bar_chart(chart_cfg, headers, data):
@@ -1710,11 +1836,13 @@ def generate_dashboard_html(
     run_id, run_date, run_mode, stale_results, glue_results,
     validation_results, comparison_results, summary_results,
     overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0,
-    deviation_alerts=None, summary_config=None, audit_day_summary=None
+    deviation_alerts=None, summary_config=None, audit_day_summary=None,
+    zscore_results=None
 ):
     """Generate a full dashboard HTML email body with charts, KPI scorecards,
-    deviation alerts, optional GIF embeds, and today's audit summary."""
+    z-score analysis, optional GIF embeds, and today's audit summary."""
     deviation_alerts = deviation_alerts or []
+    zscore_results = zscore_results or []
     summary_config = summary_config or {}
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     overall_color = "#28a745" if overall_status == STATUS_PASS else "#dc3545"
@@ -1767,14 +1895,8 @@ def generate_dashboard_html(
                          display: flex; align-items: center; gap: 15px; }}
         .alert-banner .alert-title {{ font-size: 16px; font-weight: bold; margin-bottom: 4px; }}
         .alert-banner .alert-detail {{ font-size: 12px; opacity: 0.9; }}
-        .deviation-high {{ background-color: #fff0f0 !important; }}
-        .deviation-val-red {{ color: #dc3545; font-weight: bold; }}
-        .deviation-val-green {{ color: #28a745; font-weight: bold; }}
         .gif-banner {{ text-align: center; margin: 15px 0; }}
         .gif-banner img {{ border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }}
-        .deviation-gauge {{ background: #e9ecef; border-radius: 6px; height: 8px;
-                            overflow: hidden; margin-top: 6px; }}
-        .deviation-gauge-fill {{ height: 100%; border-radius: 6px; }}
     </style></head>
     <body><div class="container">
 
@@ -1809,10 +1931,10 @@ def generate_dashboard_html(
         <span class="summary-box" style="background-color: {'#28a745' if not comp_fail else '#dc3545'};">
             Comparisons: {comp_pass}/{comp_pass + comp_fail}</span>"""
 
-    if deviation_alerts:
+    if zscore_results:
         html += f"""
-        <span class="summary-box" style="background-color: #dc3545;">
-            Deviations: {len(deviation_alerts)}</span>"""
+        <span class="summary-box" style="background-color: #8e44ad;">
+            Z-Score Checks: {len(zscore_results)}</span>"""
 
     html += "</div>"
 
@@ -1825,25 +1947,6 @@ def generate_dashboard_html(
       <img src="{gif_header_url}" alt="Analytics Dashboard"
            style="width: 280px; height: auto;" title="ETL Summary Analytics" />
       <p style="color: #888; font-size: 11px; margin-top: 6px;">Real-time ETL Analytics Summary</p>
-    </div>"""
-
-    # ---- Deviation Alert Banner ----
-    if deviation_alerts:
-        alert_items = []
-        for a in deviation_alerts[:10]:
-            sign = "+" if a["deviation_pct"] > 0 else ""
-            alert_items.append(
-                f"<b>{a['group_label']}</b> ({sign}{a['deviation_pct']:.1f}%)"
-            )
-        alert_detail = " &nbsp;|&nbsp; ".join(alert_items)
-        html += f"""
-    <div class="alert-banner">
-      <div style="font-size:36px;">&#9888;</div>
-      <div>
-        <div class="alert-title">DEVIATION ALERT: {len(deviation_alerts)} metric(s) exceed
-            {deviation_alerts[0]['threshold']}% threshold</div>
-        <div class="alert-detail">{alert_detail}</div>
-      </div>
     </div>"""
 
     # ---- KPI Scorecard (shown when validations exist) ----
@@ -2271,14 +2374,64 @@ def generate_dashboard_html(
 
         section_num += 1
 
-    # ---- Section: Summary Results + Charts (Enhanced with deviation alerts & GIFs) ----
-    if summary_results:
-        html += f"<h2>{section_num}. Summary Dashboard</h2>"
+    # ---- Section: Z-Score Analysis (past 7 days, no chart) ----
+    if zscore_results:
+        html += f"<h2>{section_num}. Z-Score Analysis (7-Day vs 30-Day Rolling Avg)</h2>"
+        html += """<p style="color:#666;font-size:12px;">
+            Statistical z-score computed for the past 7 days against the 30-day rolling average.
+            <b>|z| &ge; 3</b> = CRITICAL (red), <b>|z| &ge; 2</b> = WARNING (orange),
+            otherwise NORMAL (green).</p>"""
 
-        # Build a set of alerted group_labels for quick lookup
-        _alerted_groups = set()
-        for a in deviation_alerts:
-            _alerted_groups.add((a["query_name"], a["group_label"]))
+        for zr in zscore_results:
+            html += f"""<div style="margin:20px 0;padding:15px;background:#fafbfc;
+                         border-radius:8px;border:1px solid #eee;">
+                <h3 style="color:#2c3e50;margin-top:0;">
+                    {zr['name'].replace('_', ' ').title()}</h3>
+                <p style="color:#666;font-size:12px;">{zr.get('description', '')}</p>"""
+
+            if zr["status"] == STATUS_FAIL:
+                html += f'<p style="color:#dc3545;">Query failed: {zr["detail"]}</p>'
+            elif zr["data"]:
+                html += '<table style="margin-bottom:15px;"><thead><tr>'
+                for h in zr["headers"]:
+                    html += f"<th>{h}</th>"
+                html += "</tr></thead><tbody>"
+
+                for row in zr["data"]:
+                    z_flag = row.get("z_flag", "NORMAL")
+                    if z_flag == "CRITICAL":
+                        row_bg = "background-color:#fff0f0;"
+                    elif z_flag == "WARNING":
+                        row_bg = "background-color:#fff8e1;"
+                    else:
+                        row_bg = ""
+
+                    html += f'<tr style="{row_bg}">'
+                    for h in zr["headers"]:
+                        cell_val = row.get(h, "")
+                        if h == "z_score":
+                            try:
+                                zval = float(cell_val)
+                                z_color = "#dc3545" if abs(zval) >= 3 else (
+                                    "#fd7e14" if abs(zval) >= 2 else "#28a745")
+                                sign = "+" if zval > 0 else ""
+                                html += f'<td style="text-align:right;font-weight:bold;color:{z_color};">{sign}{zval:.2f}</td>'
+                            except (ValueError, TypeError):
+                                html += f"<td>{cell_val}</td>"
+                        elif h == "z_flag":
+                            flag_color = {"CRITICAL": "#dc3545", "WARNING": "#fd7e14",
+                                          "NORMAL": "#28a745"}.get(cell_val, "#333")
+                            html += f'<td><span class="badge" style="background-color:{flag_color};">{cell_val}</span></td>'
+                        else:
+                            html += f"<td>{cell_val}</td>"
+                    html += "</tr>"
+                html += "</tbody></table>"
+            html += "</div>"
+        section_num += 1
+
+    # ---- Section: Trends Dashboard (charts — bar/pie/trend, no deviation %) ----
+    if summary_results:
+        html += f"<h2>{section_num}. Trends Dashboard</h2>"
 
         # GIF 2: Trend decorative GIF (before summary cards)
         gif_trend_url = gif_urls.get("trend", "")
@@ -2289,158 +2442,39 @@ def generate_dashboard_html(
                style="width: 240px; height: auto;" title="Trend Analysis Animation" />
         </div>"""
 
-        for sr_idx, sr in enumerate(summary_results):
-            da = sr.get("deviation_alert") or {}
-            compare_col = da.get("compare_column", "deviation_pct")
-            group_cols = da.get("group_columns", [])
-            da_threshold = da.get("threshold_pct", 20)
-            da_enabled = da.get("enabled", False)
-
-            # Count deviations for this query
-            sr_alert_count = sum(
-                1 for a in deviation_alerts if a["query_name"] == sr["name"]
-            ) if da_enabled else 0
-
-            html += f"""<div style="margin:20px 0; padding:15px; background:#fafbfc;
-                         border-radius:8px; border:1px solid #eee;
-                         {'border-left:4px solid #dc3545;' if sr_alert_count else ''}">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                  <h3 style="color:#2c3e50;margin-top:0;">
-                    {sr['name'].replace('_', ' ').title()}</h3>"""
-            if sr_alert_count:
-                html += f"""
-                  <span class="badge" style="background-color:#dc3545;">
-                    {sr_alert_count} DEVIATION(S)</span>"""
-            html += """</div>"""
-            html += f"""<p style="color:#666;font-size:12px;">{sr.get('description', '')}</p>"""
+        for sr in summary_results:
+            html += f"""<div style="margin:20px 0;padding:15px;background:#fafbfc;
+                         border-radius:8px;border:1px solid #eee;">
+                <h3 style="color:#2c3e50;margin-top:0;">
+                    {sr['name'].replace('_', ' ').title()}</h3>
+                <p style="color:#666;font-size:12px;">{sr.get('description', '')}</p>"""
 
             if sr["status"] == STATUS_FAIL:
                 html += f'<p style="color:#dc3545;">Query failed: {sr["detail"]}</p>'
             else:
-                # Data table with deviation-highlighted rows
+                # Data table (clean, no deviation columns)
                 if sr["data"]:
                     html += '<table style="margin-bottom:15px;"><thead><tr>'
                     for h in sr["headers"]:
                         html += f"<th>{h}</th>"
-                    if da_enabled:
-                        html += "<th>Status</th>"
                     html += "</tr></thead><tbody>"
 
                     for row in sr["data"][:50]:
-                        # Determine if this row is a deviation
-                        is_deviation = False
-                        dev_val = 0
-                        if da_enabled and compare_col in row:
-                            try:
-                                dev_val = float(row.get(compare_col, 0))
-                                is_deviation = abs(dev_val) > da_threshold
-                            except (ValueError, TypeError):
-                                pass
-
-                        row_class = ' class="deviation-high"' if is_deviation else ""
-                        html += f"<tr{row_class}>"
+                        html += "<tr>"
                         for h in sr["headers"]:
                             cell_val = row.get(h, "")
-                            # Colorize deviation percentage columns
-                            if h == compare_col:
-                                try:
-                                    fval = float(cell_val)
-                                    sign = "+" if fval > 0 else ""
-                                    css_class = "deviation-val-red" if abs(fval) > da_threshold else "deviation-val-green"
-                                    html += f'<td style="text-align:right;" class="{css_class}">{sign}{fval:.1f}%</td>'
-                                except (ValueError, TypeError):
-                                    html += f"<td>{cell_val}</td>"
-                            else:
-                                html += f"<td>{cell_val}</td>"
-                        if da_enabled:
-                            if is_deviation:
-                                html += '<td><span class="badge" style="background-color:#dc3545;">ALERT</span></td>'
-                            else:
-                                html += '<td><span class="badge" style="background-color:#28a745;">OK</span></td>'
+                            html += f"<td>{cell_val}</td>"
                         html += "</tr>"
                     html += "</tbody></table>"
 
-                    # Deviation detail cards for alerted rows
-                    if da_enabled and sr_alert_count > 0:
-                        html += '<div style="display:flex;flex-wrap:wrap;gap:15px;margin:15px 0;">'
-                        for row in sr["data"][:50]:
-                            try:
-                                dv = float(row.get(compare_col, 0))
-                            except (ValueError, TypeError):
-                                continue
-                            if abs(dv) <= da_threshold:
-                                continue
-                            grp = " / ".join(str(row.get(g, "")) for g in group_cols) if group_cols else sr["name"]
-                            sign = "+" if dv > 0 else ""
-                            direction_text = "above" if dv > 0 else "below"
-                            gauge_pct = min(abs(dv) / max(da_threshold, 1) * 100, 100)
-
-                            # Try to find today vs baseline values from common column patterns
-                            today_val = None
-                            baseline_val = None
-                            for k in row:
-                                kl = k.lower()
-                                if "today" in kl and ("count" in kl or "amount" in kl):
-                                    try:
-                                        today_val = float(row[k])
-                                    except (ValueError, TypeError):
-                                        pass
-                                if ("avg" in kl or "baseline" in kl) and ("count" in kl or "amount" in kl):
-                                    try:
-                                        baseline_val = float(row[k])
-                                    except (ValueError, TypeError):
-                                        pass
-
-                            html += f"""
-                            <div style="flex:1;min-width:280px;max-width:450px;background:#fafbfc;
-                                        border:1px solid #eee;border-radius:10px;padding:18px;
-                                        border-top:4px solid #dc3545;">
-                              <div style="display:flex;justify-content:space-between;align-items:center;
-                                          margin-bottom:12px;">
-                                <div style="font-weight:bold;color:#2c3e50;font-size:14px;">{grp}</div>
-                                <span class="badge" style="background-color:#dc3545;">ALERT</span>
-                              </div>
-                              <p style="color:#888;font-size:11px;margin:0 0 12px 0;">
-                                {sign}{dv:.1f}% {direction_text} the {da_threshold}% threshold</p>"""
-
-                            if today_val is not None and baseline_val is not None:
-                                html += f"""
-                              <div style="display:flex;gap:12px;margin-bottom:12px;">
-                                <div style="flex:1;text-align:center;background:white;border-radius:8px;
-                                            padding:10px;border:1px solid #eef;">
-                                  <div style="color:#666;font-size:10px;font-weight:bold;">TODAY</div>
-                                  <div style="color:#dc3545;font-size:20px;font-weight:bold;">
-                                    {today_val:,.0f}</div>
-                                </div>
-                                <div style="flex:1;text-align:center;background:white;border-radius:8px;
-                                            padding:10px;border:1px solid #eef;">
-                                  <div style="color:#666;font-size:10px;font-weight:bold;">30-DAY AVG</div>
-                                  <div style="color:#3498db;font-size:20px;font-weight:bold;">
-                                    {baseline_val:,.0f}</div>
-                                </div>
-                              </div>"""
-
-                            html += f"""
-                              <div style="margin-bottom:8px;">
-                                <div style="display:flex;justify-content:space-between;font-size:11px;
-                                            color:#666;margin-bottom:4px;">
-                                  <span>Deviation: <b style="color:#dc3545;">{sign}{dv:.1f}%</b></span>
-                                  <span>Threshold: {da_threshold}%</span>
-                                </div>
-                                <div class="deviation-gauge">
-                                  <div class="deviation-gauge-fill"
-                                       style="background:#dc3545;width:{gauge_pct:.0f}%;"></div>
-                                </div>
-                              </div>
-                            </div>"""
-                        html += "</div>"
-
-                # Chart
+                # Chart (animated GIF if Pillow available)
                 if sr.get("chart") and sr["data"]:
-                    chart_b64 = generate_chart_base64(sr["chart"], sr["headers"], sr["data"])
+                    chart_cfg_copy = dict(sr["chart"])
+                    chart_b64 = generate_chart_base64(chart_cfg_copy, sr["headers"], sr["data"])
                     if chart_b64:
+                        mime = chart_cfg_copy.get("_mime", "image/png")
                         html += f"""<div class="chart-container">
-                            <img src="data:image/png;base64,{chart_b64}"
+                            <img src="data:{mime};base64,{chart_b64}"
                                  alt="{sr['chart'].get('title', 'Chart')}" />
                             </div>"""
                     else:
@@ -2454,15 +2488,14 @@ def generate_dashboard_html(
             html += "</div>"
 
     # ---- Footer ----
-    dev_footer = ""
-    if deviation_alerts:
-        dev_footer = f"<b>Deviation Threshold:</b> {deviation_alerts[0]['threshold']}% | "
+    total_queries = len(summary_results) + len(zscore_results) if summary_results else 0
     html += f"""
     <div class="footer">
         <p><b>Audit Log:</b> {audit_s3_path or 'N/A'}</p>
-        <p>{dev_footer}<b>Athena Cost:</b> ${total_cost_usd:.4f} |
-           <b>Queries:</b> {len(summary_results) if summary_results else 0}</p>
-        <p>Generated by Strands ETL Orchestrator v1.2 (Summary Mode Enhanced) &nbsp;|&nbsp;
+        <p><b>Athena Cost:</b> ${total_cost_usd:.4f} |
+           <b>Queries:</b> {total_queries} |
+           <b>Z-Score Checks:</b> {len(zscore_results)}</p>
+        <p>Generated by Strands ETL Orchestrator v2.0 (Z-Score + Trends) &nbsp;|&nbsp;
            BIG DATA Team</p>
     </div>
     </div></body></html>"""
@@ -2573,6 +2606,7 @@ def main():
     validation_results = []
     comparison_results = []
     summary_results = []
+    zscore_results = []
     aborted = False
 
     # ================================================================
@@ -2654,22 +2688,26 @@ def main():
             if sr["status"] == STATUS_FAIL:
                 logger.warning("Summary query '%s' failed: %s", sr["name"], sr["detail"])
 
-        # Detect deviation alerts across all summary results
-        default_threshold = effective_summary_config.get(
-            "summary", {}).get("deviation_threshold_pct", 20)
-        deviation_alerts = detect_deviation_alerts(summary_results, default_threshold)
-        if deviation_alerts:
-            logger.warning(
-                "DEVIATION ALERTS: %d metric(s) exceed threshold",
-                len(deviation_alerts),
-            )
-            for da in deviation_alerts:
-                sign = "+" if da["deviation_pct"] > 0 else ""
-                logger.warning(
-                    "  -> %s: %s (%s%.1f%% vs %d%% threshold)",
-                    da["query_name"], da["group_label"],
-                    sign, da["deviation_pct"], da["threshold"],
-                )
+        # Run z-score analysis queries
+        zscore_results = run_zscore_analysis(
+            effective_summary_config,
+            f"s3://{effective_summary_config.get('summary', {}).get('athena_output_bucket', '')}"
+            f"/{effective_summary_config.get('summary', {}).get('athena_output_prefix', 'summary_results/')}",
+            effective_summary_config.get("summary", {}).get("athena_workgroup", "primary"))
+        if zscore_results:
+            logger.info("Z-score analysis: %d queries executed", len(zscore_results))
+            for zr in zscore_results:
+                critical_count = sum(
+                    1 for row in zr.get("data", []) if row.get("z_flag") == "CRITICAL")
+                warn_count = sum(
+                    1 for row in zr.get("data", []) if row.get("z_flag") == "WARNING")
+                if critical_count or warn_count:
+                    logger.warning(
+                        "  Z-score '%s': %d CRITICAL, %d WARNING out of %d rows",
+                        zr["name"], critical_count, warn_count, len(zr.get("data", [])))
+                else:
+                    logger.info("  Z-score '%s': all NORMAL (%d rows)",
+                                zr["name"], len(zr.get("data", [])))
 
     else:
         logger.error("Unknown run_mode: %s", run_mode)
@@ -2729,8 +2767,6 @@ def main():
         except Exception as exc:
             logger.warning("Audit summary fetch failed (non-fatal): %s", exc)
 
-    # Deviation alerts (populated only in summary mode)
-    _deviation_alerts = locals().get("deviation_alerts", [])
     _effective_summary_cfg = {}
     if run_mode == "summary":
         _esc = summary_config if summary_config else config
@@ -2742,9 +2778,9 @@ def main():
         overall_status, audit_s3_path,
         run_duration_sec=run_duration_sec,
         total_cost_usd=total_cost_usd,
-        deviation_alerts=_deviation_alerts,
         summary_config=_effective_summary_cfg,
-        audit_day_summary=audit_day_summary)
+        audit_day_summary=audit_day_summary,
+        zscore_results=zscore_results)
     send_email(html, email_cfg, overall_status, run_mode)
 
     # ---- Final Summary ----

@@ -2,114 +2,73 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>ETL Summary Dashboard – Preview</title>
+<title>ETL Summary Dashboard v2.0 – Z-Score + Trends Preview</title>
 <style>
-  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #333;
-         background-color: #f5f6fa; }
-  .container { max-width: 960px; margin: 0 auto; background: white;
-               border-radius: 12px; padding: 30px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-  h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 12px;
-       font-size: 22px; }
-  h2 { color: #2c3e50; margin-top: 30px; font-size: 17px;
-       border-left: 4px solid #3498db; padding-left: 12px; }
-  h3 { color: #2c3e50; margin-top: 0; }
-  .summary-box { display: inline-block; padding: 12px 22px; margin: 4px 6px 4px 0;
-                 border-radius: 8px; color: white; font-size: 14px;
-                 font-weight: bold; text-align: center; min-width: 110px; }
-  table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }
-  th { background-color: #4285f4; color: #fff;
-       padding: 10px 12px; text-align: left;
-       font-size: 12px; font-weight: bold; letter-spacing: 0.3px; }
-  td { padding: 8px 12px; border-bottom: 1px solid #eee; }
-  tr:nth-child(even) { background-color: #f8f9fa; }
-  .badge { display: inline-block; padding: 4px 10px; border-radius: 4px;
-           color: white; font-weight: bold; font-size: 11px; }
-  .chart-container { margin: 20px 0; text-align: center; }
-  .chart-container img { max-width: 100%; border-radius: 8px;
-                         box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-  .footer { margin-top: 30px; font-size: 11px; color: #888;
-            border-top: 1px solid #eee; padding-top: 15px; }
-  .mode-badge { display: inline-block; padding: 4px 12px; border-radius: 12px;
-                background: #3498db; color: white; font-size: 11px;
-                font-weight: bold; margin-left: 10px; }
-  .alert-banner { background: linear-gradient(135deg, #ff416c, #ff4b2b); color: white;
-                  padding: 18px 24px; border-radius: 10px; margin: 20px 0;
-                  display: flex; align-items: center; gap: 15px; }
-  .alert-banner img { width: 48px; height: 48px; }
-  .alert-banner .alert-text { flex: 1; }
-  .alert-banner .alert-title { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
-  .alert-banner .alert-detail { font-size: 12px; opacity: 0.9; }
-  .deviation-high { background-color: #fff0f0 !important; }
-  .deviation-val-red { color: #dc3545; font-weight: bold; }
-  .deviation-val-green { color: #28a745; font-weight: bold; }
-  .gif-banner { text-align: center; margin: 15px 0; }
-  .gif-banner img { border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
-  .trend-card { display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap; }
-  .trend-card > div { flex: 1; min-width: 200px; background: #fafbfc; border: 1px solid #eee;
-                      border-radius: 10px; padding: 18px; text-align: center; }
-  .kpi-big { font-size: 28px; font-weight: bold; }
-  .kpi-label { font-size: 10px; font-weight: bold; color: #666; margin-bottom: 4px; }
-  .kpi-sub { font-size: 11px; color: #888; margin-top: 4px; }
-  .deviation-gauge { background: #e9ecef; border-radius: 6px; height: 8px; overflow: hidden;
-                     margin-top: 6px; }
-  .deviation-gauge-fill { height: 100%; border-radius: 6px; transition: width 0.3s; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-  .pulse { animation: pulse 2s ease-in-out infinite; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #333;
+           background-color: #f5f6fa; }
+    .container { max-width: 960px; margin: 0 auto; background: white;
+                  border-radius: 12px; padding: 30px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 12px;
+          font-size: 22px; }
+    h2 { color: #2c3e50; margin-top: 30px; font-size: 17px;
+          border-left: 4px solid #3498db; padding-left: 12px; }
+    .summary-box { display: inline-block; padding: 12px 22px; margin: 4px 6px 4px 0;
+                    border-radius: 8px; color: white; font-size: 14px;
+                    font-weight: bold; text-align: center; min-width: 110px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }
+    th { background-color: #4285f4; color: #1a1a2e;
+          padding: 10px 12px; text-align: left;
+          font-size: 12px; font-weight: bold; letter-spacing: 0.3px; }
+    td { padding: 8px 12px; border-bottom: 1px solid #eee; }
+    tr:nth-child(even) { background-color: #f8f9fa; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 4px;
+              color: white; font-weight: bold; font-size: 11px; }
+    .chart-container { margin: 20px 0; text-align: center; }
+    .chart-container img { max-width: 100%; border-radius: 8px;
+                            box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .footer { margin-top: 30px; font-size: 11px; color: #888;
+               border-top: 1px solid #eee; padding-top: 15px; }
+    .mode-badge { display: inline-block; padding: 4px 12px; border-radius: 12px;
+                   background: #3498db; color: white; font-size: 11px;
+                   font-weight: bold; margin-left: 10px; }
+    .gif-banner { text-align: center; margin: 15px 0; }
+    .gif-banner img { border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
 </style>
 </head>
-<body>
-<div class="container">
+<body><div class="container">
 
-<!-- ============================================================ -->
-<!-- HEADER -->
-<!-- ============================================================ -->
+<!-- ===== HEADER ===== -->
 <h1>Strands ETL Orchestrator Dashboard
     <span class="mode-badge">SUMMARY</span></h1>
-<p><b>Run ID:</b> run-20260318-abc123 &nbsp;|&nbsp; <b>Date:</b> 2026-03-18 &nbsp;|&nbsp;
-   <b>Generated:</b> 2026-03-18 14:30:00 UTC</p>
+<p><b>Run ID:</b> a1b2c3d4e5f6 &nbsp;|&nbsp; <b>Date:</b> 2026-03-20 &nbsp;|&nbsp;
+   <b>Generated:</b> 2026-03-20 14:30:00 UTC</p>
 
 <div style="margin: 15px 0;">
-    <span class="summary-box" style="background-color: #28a745;">Overall: PASS</span>
-    <span class="summary-box" style="background-color: #17a2b8;">Queries: 5</span>
-    <span class="summary-box" style="background-color: #dc3545;">Deviations: 3</span>
-    <span class="summary-box" style="background-color: #8e44ad;">Cost: $0.0142</span>
+    <span class="summary-box" style="background-color: #28a745;">
+        Overall: PASS</span>
+    <span class="summary-box" style="background-color: #8e44ad;">
+        Z-Score Checks: 3</span>
+    <span class="summary-box" style="background-color: #17a2b8;">
+        Trends Queries: 4</span>
+    <span class="summary-box" style="background-color: #3498db;">
+        Duration: 2m 14s</span>
 </div>
 
-<!-- ============================================================ -->
-<!-- GIF 1: Dashboard Analytics Animation -->
-<!-- ============================================================ -->
+<!-- ===== GIF HEADER ===== -->
 <div class="gif-banner">
-  <!-- Option B: Decorative GIF from public CDN (replace with your own S3-hosted GIF or CID attachment) -->
   <img src="https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif"
-       alt="Analytics Dashboard"
-       style="width: 280px; height: auto; border-radius: 12px;"
+       alt="Analytics Dashboard" style="width: 280px; height: auto;"
        title="ETL Summary Analytics" />
   <p style="color: #888; font-size: 11px; margin-top: 6px;">Real-time ETL Analytics Summary</p>
 </div>
 
-<!-- ============================================================ -->
-<!-- DEVIATION ALERT BANNER -->
-<!-- ============================================================ -->
-<div class="alert-banner">
-  <div style="font-size: 36px;" class="pulse">&#9888;</div>
-  <div class="alert-text">
-    <div class="alert-title">DEVIATION ALERT: 3 metrics exceed 20% threshold</div>
-    <div class="alert-detail">
-      <b>State x Club:</b> TX-Club042 (+34.2%) &nbsp;|&nbsp;
-      <b>Product x State:</b> PROD-A1 in CA (-28.5%), PROD-C3 in NY (+22.1%)
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!-- SECTION 0: TODAY'S OVERALL AUDIT SUMMARY -->
-<!-- ============================================================ -->
+<!-- ===== SECTION 1: TODAY'S AUDIT SUMMARY ===== -->
 <h2>1. Today's Overall Audit Summary</h2>
 <p style="color:#666;font-size:12px;">
-  Aggregated from <b>4</b> run(s) recorded in
-  <code>audit_db.etl_orchestrator_audit</code> for 2026-03-18.</p>
+    Aggregated from <b>4</b> run(s) recorded in
+    <code>audit_db.etl_orchestrator_audit</code> for 2026-03-20.</p>
 
-<!-- KPI cards -->
+<!-- KPI Cards -->
 <div style="display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;">
   <div style="flex:1;min-width:130px;background:#f0fff0;border-left:4px solid #28a745;
               border-radius:8px;padding:15px;text-align:center;">
@@ -143,7 +102,7 @@
   </div>
 </div>
 
-<!-- Pass rate gauge + cost -->
+<!-- Pass Rate + Cost -->
 <div style="display:flex;gap:15px;margin-bottom:20px;">
   <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
               padding:15px;text-align:center;">
@@ -158,654 +117,387 @@
   <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
               padding:15px;text-align:center;">
     <div style="color:#666;font-size:10px;font-weight:bold;">TOTAL ATHENA COST (TODAY)</div>
-    <div style="color:#8e44ad;font-size:22px;font-weight:bold;margin-top:12px;">$0.0384</div>
+    <div style="color:#8e44ad;font-size:22px;font-weight:bold;margin-top:12px;">$0.0142</div>
     <div style="color:#888;font-size:10px;margin-top:4px;">4 run(s)</div>
   </div>
 </div>
 
-<!-- By-layer breakdown -->
+<!-- Layer Breakdown -->
 <h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
-           border-left:3px solid #8e44ad;padding-left:10px;">
-           Breakdown by Layer / Event Type</h3>
-<table>
-<thead><tr>
-  <th>Layer / Event Type</th><th>Total</th><th>Passed</th>
-  <th>Failed</th><th>Warnings</th><th>Not Executed</th>
-  <th>Pass Rate</th><th>Cost (USD)</th>
-</tr></thead>
-<tbody>
-  <tr>
-    <td><b>STALE_CHECK</b></td>
-    <td style="text-align:center;">6</td>
-    <td style="text-align:center;color:#28a745;font-weight:bold;">5</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;">1</td>
-    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">83.3%</span></td>
-    <td style="text-align:right;">$0.0000</td>
-  </tr>
-  <tr>
-    <td><b>GLUE_TRIGGER</b></td>
-    <td style="text-align:center;">4</td>
-    <td style="text-align:center;color:#28a745;font-weight:bold;">3</td>
-    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;"><span style="color:#fd7e14;font-weight:bold;">75.0%</span></td>
-    <td style="text-align:right;">$0.0000</td>
-  </tr>
-  <tr>
-    <td><b>VALIDATION</b></td>
-    <td style="text-align:center;">18</td>
-    <td style="text-align:center;color:#28a745;font-weight:bold;">14</td>
-    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
-    <td style="text-align:center;">1</td>
-    <td style="text-align:center;">2</td>
-    <td style="text-align:center;"><span style="color:#fd7e14;font-weight:bold;">77.8%</span></td>
-    <td style="text-align:right;">$0.0212</td>
-  </tr>
-  <tr>
-    <td><b>COMPARISON</b></td>
-    <td style="text-align:center;">12</td>
-    <td style="text-align:center;color:#28a745;font-weight:bold;">11</td>
-    <td style="text-align:center;color:#dc3545;font-weight:bold;">1</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">91.7%</span></td>
-    <td style="text-align:right;">$0.0130</td>
-  </tr>
-  <tr>
-    <td><b>SUMMARY_QUERY</b></td>
-    <td style="text-align:center;">7</td>
-    <td style="text-align:center;color:#28a745;font-weight:bold;">6</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;">1</td>
-    <td style="text-align:center;">0</td>
-    <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">85.7%</span></td>
-    <td style="text-align:right;">$0.0042</td>
-  </tr>
-  <tr style="background:#e8f4fd;font-weight:bold;">
-    <td>TOTAL</td>
-    <td style="text-align:center;">47</td>
-    <td style="text-align:center;color:#28a745;">39</td>
-    <td style="text-align:center;color:#dc3545;">3</td>
-    <td style="text-align:center;">2</td>
-    <td style="text-align:center;">3</td>
-    <td style="text-align:center;"><span style="color:#28a745;">83.0%</span></td>
-    <td style="text-align:right;">$0.0384</td>
-  </tr>
-</tbody>
-</table>
+            border-left:3px solid #8e44ad;padding-left:10px;">
+            Breakdown by Layer / Event Type</h3>
+<table><thead><tr>
+    <th>Layer / Event Type</th><th>Total</th><th>Passed</th>
+    <th>Failed</th><th>Warnings</th><th>Not Executed</th>
+    <th>Pass Rate</th><th>Cost (USD)</th>
+    </tr></thead><tbody>
+    <tr>
+        <td><b>STALE_CHECK</b></td>
+        <td style="text-align:center;">8</td>
+        <td style="text-align:center;color:#28a745;font-weight:bold;">7</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;">1</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">87.5%</span></td>
+        <td style="text-align:right;">$0.0000</td>
+    </tr>
+    <tr>
+        <td><b>GLUE_TRIGGER</b></td>
+        <td style="text-align:center;">6</td>
+        <td style="text-align:center;color:#28a745;font-weight:bold;">5</td>
+        <td style="text-align:center; color:#dc3545;font-weight:bold;">1</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">83.3%</span></td>
+        <td style="text-align:right;">$0.0000</td>
+    </tr>
+    <tr>
+        <td><b>VALIDATION</b></td>
+        <td style="text-align:center;">15</td>
+        <td style="text-align:center;color:#28a745;font-weight:bold;">12</td>
+        <td style="text-align:center; color:#dc3545;font-weight:bold;">1</td>
+        <td style="text-align:center;">1</td>
+        <td style="text-align:center;">1</td>
+        <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">80.0%</span></td>
+        <td style="text-align:right;">$0.0065</td>
+    </tr>
+    <tr>
+        <td><b>COMPARISON</b></td>
+        <td style="text-align:center;">10</td>
+        <td style="text-align:center;color:#28a745;font-weight:bold;">8</td>
+        <td style="text-align:center; color:#dc3545;font-weight:bold;">1</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;">1</td>
+        <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">80.0%</span></td>
+        <td style="text-align:right;">$0.0042</td>
+    </tr>
+    <tr>
+        <td><b>SUMMARY_QUERY</b></td>
+        <td style="text-align:center;">8</td>
+        <td style="text-align:center;color:#28a745;font-weight:bold;">7</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;">0</td>
+        <td style="text-align:center;">1</td>
+        <td style="text-align:center;"><span style="color:#28a745;font-weight:bold;">87.5%</span></td>
+        <td style="text-align:right;">$0.0035</td>
+    </tr>
+    <tr style="background:#e8f4fd;font-weight:bold;">
+        <td>TOTAL</td>
+        <td style="text-align:center;">47</td>
+        <td style="text-align:center;color:#28a745;">39</td>
+        <td style="text-align:center;color:#dc3545;">3</td>
+        <td style="text-align:center;">2</td>
+        <td style="text-align:center;">3</td>
+        <td style="text-align:center;"><span style="color:#28a745;">83.0%</span></td>
+        <td style="text-align:right;">$0.0142</td>
+    </tr>
+</tbody></table>
 
 <!-- Today's Runs -->
 <h3 style="color:#2c3e50;font-size:14px;margin-top:20px;
-           border-left:3px solid #3498db;padding-left:10px;">
-           Today's Runs</h3>
-<table>
-<thead><tr>
-  <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
-  <th>Cost (USD)</th><th>First Event</th><th>Last Event</th>
-</tr></thead>
-<tbody>
-  <tr>
-    <td>1</td>
-    <td><code style="font-size:11px;">run-20260318-abc123</code></td>
-    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
-    <td style="text-align:center;">14</td>
-    <td style="text-align:right;">$0.0142</td>
-    <td style="font-size:11px;">2026-03-18T14:00:05Z</td>
-    <td style="font-size:11px;">2026-03-18T14:30:00Z</td>
-  </tr>
-  <tr>
-    <td>2</td>
-    <td><code style="font-size:11px;">run-20260318-def456</code></td>
-    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
-    <td style="text-align:center;">12</td>
-    <td style="text-align:right;">$0.0098</td>
-    <td style="font-size:11px;">2026-03-18T10:00:03Z</td>
-    <td style="font-size:11px;">2026-03-18T10:25:42Z</td>
-  </tr>
-  <tr>
-    <td>3</td>
-    <td><code style="font-size:11px;">run-20260318-ghi789</code></td>
-    <td><span class="badge" style="background-color:#dc3545;">FAIL</span></td>
-    <td style="text-align:center;">11</td>
-    <td style="text-align:right;">$0.0088</td>
-    <td style="font-size:11px;">2026-03-18T06:00:01Z</td>
-    <td style="font-size:11px;">2026-03-18T06:18:33Z</td>
-  </tr>
-  <tr>
-    <td>4</td>
-    <td><code style="font-size:11px;">run-20260318-jkl012</code></td>
-    <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
-    <td style="text-align:center;">10</td>
-    <td style="text-align:right;">$0.0056</td>
-    <td style="font-size:11px;">2026-03-18T02:00:02Z</td>
-    <td style="font-size:11px;">2026-03-18T02:12:15Z</td>
-  </tr>
-</tbody>
-</table>
+            border-left:3px solid #3498db;padding-left:10px;">
+            Today's Runs</h3>
+<table><thead><tr>
+    <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
+    <th>Cost (USD)</th><th>First Event</th><th>Last Event</th>
+    </tr></thead><tbody>
+    <tr>
+        <td>1</td>
+        <td><code style="font-size:11px;">a1b2c3d4e5f6</code></td>
+        <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+        <td style="text-align:center;">15</td>
+        <td style="text-align:right;">$0.0045</td>
+        <td style="font-size:11px;">2026-03-20T14:28:01Z</td>
+        <td style="font-size:11px;">2026-03-20T14:30:15Z</td>
+    </tr>
+    <tr>
+        <td>2</td>
+        <td><code style="font-size:11px;">f6e5d4c3b2a1</code></td>
+        <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+        <td style="text-align:center;">12</td>
+        <td style="text-align:right;">$0.0038</td>
+        <td style="font-size:11px;">2026-03-20T10:15:00Z</td>
+        <td style="font-size:11px;">2026-03-20T10:17:22Z</td>
+    </tr>
+    <tr>
+        <td>3</td>
+        <td><code style="font-size:11px;">c3d4e5f6a1b2</code></td>
+        <td><span class="badge" style="background-color:#dc3545;">FAIL</span></td>
+        <td style="text-align:center;">10</td>
+        <td style="text-align:right;">$0.0032</td>
+        <td style="font-size:11px;">2026-03-20T06:00:00Z</td>
+        <td style="font-size:11px;">2026-03-20T06:02:45Z</td>
+    </tr>
+    <tr>
+        <td>4</td>
+        <td><code style="font-size:11px;">b2a1f6e5d4c3</code></td>
+        <td><span class="badge" style="background-color:#28a745;">PASS</span></td>
+        <td style="text-align:center;">10</td>
+        <td style="text-align:right;">$0.0027</td>
+        <td style="font-size:11px;">2026-03-20T02:00:00Z</td>
+        <td style="font-size:11px;">2026-03-20T02:01:50Z</td>
+    </tr>
+</tbody></table>
 
-<!-- ============================================================ -->
-<!-- SECTION 2: STATE x CLUB COUNTS (was section 1) -->
-<!-- ============================================================ -->
-<h2>2. Statewise Club Counts – Today vs 30-Day Average</h2>
-<p style="color:#666;font-size:12px;">Member counts grouped by State and Club. Rows highlighted in red have deviation &gt; 20%.</p>
+<!-- ===== SECTION 2: Z-SCORE ANALYSIS ===== -->
+<h2>2. Z-Score Analysis (7-Day vs 30-Day Rolling Avg)</h2>
+<p style="color:#666;font-size:12px;">
+    Statistical z-score computed for the past 7 days against the 30-day rolling average.
+    <b>|z| &ge; 3</b> = CRITICAL (red), <b>|z| &ge; 2</b> = WARNING (orange),
+    otherwise NORMAL (green).</p>
 
-<div class="trend-card">
-  <div style="border-left: 4px solid #28a745;">
-    <div class="kpi-label">TOTAL STATES</div>
-    <div class="kpi-big" style="color:#28a745;">8</div>
-    <div class="kpi-sub">Active today</div>
-  </div>
-  <div style="border-left: 4px solid #3498db;">
-    <div class="kpi-label">TOTAL CLUBS</div>
-    <div class="kpi-big" style="color:#3498db;">24</div>
-    <div class="kpi-sub">Across all states</div>
-  </div>
-  <div style="border-left: 4px solid #dc3545;">
-    <div class="kpi-label">DEVIATIONS &gt; 20%</div>
-    <div class="kpi-big" style="color:#dc3545;">1</div>
-    <div class="kpi-sub">Needs attention</div>
-  </div>
-  <div style="border-left: 4px solid #8e44ad;">
-    <div class="kpi-label">TODAY TOTAL</div>
-    <div class="kpi-big" style="color:#8e44ad;">142,853</div>
-    <div class="kpi-sub">Members processed</div>
-  </div>
+<!-- Z-Score: Membership Counts -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Membership Zscore 7D</h3>
+    <p style="color:#666;font-size:12px;">Daily membership counts &ndash; 7-day z-score vs 30-day rolling avg/stddev</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>load_date</th><th>today_count</th><th>avg_30d</th><th>stddev_30d</th><th>z_score</th><th>z_flag</th>
+    </tr></thead><tbody>
+        <tr style="background-color:#fff0f0;">
+            <td>2026-03-20</td><td>15,230</td><td>12,100</td><td>890.50</td>
+            <td style="text-align:right;font-weight:bold;color:#dc3545;">+3.51</td>
+            <td><span class="badge" style="background-color:#dc3545;">CRITICAL</span></td>
+        </tr>
+        <tr style="background-color:#fff8e1;">
+            <td>2026-03-19</td><td>14,100</td><td>12,050</td><td>885.20</td>
+            <td style="text-align:right;font-weight:bold;color:#fd7e14;">+2.32</td>
+            <td><span class="badge" style="background-color:#fd7e14;">WARNING</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-18</td><td>12,450</td><td>12,020</td><td>878.40</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.49</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-17</td><td>11,980</td><td>12,010</td><td>875.10</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.03</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-16</td><td>12,200</td><td>11,990</td><td>870.30</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.24</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr style="background-color:#fff8e1;">
+            <td>2026-03-15</td><td>10,100</td><td>11,970</td><td>868.50</td>
+            <td style="text-align:right;font-weight:bold;color:#fd7e14;">-2.15</td>
+            <td><span class="badge" style="background-color:#fd7e14;">WARNING</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-14</td><td>12,350</td><td>11,950</td><td>865.80</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.46</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+    </tbody></table>
 </div>
 
-<table>
-<thead><tr>
-  <th>State</th><th>Club</th><th>Today Count</th><th>30d Avg</th>
-  <th>Deviation %</th><th>Status</th>
-</tr></thead>
-<tbody>
-  <tr class="deviation-high">
-    <td><b>TX</b></td><td>Club042</td>
-    <td style="text-align:right;">8,542</td>
-    <td style="text-align:right;">6,365</td>
-    <td style="text-align:right;" class="deviation-val-red">+34.2%</td>
-    <td><span class="badge" style="background-color:#dc3545;">ALERT</span></td>
-  </tr>
-  <tr>
-    <td><b>CA</b></td><td>Club015</td>
-    <td style="text-align:right;">12,340</td>
-    <td style="text-align:right;">11,980</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.0%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>CA</b></td><td>Club022</td>
-    <td style="text-align:right;">9,876</td>
-    <td style="text-align:right;">10,215</td>
-    <td style="text-align:right;" class="deviation-val-green">-3.3%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>NY</b></td><td>Club008</td>
-    <td style="text-align:right;">15,230</td>
-    <td style="text-align:right;">14,800</td>
-    <td style="text-align:right;" class="deviation-val-green">+2.9%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>FL</b></td><td>Club031</td>
-    <td style="text-align:right;">7,105</td>
-    <td style="text-align:right;">7,320</td>
-    <td style="text-align:right;" class="deviation-val-green">-2.9%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>IL</b></td><td>Club003</td>
-    <td style="text-align:right;">6,890</td>
-    <td style="text-align:right;">6,750</td>
-    <td style="text-align:right;" class="deviation-val-green">+2.1%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PA</b></td><td>Club019</td>
-    <td style="text-align:right;">5,430</td>
-    <td style="text-align:right;">5,510</td>
-    <td style="text-align:right;" class="deviation-val-green">-1.5%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>OH</b></td><td>Club027</td>
-    <td style="text-align:right;">4,220</td>
-    <td style="text-align:right;">4,380</td>
-    <td style="text-align:right;" class="deviation-val-green">-3.7%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-</tbody>
-</table>
-
-<!-- Simulated bar chart (HTML fallback – in real email this would be a matplotlib PNG) -->
-<div style="margin:20px 0; padding:15px; background:#fafbfc; border-radius:8px; border:1px solid #eee;">
-  <h3 style="font-size:14px; color:#2c3e50;">State x Club – Today vs 30-Day Avg</h3>
-  <div style="margin: 10px 0;">
-    <div style="display:flex;align-items:center;margin:6px 0;">
-      <div style="width:90px;font-size:12px;font-weight:bold;color:#2c3e50;">NY-Club008</div>
-      <div style="flex:1;background:#e9ecef;border-radius:4px;height:24px;position:relative;margin:0 10px;">
-        <div style="background:#45B7D1;height:100%;width:100%;border-radius:4px;"></div>
-        <div style="position:absolute;top:0;left:0;height:100%;width:97%;border-right:3px dashed #FF6B6B;"></div>
-      </div>
-      <div style="font-size:12px;color:#2c3e50;width:80px;"><b>15,230</b></div>
-    </div>
-    <div style="display:flex;align-items:center;margin:6px 0;">
-      <div style="width:90px;font-size:12px;font-weight:bold;color:#2c3e50;">CA-Club015</div>
-      <div style="flex:1;background:#e9ecef;border-radius:4px;height:24px;position:relative;margin:0 10px;">
-        <div style="background:#4ECDC4;height:100%;width:81%;border-radius:4px;"></div>
-        <div style="position:absolute;top:0;left:0;height:100%;width:79%;border-right:3px dashed #FF6B6B;"></div>
-      </div>
-      <div style="font-size:12px;color:#2c3e50;width:80px;"><b>12,340</b></div>
-    </div>
-    <div style="display:flex;align-items:center;margin:6px 0;">
-      <div style="width:90px;font-size:12px;font-weight:bold;color:#2c3e50;">CA-Club022</div>
-      <div style="flex:1;background:#e9ecef;border-radius:4px;height:24px;position:relative;margin:0 10px;">
-        <div style="background:#96CEB4;height:100%;width:65%;border-radius:4px;"></div>
-        <div style="position:absolute;top:0;left:0;height:100%;width:67%;border-right:3px dashed #FF6B6B;"></div>
-      </div>
-      <div style="font-size:12px;color:#2c3e50;width:80px;"><b>9,876</b></div>
-    </div>
-    <div style="display:flex;align-items:center;margin:6px 0;">
-      <div style="width:90px;font-size:12px;font-weight:bold;color:#dc3545;"><b>TX-Club042</b></div>
-      <div style="flex:1;background:#e9ecef;border-radius:4px;height:24px;position:relative;margin:0 10px;">
-        <div style="background:#FF6B6B;height:100%;width:56%;border-radius:4px;"></div>
-        <div style="position:absolute;top:0;left:0;height:100%;width:42%;border-right:3px dashed #FF6B6B;"></div>
-      </div>
-      <div style="font-size:12px;color:#dc3545;width:80px;"><b>8,542 &#9888;</b></div>
-    </div>
-  </div>
-  <div style="font-size:10px; color:#888; margin-top:8px;">
-    <span style="display:inline-block;width:12px;height:12px;background:#45B7D1;border-radius:2px;vertical-align:middle;"></span> Today &nbsp;&nbsp;
-    <span style="display:inline-block;width:12px;height:3px;border-top:3px dashed #FF6B6B;vertical-align:middle;"></span> 30-Day Avg
-  </div>
+<!-- Z-Score: Transaction Counts -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Transaction Zscore 7D</h3>
+    <p style="color:#666;font-size:12px;">Daily transaction counts &ndash; 7-day z-score vs 30-day rolling avg/stddev</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>load_date</th><th>today_count</th><th>avg_30d</th><th>stddev_30d</th><th>z_score</th><th>z_flag</th>
+    </tr></thead><tbody>
+        <tr>
+            <td>2026-03-20</td><td>45,200</td><td>44,500</td><td>2,100.00</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.33</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-19</td><td>43,800</td><td>44,480</td><td>2,095.50</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.32</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-18</td><td>44,100</td><td>44,450</td><td>2,090.20</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.17</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-17</td><td>44,700</td><td>44,420</td><td>2,085.00</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.13</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-16</td><td>43,500</td><td>44,400</td><td>2,080.00</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.43</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-15</td><td>44,200</td><td>44,380</td><td>2,075.00</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.09</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-14</td><td>45,000</td><td>44,350</td><td>2,070.00</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.31</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+    </tbody></table>
 </div>
 
-<!-- ============================================================ -->
-<!-- SECTION 2: CLUB BILL PLANS -->
-<!-- ============================================================ -->
-<h2>3. Bill Plans by Club</h2>
-<p style="color:#666;font-size:12px;">Bill plan breakdown showing plan type, member count, and total billed amount per club.</p>
-
-<table>
-<thead><tr>
-  <th>Club</th><th>Bill Plan</th><th>Members</th><th>Total Amount</th><th>Avg Amount</th>
-</tr></thead>
-<tbody>
-  <tr>
-    <td><b>Club015</b></td><td>Annual Premium</td>
-    <td style="text-align:right;">4,120</td>
-    <td style="text-align:right;">$1,236,000.00</td>
-    <td style="text-align:right;">$300.00</td>
-  </tr>
-  <tr>
-    <td><b>Club015</b></td><td>Monthly Standard</td>
-    <td style="text-align:right;">5,890</td>
-    <td style="text-align:right;">$294,500.00</td>
-    <td style="text-align:right;">$50.00</td>
-  </tr>
-  <tr>
-    <td><b>Club015</b></td><td>Quarterly Plus</td>
-    <td style="text-align:right;">2,330</td>
-    <td style="text-align:right;">$349,500.00</td>
-    <td style="text-align:right;">$150.00</td>
-  </tr>
-  <tr>
-    <td><b>Club008</b></td><td>Annual Premium</td>
-    <td style="text-align:right;">6,100</td>
-    <td style="text-align:right;">$1,830,000.00</td>
-    <td style="text-align:right;">$300.00</td>
-  </tr>
-  <tr>
-    <td><b>Club008</b></td><td>Monthly Standard</td>
-    <td style="text-align:right;">7,230</td>
-    <td style="text-align:right;">$361,500.00</td>
-    <td style="text-align:right;">$50.00</td>
-  </tr>
-  <tr>
-    <td><b>Club008</b></td><td>Quarterly Plus</td>
-    <td style="text-align:right;">1,900</td>
-    <td style="text-align:right;">$285,000.00</td>
-    <td style="text-align:right;">$150.00</td>
-  </tr>
-  <tr>
-    <td><b>Club042</b></td><td>Annual Premium</td>
-    <td style="text-align:right;">3,200</td>
-    <td style="text-align:right;">$960,000.00</td>
-    <td style="text-align:right;">$300.00</td>
-  </tr>
-  <tr>
-    <td><b>Club042</b></td><td>Monthly Standard</td>
-    <td style="text-align:right;">4,042</td>
-    <td style="text-align:right;">$202,100.00</td>
-    <td style="text-align:right;">$50.00</td>
-  </tr>
-  <tr>
-    <td><b>Club042</b></td><td>Semi-Annual</td>
-    <td style="text-align:right;">1,300</td>
-    <td style="text-align:right;">$260,000.00</td>
-    <td style="text-align:right;">$200.00</td>
-  </tr>
-</tbody>
-</table>
-
-<!-- ============================================================ -->
-<!-- SECTION 3: PRODUCT COST BY STATE -->
-<!-- ============================================================ -->
-<h2>4. Product Amount/Cost by State – Today vs 30-Day Average</h2>
-<p style="color:#666;font-size:12px;">Product cost aggregated by product and state. Rows with &gt; 20% deviation are flagged.</p>
-
-<table>
-<thead><tr>
-  <th>Product</th><th>State</th><th>Today Amount</th><th>Today Txns</th>
-  <th>30d Avg Amount</th><th>30d Avg Txns</th><th>Amount Dev %</th><th>Txn Dev %</th><th>Status</th>
-</tr></thead>
-<tbody>
-  <tr class="deviation-high">
-    <td><b>PROD-A1</b></td><td>CA</td>
-    <td style="text-align:right;">$85,200.00</td>
-    <td style="text-align:right;">342</td>
-    <td style="text-align:right;">$119,161.00</td>
-    <td style="text-align:right;">478</td>
-    <td style="text-align:right;" class="deviation-val-red">-28.5%</td>
-    <td style="text-align:right;" class="deviation-val-red">-28.5%</td>
-    <td><span class="badge" style="background-color:#dc3545;">ALERT</span></td>
-  </tr>
-  <tr class="deviation-high">
-    <td><b>PROD-C3</b></td><td>NY</td>
-    <td style="text-align:right;">$142,600.00</td>
-    <td style="text-align:right;">571</td>
-    <td style="text-align:right;">$116,789.00</td>
-    <td style="text-align:right;">467</td>
-    <td style="text-align:right;" class="deviation-val-red">+22.1%</td>
-    <td style="text-align:right;" class="deviation-val-red">+22.3%</td>
-    <td><span class="badge" style="background-color:#dc3545;">ALERT</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-A1</b></td><td>NY</td>
-    <td style="text-align:right;">$102,450.00</td>
-    <td style="text-align:right;">410</td>
-    <td style="text-align:right;">$98,700.00</td>
-    <td style="text-align:right;">395</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.8%</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.8%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-B2</b></td><td>TX</td>
-    <td style="text-align:right;">$67,800.00</td>
-    <td style="text-align:right;">271</td>
-    <td style="text-align:right;">$65,400.00</td>
-    <td style="text-align:right;">262</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.7%</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.4%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-B2</b></td><td>FL</td>
-    <td style="text-align:right;">$54,300.00</td>
-    <td style="text-align:right;">217</td>
-    <td style="text-align:right;">$52,100.00</td>
-    <td style="text-align:right;">208</td>
-    <td style="text-align:right;" class="deviation-val-green">+4.2%</td>
-    <td style="text-align:right;" class="deviation-val-green">+4.3%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-C3</b></td><td>CA</td>
-    <td style="text-align:right;">$91,200.00</td>
-    <td style="text-align:right;">365</td>
-    <td style="text-align:right;">$88,500.00</td>
-    <td style="text-align:right;">354</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.1%</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.1%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-</tbody>
-</table>
-
-<!-- Deviation detail cards for the 2 flagged products -->
-<div style="display:flex;flex-wrap:wrap;gap:15px;margin:15px 0;">
-  <div style="flex:1;min-width:280px;max-width:450px;background:#fafbfc;
-              border:1px solid #eee;border-radius:10px;padding:18px;
-              border-top:4px solid #dc3545;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <div style="font-weight:bold;color:#2c3e50;font-size:14px;">PROD-A1 in CA</div>
-      <span class="badge" style="background-color:#dc3545;">ALERT</span>
-    </div>
-    <p style="color:#888;font-size:11px;margin:0 0 12px 0;">Amount dropped 28.5% below 30-day average</p>
-    <div style="display:flex;gap:12px;margin-bottom:12px;">
-      <div style="flex:1;text-align:center;background:white;border-radius:8px;padding:10px;border:1px solid #eef;">
-        <div style="color:#666;font-size:10px;font-weight:bold;">TODAY</div>
-        <div style="color:#dc3545;font-size:20px;font-weight:bold;">$85,200</div>
-      </div>
-      <div style="flex:1;text-align:center;background:white;border-radius:8px;padding:10px;border:1px solid #eef;">
-        <div style="color:#666;font-size:10px;font-weight:bold;">30-DAY AVG</div>
-        <div style="color:#3498db;font-size:20px;font-weight:bold;">$119,161</div>
-      </div>
-    </div>
-    <div style="margin-bottom:8px;">
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:#666;margin-bottom:4px;">
-        <span>Deviation: <b style="color:#dc3545;">-28.5%</b></span>
-        <span>Threshold: 20%</span>
-      </div>
-      <div class="deviation-gauge">
-        <div class="deviation-gauge-fill" style="background:#dc3545;width:100%;"></div>
-      </div>
-    </div>
-  </div>
-  <div style="flex:1;min-width:280px;max-width:450px;background:#fafbfc;
-              border:1px solid #eee;border-radius:10px;padding:18px;
-              border-top:4px solid #dc3545;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <div style="font-weight:bold;color:#2c3e50;font-size:14px;">PROD-C3 in NY</div>
-      <span class="badge" style="background-color:#dc3545;">ALERT</span>
-    </div>
-    <p style="color:#888;font-size:11px;margin:0 0 12px 0;">Amount spiked 22.1% above 30-day average</p>
-    <div style="display:flex;gap:12px;margin-bottom:12px;">
-      <div style="flex:1;text-align:center;background:white;border-radius:8px;padding:10px;border:1px solid #eef;">
-        <div style="color:#666;font-size:10px;font-weight:bold;">TODAY</div>
-        <div style="color:#dc3545;font-size:20px;font-weight:bold;">$142,600</div>
-      </div>
-      <div style="flex:1;text-align:center;background:white;border-radius:8px;padding:10px;border:1px solid #eef;">
-        <div style="color:#666;font-size:10px;font-weight:bold;">30-DAY AVG</div>
-        <div style="color:#3498db;font-size:20px;font-weight:bold;">$116,789</div>
-      </div>
-    </div>
-    <div style="margin-bottom:8px;">
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:#666;margin-bottom:4px;">
-        <span>Deviation: <b style="color:#dc3545;">+22.1%</b></span>
-        <span>Threshold: 20%</span>
-      </div>
-      <div class="deviation-gauge">
-        <div class="deviation-gauge-fill" style="background:#dc3545;width:100%;"></div>
-      </div>
-    </div>
-  </div>
+<!-- Z-Score: Transaction Amounts -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Transaction Amount Zscore 7D</h3>
+    <p style="color:#666;font-size:12px;">Daily transaction amounts ($) &ndash; 7-day z-score vs 30-day rolling avg/stddev</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>load_date</th><th>today_amount</th><th>avg_30d_amount</th><th>stddev_30d_amount</th><th>z_score</th><th>z_flag</th>
+    </tr></thead><tbody>
+        <tr style="background-color:#fff0f0;">
+            <td>2026-03-20</td><td>$1,250,000</td><td>$980,000</td><td>$85,000</td>
+            <td style="text-align:right;font-weight:bold;color:#dc3545;">+3.18</td>
+            <td><span class="badge" style="background-color:#dc3545;">CRITICAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-19</td><td>$1,010,000</td><td>$978,000</td><td>$84,500</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.38</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-18</td><td>$965,000</td><td>$975,000</td><td>$84,000</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.12</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-17</td><td>$990,000</td><td>$973,000</td><td>$83,500</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.20</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-16</td><td>$950,000</td><td>$971,000</td><td>$83,000</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">-0.25</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+        <tr style="background-color:#fff8e1;">
+            <td>2026-03-15</td><td>$800,000</td><td>$969,000</td><td>$82,500</td>
+            <td style="text-align:right;font-weight:bold;color:#fd7e14;">-2.05</td>
+            <td><span class="badge" style="background-color:#fd7e14;">WARNING</span></td>
+        </tr>
+        <tr>
+            <td>2026-03-14</td><td>$985,000</td><td>$967,000</td><td>$82,000</td>
+            <td style="text-align:right;font-weight:bold;color:#28a745;">+0.22</td>
+            <td><span class="badge" style="background-color:#28a745;">NORMAL</span></td>
+        </tr>
+    </tbody></table>
 </div>
 
-<!-- ============================================================ -->
-<!-- SECTION 4: PRODUCT COST OVERALL -->
-<!-- ============================================================ -->
-<h2>5. Product Cost Summary – All States</h2>
-<p style="color:#666;font-size:12px;">Aggregated product cost across all states with 30-day comparison.</p>
+<!-- ===== SECTION 3: TRENDS DASHBOARD ===== -->
+<h2>3. Trends Dashboard</h2>
 
-<table>
-<thead><tr>
-  <th>Product</th><th>Today Amount</th><th>Today Txns</th><th>Active States</th>
-  <th>30d Avg Amount</th><th>Deviation %</th><th>Status</th>
-</tr></thead>
-<tbody>
-  <tr>
-    <td><b>PROD-A1</b></td>
-    <td style="text-align:right;">$187,650.00</td>
-    <td style="text-align:right;">752</td>
-    <td style="text-align:center;">5</td>
-    <td style="text-align:right;">$195,420.00</td>
-    <td style="text-align:right;" class="deviation-val-green">-4.0%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-B2</b></td>
-    <td style="text-align:right;">$122,100.00</td>
-    <td style="text-align:right;">488</td>
-    <td style="text-align:center;">4</td>
-    <td style="text-align:right;">$117,500.00</td>
-    <td style="text-align:right;" class="deviation-val-green">+3.9%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-  <tr>
-    <td><b>PROD-C3</b></td>
-    <td style="text-align:right;">$233,800.00</td>
-    <td style="text-align:right;">936</td>
-    <td style="text-align:center;">6</td>
-    <td style="text-align:right;">$221,100.00</td>
-    <td style="text-align:right;" class="deviation-val-green">+5.7%</td>
-    <td><span class="badge" style="background-color:#28a745;">OK</span></td>
-  </tr>
-</tbody>
-</table>
-
-<!-- Simulated Pie chart as HTML -->
-<div style="margin:20px 0; padding:15px; background:#fafbfc; border-radius:8px; border:1px solid #eee;">
-  <h3 style="font-size:14px; color:#2c3e50; text-align:center;">Product Cost Distribution (Today)</h3>
-  <div style="display:flex; justify-content:center; align-items:center; gap:20px; margin:15px 0;">
-    <!-- Simulated pie via CSS conic-gradient -->
-    <div style="width:200px;height:200px;border-radius:50%;
-                background:conic-gradient(#FF6B6B 0deg 124deg, #4ECDC4 124deg 205deg, #45B7D1 205deg 360deg);
-                box-shadow:0 2px 8px rgba(0,0,0,0.1);"></div>
-    <div style="font-size:13px;">
-      <div style="margin:8px 0;">
-        <span style="display:inline-block;width:14px;height:14px;background:#FF6B6B;border-radius:3px;vertical-align:middle;"></span>
-        &nbsp;PROD-A1 &nbsp;<b>$187,650</b> (34.5%)
-      </div>
-      <div style="margin:8px 0;">
-        <span style="display:inline-block;width:14px;height:14px;background:#4ECDC4;border-radius:3px;vertical-align:middle;"></span>
-        &nbsp;PROD-B2 &nbsp;<b>$122,100</b> (22.5%)
-      </div>
-      <div style="margin:8px 0;">
-        <span style="display:inline-block;width:14px;height:14px;background:#45B7D1;border-radius:3px;vertical-align:middle;"></span>
-        &nbsp;PROD-C3 &nbsp;<b>$233,800</b> (43.0%)
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!-- SECTION 5: 30-DAY TREND -->
-<!-- ============================================================ -->
-<h2>6. 30-Day Daily Trend</h2>
-<p style="color:#666;font-size:12px;">Daily record count and total amount trend over the past 30 days.</p>
-
-<!-- GIF 2: Trend/pulse animation -->
+<!-- GIF 2: Trend GIF -->
 <div class="gif-banner">
-  <img src="https://media.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif"
-       alt="Trend Analysis"
-       style="width: 240px; height: auto; border-radius: 12px;"
-       title="Trend Analysis Animation" />
+  <img src="https://media.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif" alt="Trend Analysis"
+       style="width: 240px; height: auto;" title="Trend Analysis Animation" />
 </div>
 
-<!-- Simulated trend chart as HTML sparkline bars -->
-<div style="margin:20px 0; padding:15px; background:#fafbfc; border-radius:8px; border:1px solid #eee;">
-  <h3 style="font-size:14px; color:#2c3e50; text-align:center;">30-Day Daily Records Trend</h3>
-  <div style="display:flex; align-items:flex-end; gap:3px; height:150px; padding:10px 5px; justify-content:center;">
-    <!-- 30 bars representing each day (heights simulate real data) -->
-    <div style="width:22px;height:72%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 17: 4,210"></div>
-    <div style="width:22px;height:68%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 18: 3,980"></div>
-    <div style="width:22px;height:75%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 19: 4,400"></div>
-    <div style="width:22px;height:70%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 20: 4,100"></div>
-    <div style="width:22px;height:73%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 21: 4,280"></div>
-    <div style="width:22px;height:32%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Feb 22 (Sat): 1,850"></div>
-    <div style="width:22px;height:28%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Feb 23 (Sun): 1,620"></div>
-    <div style="width:22px;height:78%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 24: 4,560"></div>
-    <div style="width:22px;height:76%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 25: 4,450"></div>
-    <div style="width:22px;height:74%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 26: 4,340"></div>
-    <div style="width:22px;height:80%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 27: 4,680"></div>
-    <div style="width:22px;height:77%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Feb 28: 4,510"></div>
-    <div style="width:22px;height:30%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 01 (Sat): 1,750"></div>
-    <div style="width:22px;height:26%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 02 (Sun): 1,520"></div>
-    <div style="width:22px;height:82%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 03: 4,800"></div>
-    <div style="width:22px;height:79%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 04: 4,620"></div>
-    <div style="width:22px;height:81%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 05: 4,740"></div>
-    <div style="width:22px;height:83%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 06: 4,860"></div>
-    <div style="width:22px;height:78%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 07: 4,560"></div>
-    <div style="width:22px;height:33%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 08 (Sat): 1,920"></div>
-    <div style="width:22px;height:29%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 09 (Sun): 1,680"></div>
-    <div style="width:22px;height:85%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 10: 4,970"></div>
-    <div style="width:22px;height:84%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 11: 4,910"></div>
-    <div style="width:22px;height:86%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 12: 5,030"></div>
-    <div style="width:22px;height:82%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 13: 4,800"></div>
-    <div style="width:22px;height:88%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 14: 5,150"></div>
-    <div style="width:22px;height:31%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 15 (Sat): 1,810"></div>
-    <div style="width:22px;height:27%;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:3px 3px 0 0;" title="Mar 16 (Sun): 1,570"></div>
-    <div style="width:22px;height:90%;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:3px 3px 0 0;" title="Mar 17: 5,260"></div>
-    <div style="width:22px;height:87%;background:linear-gradient(to top,#28a745,#82E0AA);border-radius:3px 3px 0 0;border:2px solid #2c3e50;" title="Mar 18 (Today): 5,100"></div>
-  </div>
-  <div style="display:flex;justify-content:space-between;font-size:10px;color:#888;padding:0 5px;">
-    <span>Feb 17</span><span>Feb 24</span><span>Mar 03</span><span>Mar 10</span><span>Mar 18</span>
-  </div>
-  <div style="text-align:center;margin-top:10px;font-size:10px;color:#888;">
-    <span style="display:inline-block;width:14px;height:14px;background:linear-gradient(to top,#45B7D1,#96CEB4);border-radius:2px;vertical-align:middle;"></span> Weekday &nbsp;&nbsp;
-    <span style="display:inline-block;width:14px;height:14px;background:linear-gradient(to top,#DDA0DD,#F1948A);border-radius:2px;vertical-align:middle;"></span> Weekend &nbsp;&nbsp;
-    <span style="display:inline-block;width:14px;height:14px;background:linear-gradient(to top,#28a745,#82E0AA);border:2px solid #2c3e50;border-radius:2px;vertical-align:middle;"></span> Today
-  </div>
-
-  <!-- 20% deviation band indicator -->
-  <div style="margin-top:15px; padding:10px; background:#fff8e1; border-radius:6px; border:1px solid #f0c040;">
-    <div style="font-size:12px; font-weight:bold; color:#856404;">Deviation Band (20% threshold)</div>
-    <div style="display:flex;gap:20px;margin-top:8px;font-size:12px;">
-      <div>
-        <span style="color:#666;">30-Day Avg:</span>
-        <b style="color:#3498db;">4,320</b> records/day
-      </div>
-      <div>
-        <span style="color:#666;">Upper bound (+20%):</span>
-        <b style="color:#dc3545;">5,184</b>
-      </div>
-      <div>
-        <span style="color:#666;">Lower bound (-20%):</span>
-        <b style="color:#dc3545;">3,456</b>
-      </div>
-      <div>
-        <span style="color:#666;">Today:</span>
-        <b style="color:#28a745;">5,100</b> (within range)
-      </div>
+<!-- Trends: State-wise Members (PIE) -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Statewise Member Counts</h3>
+    <p style="color:#666;font-size:12px;">State-wise member count distribution &ndash; last 30 days aggregate</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>state_code</th><th>total_members</th><th>clubs_active</th><th>days_active</th>
+    </tr></thead><tbody>
+        <tr><td>CA</td><td>45,200</td><td>12</td><td>30</td></tr>
+        <tr><td>TX</td><td>38,100</td><td>10</td><td>30</td></tr>
+        <tr><td>FL</td><td>32,500</td><td>8</td><td>29</td></tr>
+        <tr><td>NY</td><td>28,900</td><td>9</td><td>30</td></tr>
+        <tr><td>IL</td><td>22,100</td><td>6</td><td>28</td></tr>
+        <tr><td>OH</td><td>18,400</td><td>5</td><td>30</td></tr>
+    </tbody></table>
+    <!-- Chart: In real email this is an animated GIF embedded as data:image/gif;base64,... -->
+    <div class="chart-container">
+        <div style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);border-radius:12px;padding:40px;text-align:center;">
+            <div style="font-size:48px;margin-bottom:10px;">&#127856;</div>
+            <div style="color:white;font-size:16px;font-weight:bold;">Animated GIF Pie Chart</div>
+            <p style="color:rgba(255,255,255,0.8);font-size:12px;">State-wise Member Distribution (30 Days)<br/>
+            <em>Pie slices expand progressively in 10 frames<br/>
+            Embedded as <code style="background:rgba(0,0,0,0.2);padding:2px 6px;border-radius:3px;">data:image/gif;base64,...</code></em></p>
+        </div>
     </div>
-  </div>
 </div>
 
-<!-- Summary stats table for 30-day trend -->
-<table>
-<thead><tr>
-  <th>Date</th><th>Total Records</th><th>Total Amount</th><th>Active States</th><th>Active Clubs</th>
-</tr></thead>
-<tbody>
-  <tr style="background:#e8f5e9;font-weight:bold;">
-    <td>2026-03-18 (Today)</td><td style="text-align:right;">5,100</td>
-    <td style="text-align:right;">$543,550.00</td><td style="text-align:center;">8</td><td style="text-align:center;">24</td>
-  </tr>
-  <tr><td>2026-03-17</td><td style="text-align:right;">5,260</td>
-    <td style="text-align:right;">$561,200.00</td><td style="text-align:center;">8</td><td style="text-align:center;">24</td></tr>
-  <tr><td>2026-03-16 (Sun)</td><td style="text-align:right;">1,570</td>
-    <td style="text-align:right;">$167,500.00</td><td style="text-align:center;">5</td><td style="text-align:center;">12</td></tr>
-  <tr><td>2026-03-15 (Sat)</td><td style="text-align:right;">1,810</td>
-    <td style="text-align:right;">$193,100.00</td><td style="text-align:center;">6</td><td style="text-align:center;">14</td></tr>
-  <tr><td>2026-03-14</td><td style="text-align:right;">5,150</td>
-    <td style="text-align:right;">$549,200.00</td><td style="text-align:center;">8</td><td style="text-align:center;">24</td></tr>
-  <tr><td colspan="5" style="text-align:center;color:#888;font-size:11px;">... showing latest 5 of 30 days ...</td></tr>
-</tbody>
-</table>
+<!-- Trends: State-wise Transactions (BAR) -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Statewise Transaction Counts</h3>
+    <p style="color:#666;font-size:12px;">State-wise transaction count and amount &ndash; last 30 days</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>state_code</th><th>txn_count</th><th>total_amount</th><th>products_active</th>
+    </tr></thead><tbody>
+        <tr><td>CA</td><td>125,400</td><td>$4,520,100.50</td><td>15</td></tr>
+        <tr><td>TX</td><td>102,300</td><td>$3,810,200.75</td><td>14</td></tr>
+        <tr><td>FL</td><td>89,700</td><td>$3,250,400.00</td><td>13</td></tr>
+        <tr><td>NY</td><td>78,200</td><td>$2,890,100.25</td><td>12</td></tr>
+        <tr><td>IL</td><td>62,100</td><td>$2,210,500.00</td><td>11</td></tr>
+        <tr><td>OH</td><td>48,900</td><td>$1,840,300.50</td><td>10</td></tr>
+    </tbody></table>
+    <div class="chart-container">
+        <div style="background:linear-gradient(135deg, #f093fb 0%, #f5576c 100%);border-radius:12px;padding:40px;text-align:center;">
+            <div style="font-size:48px;margin-bottom:10px;">&#128202;</div>
+            <div style="color:white;font-size:16px;font-weight:bold;">Animated GIF Bar Chart</div>
+            <p style="color:rgba(255,255,255,0.8);font-size:12px;">State-wise Transaction Counts (30 Days)<br/>
+            <em>Bars grow from 0 to full width in 10 frames<br/>
+            Embedded as <code style="background:rgba(0,0,0,0.2);padding:2px 6px;border-radius:3px;">data:image/gif;base64,...</code></em></p>
+        </div>
+    </div>
+</div>
 
-<!-- ============================================================ -->
-<!-- FOOTER -->
-<!-- ============================================================ -->
+<!-- Trends: Club-wise Members (BAR) -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Club Wise Member Counts</h3>
+    <p style="color:#666;font-size:12px;">Club-wise member counts &ndash; last 30 days</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>club_id</th><th>total_members</th><th>states_present</th><th>plan_types</th>
+    </tr></thead><tbody>
+        <tr><td>CLB001</td><td>28,500</td><td>6</td><td>4</td></tr>
+        <tr><td>CLB002</td><td>24,100</td><td>5</td><td>3</td></tr>
+        <tr><td>CLB003</td><td>19,800</td><td>4</td><td>4</td></tr>
+        <tr><td>CLB004</td><td>15,200</td><td>3</td><td>3</td></tr>
+        <tr><td>CLB005</td><td>12,600</td><td>3</td><td>2</td></tr>
+    </tbody></table>
+    <div class="chart-container">
+        <div style="background:linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);border-radius:12px;padding:40px;text-align:center;">
+            <div style="font-size:48px;margin-bottom:10px;">&#128202;</div>
+            <div style="color:white;font-size:16px;font-weight:bold;">Animated GIF Bar Chart</div>
+            <p style="color:rgba(255,255,255,0.8);font-size:12px;">Club-wise Member Counts (30 Days)<br/>
+            <em>Bars grow from 0 to full width in 10 frames</em></p>
+        </div>
+    </div>
+</div>
+
+<!-- Trends: 30-Day Daily Trend (TREND LINE) -->
+<div style="margin:20px 0;padding:15px;background:#fafbfc;border-radius:8px;border:1px solid #eee;">
+    <h3 style="color:#2c3e50;margin-top:0;">Daily Trend 30D</h3>
+    <p style="color:#666;font-size:12px;">30-day daily trend &ndash; total count and amount across all products/states</p>
+    <table style="margin-bottom:15px;"><thead><tr>
+        <th>load_date</th><th>total_records</th><th>total_amount</th><th>active_states</th><th>active_clubs</th>
+    </tr></thead><tbody>
+        <tr><td>2026-03-20</td><td>45,200</td><td>$1,250,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-19</td><td>43,800</td><td>$1,010,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-18</td><td>44,100</td><td>$965,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-17</td><td>44,700</td><td>$990,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-16</td><td>43,500</td><td>$950,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-15</td><td>44,200</td><td>$800,000</td><td>6</td><td>5</td></tr>
+        <tr><td>2026-03-14</td><td>45,000</td><td>$985,000</td><td>6</td><td>5</td></tr>
+        <tr><td colspan="5" style="color:#888;text-align:center;font-style:italic;">... 23 more rows ...</td></tr>
+    </tbody></table>
+    <div class="chart-container">
+        <div style="background:linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);border-radius:12px;padding:40px;text-align:center;">
+            <div style="font-size:48px;margin-bottom:10px;">&#128200;</div>
+            <div style="color:white;font-size:16px;font-weight:bold;">Animated GIF Trend Chart</div>
+            <p style="color:rgba(255,255,255,0.8);font-size:12px;">30-Day Daily Trend &ndash; Total Records<br/>
+            <em>Line draws progressively point-by-point in 10 frames, with area fill<br/>
+            Final frame holds for 2 seconds before looping</em></p>
+        </div>
+    </div>
+</div>
+
+<!-- ===== FOOTER ===== -->
 <div class="footer">
-    <p><b>Audit Log:</b> s3://your-audit-bucket/etl_audit/orchestrator/run_date=2026-03-18/audit_abc123.csv</p>
-    <p><b>Deviation Threshold:</b> 20% | <b>Athena Cost:</b> $0.0142 | <b>Queries:</b> 5</p>
-    <p>Generated by Strands ETL Orchestrator v1.2 (Summary Mode) &nbsp;|&nbsp; BIG DATA Team</p>
-    <p style="color:#aaa;font-size:10px;">GIFs sourced from GIPHY. In production, replace with self-hosted S3 GIFs or MIME CID attachments.</p>
+    <p><b>Audit Log:</b> s3://your-audit-bucket/etl_audit/orchestrator/run_date=2026-03-20/audit_a1b2c3d4e5f6.csv</p>
+    <p><b>Athena Cost:</b> $0.0142 |
+       <b>Queries:</b> 7 |
+       <b>Z-Score Checks:</b> 3</p>
+    <p>Generated by Strands ETL Orchestrator v2.0 (Z-Score + Trends) &nbsp;|&nbsp;
+       BIG DATA Team</p>
 </div>
-
 </div></body></html>
