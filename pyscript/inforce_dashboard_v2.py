@@ -271,9 +271,9 @@ def run_validations(spark, s3_bucket, validations_config):
             else:
                 result["detail"] = f"{row_count} row(s) returned"
 
-            # Capture data preview (first 20 rows) for the email table
+            # Capture all data rows for the email table
             result["columns"] = [f.name for f in result_df.schema.fields]
-            preview_rows = result_df.limit(20).toPandas().to_dict("records")
+            preview_rows = result_df.toPandas().to_dict("records")
             result["data_preview"] = preview_rows
 
             print(f"   -> {status}: {result['detail']}")
@@ -1181,7 +1181,7 @@ def generate_dashboard_html(
             for col in r["columns"]:
                 html += f"<th>{col.replace('_', ' ').title()}</th>"
             html += "</tr></thead><tbody>"
-            for row in r["data_preview"][:15]:
+            for row in r["data_preview"]:
                 html += "<tr>"
                 for col in r["columns"]:
                     val = row.get(col, "")
@@ -1193,9 +1193,8 @@ def generate_dashboard_html(
                     html += f"<td{cell_style}>{cell_val}</td>"
                 html += "</tr>"
             html += "</tbody></table>"
-            if r["row_count"] > 15:
-                html += f"""<p style="color:#999;font-size:10px;margin-top:8px;
-                            font-style:italic;">&#x1F4C4; Showing 15 of {r["row_count"]} rows</p>"""
+            html += f"""<p style="color:#999;font-size:10px;margin-top:8px;
+                        font-style:italic;">&#x1F4C4; Showing {r["row_count"]} rows</p>"""
 
         # ---- Inline Data Dictionary for this check ----
         if r.get("logic") or r.get("expected_result"):
@@ -1284,18 +1283,17 @@ def generate_dashboard_html(
 
                 html += '<div class="spacer-sm"></div>'
 
-                # Show data table for trend queries (first 20 rows)
-                if len(tr["data"]) <= 20:
-                    html += '<table style="margin-top:12px;"><thead><tr>'
+                # Show data table for trend queries (all rows)
+                html += '<table style="margin-top:12px;"><thead><tr>'
+                for col in tr["columns"]:
+                    html += f"<th>{col.replace('_', ' ').title()}</th>"
+                html += "</tr></thead><tbody>"
+                for row in tr["data"]:
+                    html += "<tr>"
                     for col in tr["columns"]:
-                        html += f"<th>{col.replace('_', ' ').title()}</th>"
-                    html += "</tr></thead><tbody>"
-                    for row in tr["data"]:
-                        html += "<tr>"
-                        for col in tr["columns"]:
-                            html += f"<td>{row.get(col, '')}</td>"
-                        html += "</tr>"
-                    html += "</tbody></table>"
+                        html += f"<td>{row.get(col, '')}</td>"
+                    html += "</tr>"
+                html += "</tbody></table>"
             else:
                 html += '<p style="color:#888;font-size:12px;">&#x1F4ED; No data returned.</p>'
 
