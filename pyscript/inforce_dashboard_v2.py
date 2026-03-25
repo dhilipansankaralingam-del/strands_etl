@@ -872,14 +872,16 @@ def generate_dashboard_html(
 
         table {{ border-collapse: collapse; width: 100%; margin-top: 12px; margin-bottom: 16px;
                  font-size: 12px; border-radius: 8px; overflow: hidden;
-                 box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
+                 box-shadow: 0 1px 4px rgba(0,0,0,0.06); table-layout: auto; }}
         th {{ background: linear-gradient(135deg, #eef2ff 0%, #f0e6ff 100%); color: #4a2d7a;
               padding: 10px 12px; text-align: left;
               font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
-              text-transform: uppercase; border-bottom: 2px solid #764ba2; }}
-        td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }}
+              text-transform: uppercase; border-bottom: 2px solid #764ba2;
+              white-space: nowrap; }}
+        td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; white-space: nowrap; }}
         tr:nth-child(even) {{ background-color: #fafbfe; }}
         tr:hover {{ background-color: #f0f3ff; }}
+        .wide-table-wrap {{ overflow-x: auto; max-width: 100%; }}
 
         .badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
                   color: white; font-weight: bold; font-size: 10px;
@@ -1119,14 +1121,28 @@ def generate_dashboard_html(
 
     html += '<div class="spacer-sm"></div>'
 
-    # Category bar chart (animated GIF, balance 1st, anomaly 2nd)
+    # Category bar chart + Validation Results donut side by side
     cat_chart_b64, cat_mime = generate_category_bar_chart(validation_results)
     if cat_chart_b64:
+        html += """<div style="display:flex;gap:18px;margin:18px 0;flex-wrap:wrap;">"""
         html += f"""
-    <div class="chart-container" style="background:linear-gradient(135deg, #fafbfe 0%,
-                #f5f0ff 100%);border:1px solid #e8e0f0;border-radius:12px;padding:18px;">
-        <img src="data:{cat_mime};base64,{cat_chart_b64}" alt="Checks by Category" />
-    </div>"""
+      <div style="flex:1;min-width:320px;background:linear-gradient(135deg, #fafbfe 0%,
+                  #f5f0ff 100%);border:1px solid #e8e0f0;border-radius:12px;padding:18px;">
+        <img src="data:{cat_mime};base64,{cat_chart_b64}" alt="Checks by Category"
+             style="max-width:100%;border-radius:10px;" />
+      </div>"""
+        # Re-generate the donut to place it side by side with category chart
+        pie2_b64, pie2_mime = generate_pass_rate_pie(passed, failed, warned, errored, info_count)
+        if pie2_b64:
+            html += f"""
+      <div style="flex:1;min-width:280px;text-align:center;background:linear-gradient(135deg,
+                  #fafbfe 0%, #f5f0ff 100%);border:1px solid #e8e0f0;
+                  border-radius:12px;padding:18px;display:flex;align-items:center;justify-content:center;">
+        <img src="data:{pie2_mime};base64,{pie2_b64}" alt="Validation Results"
+             style="max-width:320px;border-radius:10px;
+                    box-shadow:0 3px 10px rgba(0,0,0,0.08);" />
+      </div>"""
+        html += "</div>"
 
     html += '<div class="spacer"></div>'
 
@@ -1175,8 +1191,26 @@ def generate_dashboard_html(
 
         html += '<div class="spacer-sm"></div>'
 
-        # Data preview table
+        # Data preview table (collapsible if >10 columns)
         if r["data_preview"] and r["columns"]:
+            n_cols = len(r["columns"])
+            is_wide = n_cols > 10
+
+            if is_wide:
+                collapse_id = f"tbl-{i}"
+                html += f"""
+            <details style="margin-top:10px;">
+              <summary style="cursor:pointer;padding:10px 14px;background:linear-gradient(135deg,
+                        #f8f9ff 0%, #fef9ff 100%);border:1px solid #e8e0f0;border-radius:8px;
+                        font-size:12px;font-weight:bold;color:#764ba2;list-style:none;
+                        display:flex;align-items:center;gap:8px;">
+                <span style="transition:transform 0.2s;">&#x25B6;</span>
+                &#x1F4CB; Data Table ({n_cols} columns, {r['row_count']} rows) — Click to expand
+              </summary>
+              <div class="wide-table-wrap">"""
+            else:
+                html += '<div class="wide-table-wrap">'
+
             html += '<table style="margin-top:10px;"><thead><tr>'
             for col in r["columns"]:
                 html += f"<th>{col.replace('_', ' ').title()}</th>"
@@ -1195,6 +1229,11 @@ def generate_dashboard_html(
             html += "</tbody></table>"
             html += f"""<p style="color:#999;font-size:10px;margin-top:8px;
                         font-style:italic;">&#x1F4C4; Showing {r["row_count"]} rows</p>"""
+
+            if is_wide:
+                html += "</div></details>"
+            else:
+                html += "</div>"
 
         # ---- Inline Data Dictionary for this check ----
         if r.get("logic") or r.get("expected_result"):
@@ -1283,8 +1322,26 @@ def generate_dashboard_html(
 
                 html += '<div class="spacer-sm"></div>'
 
-                # Show data table for trend queries (all rows)
-                html += '<table style="margin-top:12px;"><thead><tr>'
+                # Show data table for trend queries (all rows, collapsible if >10 cols)
+                t_n_cols = len(tr["columns"])
+                t_n_rows = len(tr["data"])
+                t_is_wide = t_n_cols > 10
+
+                if t_is_wide:
+                    html += f"""
+                <details style="margin-top:12px;">
+                  <summary style="cursor:pointer;padding:10px 14px;background:linear-gradient(135deg,
+                            #f8f9ff 0%, #fef9ff 100%);border:1px solid #e8e0f0;border-radius:8px;
+                            font-size:12px;font-weight:bold;color:#764ba2;list-style:none;
+                            display:flex;align-items:center;gap:8px;">
+                    <span>&#x25B6;</span>
+                    &#x1F4CB; Trend Data ({t_n_cols} columns, {t_n_rows} rows) — Click to expand
+                  </summary>
+                  <div class="wide-table-wrap">"""
+                else:
+                    html += '<div class="wide-table-wrap" style="margin-top:12px;">'
+
+                html += '<table><thead><tr>'
                 for col in tr["columns"]:
                     html += f"<th>{col.replace('_', ' ').title()}</th>"
                 html += "</tr></thead><tbody>"
@@ -1294,6 +1351,11 @@ def generate_dashboard_html(
                         html += f"<td>{row.get(col, '')}</td>"
                     html += "</tr>"
                 html += "</tbody></table>"
+
+                if t_is_wide:
+                    html += "</div></details>"
+                else:
+                    html += "</div>"
             else:
                 html += '<p style="color:#888;font-size:12px;">&#x1F4ED; No data returned.</p>'
 
