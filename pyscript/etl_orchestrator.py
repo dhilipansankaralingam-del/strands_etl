@@ -1832,6 +1832,429 @@ def _status_color(status):
     }.get(status, "#333333")
 
 
+def _generate_summary_report(
+    run_id, run_date, overall_status, overall_color, now_str,
+    duration_str, total_cost_usd, audit_s3_path,
+    audit_day_summary, validation_results, comparison_results,
+    run_duration_sec
+):
+    """Generate End of Batch Summary Report — audit-centric, per-layer, no charts."""
+
+    # ---- Compute totals from audit or fallback to validation results ----
+    if audit_day_summary:
+        tot = audit_day_summary["totals"]
+    else:
+        all_checks = validation_results + comparison_results
+        tot = {
+            "total": len(all_checks),
+            "pass": sum(1 for c in all_checks if c["status"] == STATUS_PASS),
+            "fail": sum(1 for c in all_checks if c["status"] == STATUS_FAIL),
+            "warn": sum(1 for c in all_checks if c.get("status") == STATUS_WARN),
+            "not_exec": sum(1 for c in all_checks if c.get("status") == STATUS_NOT_EXECUTED),
+            "cost_usd": total_cost_usd,
+            "distinct_runs": 1,
+        }
+
+    aud_pass_rate = (tot["pass"] / tot["total"] * 100) if tot["total"] > 0 else 0
+    aud_fail_rate = (tot["fail"] / tot["total"] * 100) if tot["total"] > 0 else 0
+    aud_warn_rate = (tot["warn"] / tot["total"] * 100) if tot["total"] > 0 else 0
+    aud_ne_rate = (tot["not_exec"] / tot["total"] * 100) if tot["total"] > 0 else 0
+    aud_pass_color = "#28a745" if aud_pass_rate >= 80 else (
+        "#fd7e14" if aud_pass_rate >= 60 else "#dc3545")
+    batch_status_icon = "&#x2705;" if overall_status == STATUS_PASS else "&#x274C;"
+
+    html = f"""
+    <html><head><style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; color: #333;
+               background-color: #f0f2f5; line-height: 1.6; }}
+        .container {{ max-width: 960px; margin: 0 auto; background: white;
+                      border-radius: 12px; overflow: hidden;
+                      box-shadow: 0 4px 20px rgba(0,0,0,0.12); }}
+        .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 70%, #533483 100%);
+                   padding: 35px 35px 28px 35px; color: white; position: relative; }}
+        .header h1 {{ margin: 0 0 6px 0; font-size: 24px; letter-spacing: 0.5px;
+                      text-shadow: 0 2px 4px rgba(0,0,0,0.3); }}
+        .header p {{ margin: 0; font-size: 12px; opacity: 0.85; }}
+        .header .batch-badge {{ display: inline-block; padding: 5px 16px; border-radius: 20px;
+                                font-size: 12px; font-weight: bold; margin-left: 12px;
+                                vertical-align: middle; }}
+        .content {{ padding: 30px 35px; }}
+
+        h2 {{ color: #2c3e50; margin-top: 32px; margin-bottom: 16px; font-size: 17px;
+              padding: 10px 16px; border-radius: 8px;
+              background: linear-gradient(90deg, #f8f9ff 0%, #fff 100%);
+              border-left: 5px solid #533483; }}
+
+        table {{ border-collapse: collapse; width: 100%; margin-top: 12px; margin-bottom: 16px;
+                 font-size: 12px; border-radius: 8px; overflow: hidden;
+                 box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
+        th {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #e0e0e0;
+              padding: 10px 12px; text-align: left;
+              font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
+              text-transform: uppercase; white-space: nowrap; }}
+        td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; white-space: nowrap; }}
+        tr:nth-child(even) {{ background-color: #fafbfe; }}
+        tr:hover {{ background-color: #f0f3ff; }}
+
+        .badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
+                  color: white; font-weight: bold; font-size: 10px;
+                  letter-spacing: 0.5px; text-transform: uppercase;
+                  box-shadow: 0 2px 4px rgba(0,0,0,0.15); }}
+
+        .kpi-card {{ flex: 1; min-width: 130px; border-radius: 10px; padding: 18px 14px;
+                     text-align: center; border-left: 4px solid; }}
+        .kpi-card .kpi-label {{ font-size: 10px; font-weight: bold; color: #666;
+                                text-transform: uppercase; letter-spacing: 0.5px; }}
+        .kpi-card .kpi-value {{ font-size: 28px; font-weight: bold; margin: 6px 0 2px 0; }}
+        .kpi-card .kpi-sub {{ font-size: 10px; color: #888; }}
+
+        .health-bar {{ display: inline-block; height: 14px; border-radius: 7px;
+                       vertical-align: middle; }}
+
+        .layer-card {{ margin: 14px 0; border: 1px solid #e8eaf0; border-radius: 10px;
+                       overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
+        .layer-card-header {{ display: flex; justify-content: space-between; align-items: center;
+                              padding: 14px 18px;
+                              background: linear-gradient(90deg, #fafbfe 0%, #fff 100%);
+                              border-bottom: 1px solid #eee; }}
+        .layer-card-body {{ padding: 14px 18px; }}
+
+        .status-row {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }}
+        .status-item {{ display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: bold; }}
+
+        .red-row {{ background-color: #fff0f0 !important; }}
+        .total-row {{ background-color: #eaf4ff !important; font-weight: bold; }}
+
+        .footer {{ padding: 25px 35px; font-size: 11px; color: #888;
+                   border-top: 2px solid #eee;
+                   background: linear-gradient(90deg, #fafbfc 0%, #f5f6fa 100%); }}
+    </style></head>
+    <body>
+    <div class="container">
+
+    <!-- ======== HEADER ======== -->
+    <div class="header">
+        <h1>&#x1F4CB; End of Batch Summary Report
+            <span class="batch-badge" style="background:{overall_color};">
+                {batch_status_icon} {overall_status}</span></h1>
+        <p>&#x1F4C5; {run_date} &nbsp;&bull;&nbsp; &#x23F1; Duration: {duration_str}
+           &nbsp;&bull;&nbsp; &#x1F550; Generated: {now_str}</p>
+        <p style="margin-top:4px;">&#x1F194; Run ID: <code style="background:rgba(255,255,255,0.15);
+           padding:2px 8px;border-radius:4px;font-size:11px;">{run_id}</code></p>
+    </div>
+
+    <div class="content">
+
+    <!-- ======== 1. BATCH OVERVIEW ======== -->
+    <h2>&#x1F4CA; 1. Batch Overview</h2>
+
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;">
+      <div class="kpi-card" style="background:#f0fff0;border-color:#28a745;">
+        <div class="kpi-label">Total Checks</div>
+        <div class="kpi-value" style="color:#2c3e50;">{tot['total']}</div>
+        <div class="kpi-sub">across {tot['distinct_runs']} run(s)</div>
+      </div>
+      <div class="kpi-card" style="background:#f0fff0;border-color:#28a745;">
+        <div class="kpi-label">Passed</div>
+        <div class="kpi-value" style="color:#28a745;">{tot['pass']}</div>
+        <div class="kpi-sub">{aud_pass_rate:.1f}%</div>
+      </div>
+      <div class="kpi-card" style="background:#fff0f0;border-color:#dc3545;">
+        <div class="kpi-label">Failed</div>
+        <div class="kpi-value" style="color:#dc3545;">{tot['fail']}</div>
+        <div class="kpi-sub">{aud_fail_rate:.1f}%</div>
+      </div>
+      <div class="kpi-card" style="background:#fff8e1;border-color:#fd7e14;">
+        <div class="kpi-label">Warnings</div>
+        <div class="kpi-value" style="color:#fd7e14;">{tot['warn']}</div>
+        <div class="kpi-sub">{aud_warn_rate:.1f}%</div>
+      </div>
+      <div class="kpi-card" style="background:#f5f5f5;border-color:#6c757d;">
+        <div class="kpi-label">Not Executed</div>
+        <div class="kpi-value" style="color:#6c757d;">{tot['not_exec']}</div>
+        <div class="kpi-sub">{aud_ne_rate:.1f}%</div>
+      </div>
+    </div>
+
+    <!-- Pass Rate Bar -->
+    <div style="display:flex;gap:15px;margin:18px 0;">
+      <div style="flex:2;background:#fafbfc;border:1px solid #eee;border-radius:8px;padding:15px;">
+        <div style="color:#666;font-size:10px;font-weight:bold;margin-bottom:8px;
+                    letter-spacing:0.5px;">OVERALL PASS RATE (TODAY)</div>
+        <div style="background:#e9ecef;border-radius:10px;height:22px;overflow:hidden;">
+          <div style="background:linear-gradient(90deg, {aud_pass_color}, {aud_pass_color}bb);
+                      height:100%;width:{aud_pass_rate:.0f}%;border-radius:10px;
+                      box-shadow:0 2px 4px {aud_pass_color}44;"></div>
+        </div>
+        <div style="text-align:center;margin-top:8px;">
+          <span style="color:{aud_pass_color};font-size:24px;font-weight:bold;">{aud_pass_rate:.1f}%</span>
+        </div>
+      </div>
+      <div style="flex:1;background:#fafbfc;border:1px solid #eee;border-radius:8px;
+                  padding:15px;text-align:center;">
+        <div style="color:#666;font-size:10px;font-weight:bold;letter-spacing:0.5px;">
+            ATHENA COST (TODAY)</div>
+        <div style="color:#8e44ad;font-size:24px;font-weight:bold;margin-top:14px;">
+            ${tot['cost_usd']:.4f}</div>
+        <div style="color:#888;font-size:10px;margin-top:4px;">
+            {tot['distinct_runs']} run(s)</div>
+      </div>
+    </div>
+"""
+
+    section_num = 2
+
+    # ======== 2. LAYER-WISE BREAKDOWN ========
+    if audit_day_summary and audit_day_summary.get("by_layer"):
+        layers = audit_day_summary["by_layer"]
+        html += f"""
+    <h2>&#x1F4C2; {section_num}. Breakdown by Layer</h2>
+    <p style="color:#666;font-size:12px;">
+        Aggregated from <b>{tot['distinct_runs']}</b> run(s) in
+        <code>audit_db.etl_orchestrator_audit</code> for {run_date}.</p>
+"""
+
+        # Layer cards — each layer as a card with status bar (like glue_job_status_report)
+        for idx, layer in enumerate(layers):
+            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lfr = (layer["fail"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
+            layer_status = "PASS" if layer["fail"] == 0 else "FAIL"
+            layer_color = "#28a745" if layer_status == "PASS" else "#dc3545"
+            layer_icon = "&#x2705;" if layer_status == "PASS" else "&#x274C;"
+
+            # Health score for layer: pass_rate weighted
+            health = min(int(lpr), 100)
+            h_color = "#28a745" if health >= 80 else ("#fd7e14" if health >= 60 else "#dc3545")
+
+            html += f"""
+        <div class="layer-card" style="border-left:5px solid {layer_color};">
+          <div class="layer-card-header">
+            <div>
+              <span style="font-size:16px;margin-right:6px;">{layer_icon}</span>
+              <span style="font-weight:bold;color:#2c3e50;font-size:14px;">
+                  {layer['event_type']}</span>
+              <span class="badge" style="background:{layer_color};margin-left:8px;">
+                  {layer_status}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:#888;">{layer['total']} checks</span>
+              <div class="health-bar" style="width:{health}px;background:{h_color};"></div>
+              <span style="font-size:11px;color:{h_color};font-weight:bold;">{health}</span>
+            </div>
+          </div>
+          <div class="layer-card-body">
+            <div class="status-row">
+              <div class="status-item">
+                <span style="color:#28a745;">&#x2705;</span>
+                <span style="color:#28a745;">Pass: {layer['pass']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#dc3545;">&#x274C;</span>
+                <span style="color:#dc3545;">Fail: {layer['fail']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#fd7e14;">&#x26A0;</span>
+                <span style="color:#fd7e14;">Warn: {layer['warn']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#6c757d;">&#x23F8;</span>
+                <span style="color:#6c757d;">Not Exec: {layer['not_exec']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#8e44ad;">&#x1F4B0;</span>
+                <span style="color:#8e44ad;">Cost: ${layer['cost_usd']:.4f}</span>
+              </div>
+            </div>
+            <!-- Pass rate mini bar -->
+            <div style="margin-top:10px;">
+              <div style="display:flex;justify-content:space-between;font-size:10px;color:#666;
+                          margin-bottom:4px;">
+                <span>Pass Rate</span>
+                <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span>
+              </div>
+              <div style="background:#e9ecef;border-radius:6px;height:12px;overflow:hidden;">
+                <div style="background:{lpr_color};height:100%;width:{lpr:.0f}%;
+                            border-radius:6px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>"""
+
+        # Summary table (like glue_job_status_report)
+        html += """
+        <table style="margin-top:20px;"><thead><tr>
+            <th>#</th><th>Layer / Event Type</th><th>Total</th><th>Passed</th>
+            <th>Failed</th><th>Warnings</th><th>Not Exec</th>
+            <th>Pass Rate</th><th>Cost (USD)</th><th>Status</th>
+        </tr></thead><tbody>"""
+
+        for i, layer in enumerate(layers, 1):
+            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
+            l_status = "PASS" if layer["fail"] == 0 else "FAIL"
+            l_color = "#28a745" if l_status == "PASS" else "#dc3545"
+            fail_style = ' style="color:#dc3545;font-weight:bold;"' if layer["fail"] > 0 else ""
+            row_class = ' class="red-row"' if layer["fail"] > 0 else ""
+
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{layer['event_type']}</b></td>
+                <td style="text-align:center;">{layer['total']}</td>
+                <td style="text-align:center;color:#28a745;font-weight:bold;">{layer['pass']}</td>
+                <td style="text-align:center;"{fail_style}>{layer['fail']}</td>
+                <td style="text-align:center;">{layer['warn']}</td>
+                <td style="text-align:center;">{layer['not_exec']}</td>
+                <td style="text-align:center;">
+                    <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span></td>
+                <td style="text-align:right;">${layer['cost_usd']:.4f}</td>
+                <td><span class="badge" style="background:{l_color};">{l_status}</span></td>
+            </tr>"""
+
+        # Totals row
+        html += f"""<tr class="total-row">
+            <td></td>
+            <td><b>TOTAL</b></td>
+            <td style="text-align:center;">{tot['total']}</td>
+            <td style="text-align:center;color:#28a745;">{tot['pass']}</td>
+            <td style="text-align:center;color:#dc3545;">{tot['fail']}</td>
+            <td style="text-align:center;">{tot['warn']}</td>
+            <td style="text-align:center;">{tot['not_exec']}</td>
+            <td style="text-align:center;">
+                <span style="color:{aud_pass_color};font-weight:bold;">{aud_pass_rate:.1f}%</span></td>
+            <td style="text-align:right;">${tot['cost_usd']:.4f}</td>
+            <td><span class="badge" style="background:{overall_color};">{overall_status}</span></td>
+        </tr>"""
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 3. TODAY'S RUNS ========
+    if audit_day_summary and audit_day_summary.get("runs"):
+        runs = audit_day_summary["runs"]
+        html += f"""
+    <h2>&#x1F504; {section_num}. Today's Batch Runs</h2>
+    <p style="color:#666;font-size:12px;">
+        Individual pipeline executions recorded for {run_date}.</p>
+
+    <table><thead><tr>
+        <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
+        <th>Cost (USD)</th><th>First Event</th><th>Last Event</th><th>Health</th>
+    </tr></thead><tbody>"""
+
+        for i, r in enumerate(runs, 1):
+            r_status = r.get("overall_status", "")
+            r_color = "#28a745" if r_status == "PASS" else (
+                "#dc3545" if r_status == "FAIL" else "#6c757d")
+            row_class = ' class="red-row"' if r_status == "FAIL" else ""
+
+            # Simple health score for run: PASS=100, FAIL=30, else=50
+            r_health = 100 if r_status == "PASS" else (30 if r_status == "FAIL" else 50)
+            rh_color = "#28a745" if r_health >= 80 else (
+                "#fd7e14" if r_health >= 60 else "#dc3545")
+
+            # Calculate duration from first_event to last_event
+            run_dur = ""
+            try:
+                fe = datetime.fromisoformat(r["first_event"].replace("Z", "+00:00"))
+                le = datetime.fromisoformat(r["last_event"].replace("Z", "+00:00"))
+                rd_sec = (le - fe).total_seconds()
+                run_dur = f" ({int(rd_sec // 60)}m {int(rd_sec % 60)}s)"
+            except Exception:
+                pass
+
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><code style="font-size:11px;">{r['run_id'][:12]}...</code></td>
+                <td><span class="badge" style="background:{r_color};">{r_status}</span></td>
+                <td style="text-align:center;">{r['event_count']}</td>
+                <td style="text-align:right;">${r['cost_usd']:.4f}</td>
+                <td style="font-size:11px;">{r['first_event']}</td>
+                <td style="font-size:11px;">{r['last_event']}{run_dur}</td>
+                <td>
+                  <div class="health-bar" style="width:{r_health}px;background:{rh_color};"></div>
+                  <span style="font-size:11px;color:{rh_color};font-weight:bold;">{r_health}</span>
+                </td>
+            </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 4. VALIDATION DETAILS (if any ran alongside summary) ========
+    if validation_results:
+        html += f"""
+    <h2>&#x1F50D; {section_num}. Validation Check Details</h2>
+    <table><thead><tr>
+        <th>#</th><th>Validation</th><th>Check Type</th>
+        <th>Status</th><th>Actual</th><th>Cost</th><th>Detail</th>
+    </tr></thead><tbody>"""
+
+        for i, vr in enumerate(validation_results, 1):
+            color = _status_color(vr["status"])
+            cost_str = f"${vr.get('cost_usd', 0):.4f}" if vr.get("cost_usd") else "-"
+            row_class = ' class="red-row"' if vr["status"] == STATUS_FAIL else ""
+            retry_badge = (' <span style="color:#fd7e14;font-size:10px;">[retried]</span>'
+                           if vr.get("retried") else "")
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{vr['name']}</b>{retry_badge}<br>
+                    <small style="color:#888;">{vr.get('description', '')}</small></td>
+                <td>{vr.get('check_type', '-')}</td>
+                <td><span class="badge" style="background:{color};">{vr['status']}</span></td>
+                <td>{vr.get('actual_value', '-')}</td>
+                <td style="font-size:11px;">{cost_str}</td>
+                <td>{vr.get('detail', '-')}</td>
+            </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 5. COMPARISON CHECKS (if any) ========
+    if comparison_results:
+        html += f"""
+    <h2>&#x2696; {section_num}. Cross-Query Comparisons</h2>
+    <table><thead><tr>
+        <th>#</th><th>Comparison</th><th>Rule</th>
+        <th>Value A</th><th>Value B</th><th>Status</th><th>Detail</th>
+    </tr></thead><tbody>"""
+
+        for i, cr in enumerate(comparison_results, 1):
+            color = _status_color(cr["status"])
+            row_class = ' class="red-row"' if cr["status"] == STATUS_FAIL else ""
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{cr['name']}</b><br>
+                    <small style="color:#888;">{cr.get('description', '')}</small></td>
+                <td>{cr.get('rule', '-')}</td>
+                <td><b>{cr.get('label_a', 'A')}:</b> {cr.get('value_a', '-')}</td>
+                <td><b>{cr.get('label_b', 'B')}:</b> {cr.get('value_b', '-')}</td>
+                <td><span class="badge" style="background:{color};">{cr['status']}</span></td>
+                <td>{cr.get('detail', '-')}</td>
+            </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== FOOTER ========
+    html += f"""
+    </div><!-- end content -->
+
+    <div class="footer">
+        <p>&#x1F4CB; <b>End of Batch Summary</b> &nbsp;&bull;&nbsp;
+           &#x1F194; {run_id}</p>
+        <p>&#x1F4C1; <b>Audit Log:</b> {audit_s3_path or 'N/A'}</p>
+        <p>&#x1F4B0; <b>Athena Cost:</b> ${total_cost_usd:.4f} &nbsp;&bull;&nbsp;
+           &#x23F1; <b>Duration:</b> {duration_str} &nbsp;&bull;&nbsp;
+           &#x1F4C5; <b>Date:</b> {run_date}</p>
+        <p style="margin-top:10px;">Generated by <b>Strands ETL Orchestrator</b> &mdash;
+           End of Batch Summary Report &nbsp;|&nbsp; BIG DATA Team</p>
+    </div>
+
+    </div><!-- end container -->
+    </body></html>"""
+
+    return html
+
+
 def generate_dashboard_html(
     run_id, run_date, run_mode, stale_results, glue_results,
     validation_results, comparison_results, summary_results,
@@ -1846,6 +2269,17 @@ def generate_dashboard_html(
     summary_config = summary_config or {}
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     overall_color = "#28a745" if overall_status == STATUS_PASS else "#dc3545"
+    duration_str = f"{int(run_duration_sec // 60)}m {int(run_duration_sec % 60)}s"
+
+    # ==================================================================
+    # SUMMARY MODE: End of Batch Summary Report (audit-centric, no charts)
+    # ==================================================================
+    if run_mode == "summary":
+        return _generate_summary_report(
+            run_id, run_date, overall_status, overall_color, now_str,
+            duration_str, total_cost_usd, audit_s3_path,
+            audit_day_summary, validation_results, comparison_results,
+            run_duration_sec)
 
     total_sources = len(stale_results)
     stale_count = sum(1 for r in stale_results if r["status"] == STATUS_STALE)
