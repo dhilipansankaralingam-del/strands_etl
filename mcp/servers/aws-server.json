@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "aws": {
+      "command": "node",
+      "args": [
+        "/home/user/strands_etl/mcp/servers/aws-mcp-server.js"
+      ],
+      "description": "Direct AWS service interactions for agents",
+      "capabilities": [
+        "query_glue_jobs",
+        "check_emr_clusters",
+        "list_s3_objects",
+        "get_cloudwatch_metrics",
+        "query_dynamodb",
+        "send_ses_email"
+      ],
+      "use_cases": [
+        "Check current Glue job status",
+        "Query recent CloudWatch logs",
+        "List learning vectors in S3",
+        "Query execution history from DynamoDB",
+        "Get real-time resource utilization"
+      ],
+      "env": {
+        "AWS_REGION": "us-east-1",
+        "DYNAMODB_TABLE_PREFIX": "Strands"
+      }
+    }
+  }
+}

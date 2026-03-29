@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "description": "Access GitHub repository for code analysis and tracking",
+      "capabilities": [
+        "search_code",
+        "get_file_contents",
+        "list_commits",
+        "get_pr_details",
+        "search_issues"
+      ],
+      "use_cases": [
+        "Search for anti-patterns in historical code",
+        "Review recent changes to ETL scripts",
+        "Track issue resolution history",
+        "Analyze code evolution over time"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}

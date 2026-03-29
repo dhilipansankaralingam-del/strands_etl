@@ -1,0 +1,259 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Decision Agent API",
+    "version": "1.0.0",
+    "description": "API for platform selection and workload analysis"
+  },
+  "paths": {
+    "/search_learning_vectors": {
+      "post": {
+        "summary": "Search for similar historical workloads",
+        "description": "Searches the learning vector database for historically similar workloads based on characteristics",
+        "operationId": "searchLearningVectors",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "workload": {
+                    "type": "object",
+                    "description": "Workload characteristics to match",
+                    "properties": {
+                      "data_volume": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "very_high"],
+                        "description": "Expected data volume"
+                      },
+                      "complexity": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "very_high"],
+                        "description": "Transformation complexity"
+                      },
+                      "criticality": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "description": "Business criticality"
+                      }
+                    },
+                    "required": ["data_volume", "complexity"]
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of similar workloads to return"
+                  }
+                },
+                "required": ["workload"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Similar workloads found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "similar_workloads": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "similarity_score": {
+                            "type": "number",
+                            "description": "Similarity score (0.0-1.0)"
+                          },
+                          "platform_used": {
+                            "type": "string",
+                            "enum": ["glue", "emr", "lambda"]
+                          },
+                          "execution_time_seconds": {
+                            "type": "number"
+                          },
+                          "success": {
+                            "type": "boolean"
+                          },
+                          "quality_score": {
+                            "type": "number"
+                          },
+                          "workload_characteristics": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    },
+                    "total_found": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calculate_platform_scores": {
+      "post": {
+        "summary": "Calculate scores for each platform option",
+        "description": "Analyzes workload and historical data to score Glue, EMR, and Lambda",
+        "operationId": "calculatePlatformScores",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "workload": {
+                    "type": "object",
+                    "description": "Current workload characteristics"
+                  },
+                  "similar_workloads": {
+                    "type": "array",
+                    "description": "Similar historical workloads from search",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "description": "Additional constraints (budget, time, etc.)",
+                    "properties": {
+                      "max_cost": {
+                        "type": "number"
+                      },
+                      "max_time_minutes": {
+                        "type": "number"
+                      },
+                      "preferred_platform": {
+                        "type": "string",
+                        "enum": ["glue", "emr", "lambda"]
+                      }
+                    }
+                  }
+                },
+                "required": ["workload"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Platform scores calculated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "platform_scores": {
+                      "type": "object",
+                      "properties": {
+                        "glue": {
+                          "type": "object",
+                          "properties": {
+                            "score": {"type": "number"},
+                            "reasoning": {"type": "string"},
+                            "estimated_cost": {"type": "number"},
+                            "estimated_time_minutes": {"type": "number"}
+                          }
+                        },
+                        "emr": {
+                          "type": "object",
+                          "properties": {
+                            "score": {"type": "number"},
+                            "reasoning": {"type": "string"},
+                            "estimated_cost": {"type": "number"},
+                            "estimated_time_minutes": {"type": "number"}
+                          }
+                        },
+                        "lambda": {
+                          "type": "object",
+                          "properties": {
+                            "score": {"type": "number"},
+                            "reasoning": {"type": "string"},
+                            "estimated_cost": {"type": "number"},
+                            "estimated_time_minutes": {"type": "number"}
+                          }
+                        }
+                      }
+                    },
+                    "recommended_platform": {
+                      "type": "string",
+                      "enum": ["glue", "emr", "lambda"]
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_platform_statistics": {
+      "get": {
+        "summary": "Get historical statistics for each platform",
+        "description": "Returns aggregate statistics about platform performance",
+        "operationId": "getPlatformStatistics",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["glue", "emr", "lambda", "all"]
+            },
+            "description": "Platform to get stats for (default: all)"
+          },
+          {
+            "name": "days": {
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30
+            },
+            "description": "Number of days to look back"
+          }
+        }
+        ],
+        "responses": {
+          "200": {
+            "description": "Platform statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "glue": {
+                      "type": "object",
+                      "properties": {
+                        "total_executions": {"type": "integer"},
+                        "success_rate": {"type": "number"},
+                        "avg_execution_time_seconds": {"type": "number"},
+                        "avg_cost": {"type": "number"}
+                      }
+                    },
+                    "emr": {"type": "object"},
+                    "lambda": {"type": "object"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
