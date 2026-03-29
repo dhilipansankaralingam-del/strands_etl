@@ -263,6 +263,247 @@ def check_staleness(source, defaults):
 
 
 # ============================================================================
+# 2b. END-OF-BATCH CHECKS: Glue Job Status + S3 Folder Freshness
+# ============================================================================
+GLUE_COST_PER_DPU_HOUR = 0.44
+
+
+def _seconds_to_min_str(seconds):
+    """Convert seconds to a human-readable minutes string."""
+    if seconds is None:
+        return "N/A"
+    try:
+        minutes = float(seconds) / 60.0
+        return f"{minutes:.1f} min" if minutes >= 1 else f"{minutes:.2f} min"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def check_glue_jobs_today(job_configs):
+    """
+    Check each configured Glue job to see if it ran today.
+    Similar to glue_job_status_report.py but lightweight for end-of-batch.
+
+    job_configs: list of dicts with keys: name, domain, sla
+    Returns: list of job status dicts
+    """
+    now_utc = datetime.now(timezone.utc)
+    today_str = now_utc.strftime("%Y-%m-%d")
+    results = []
+
+    for jcfg in job_configs:
+        job_name = jcfg["name"]
+        domain = jcfg.get("domain", "")
+        sla_deadline = jcfg.get("sla", "23:59")
+
+        entry = {
+            "job_name": job_name,
+            "domain": domain,
+            "sla_deadline": sla_deadline,
+            "status": "NOT_RUN",
+            "ran_today": False,
+            "execution_time_min": "N/A",
+            "last_run": "Never",
+            "cost_today": 0.0,
+            "sla_status": "N/A",
+            "sla_detail": "",
+            "error_message": "",
+            "runs_today": 0,
+            "worker_type": "N/A",
+            "num_workers": "N/A",
+        }
+
+        try:
+            response = glue_client().get_job_runs(
+                JobName=job_name, MaxResults=20
+            )
+        except Exception as exc:
+            entry["status"] = "ERROR"
+            entry["error_message"] = str(exc)
+            results.append(entry)
+            continue
+
+        if not response.get("JobRuns"):
+            results.append(entry)
+            continue
+
+        # Check runs for today
+        today_runs = []
+        for run in response["JobRuns"]:
+            started_on = run.get("StartedOn")
+            if not started_on:
+                continue
+            if started_on.tzinfo is None:
+                started_on = started_on.replace(tzinfo=timezone.utc)
+            run_date = started_on.strftime("%Y-%m-%d")
+            if run_date == today_str:
+                today_runs.append(run)
+
+        if not today_runs:
+            # Job exists but didn't run today
+            latest = response["JobRuns"][0]
+            started_on = latest.get("StartedOn")
+            if started_on:
+                entry["last_run"] = started_on.strftime("%Y-%m-%d %H:%M UTC")
+            results.append(entry)
+            continue
+
+        # Job ran today — use the latest today's run
+        latest = today_runs[0]
+        entry["ran_today"] = True
+        entry["runs_today"] = len(today_runs)
+        entry["status"] = latest.get("JobRunState", "UNKNOWN")
+        entry["worker_type"] = latest.get("WorkerType", "Standard")
+        entry["num_workers"] = latest.get("NumberOfWorkers",
+                                          latest.get("AllocatedCapacity", "N/A"))
+
+        exec_sec = latest.get("ExecutionTime") or 0
+        entry["execution_time_min"] = _seconds_to_min_str(exec_sec)
+
+        started_on = latest.get("StartedOn")
+        if started_on:
+            if started_on.tzinfo is None:
+                started_on = started_on.replace(tzinfo=timezone.utc)
+            entry["last_run"] = started_on.strftime("%Y-%m-%d %H:%M UTC")
+
+        entry["error_message"] = latest.get("ErrorMessage", "")
+
+        # Cost for today's runs
+        total_cost = 0.0
+        for run in today_runs:
+            dpu_sec = run.get("DPUSeconds") or 0
+            total_cost += (float(dpu_sec) / 3600.0) * GLUE_COST_PER_DPU_HOUR
+        entry["cost_today"] = round(total_cost, 4)
+
+        # SLA check
+        completed_on = latest.get("CompletedOn")
+        if completed_on:
+            if completed_on.tzinfo is None:
+                completed_on = completed_on.replace(tzinfo=timezone.utc)
+            sla_hour, sla_min = [int(x) for x in sla_deadline.split(":")]
+            sla_dt = datetime(
+                started_on.year, started_on.month, started_on.day,
+                sla_hour, sla_min, 0, tzinfo=timezone.utc
+            )
+            if completed_on <= sla_dt:
+                entry["sla_status"] = "ON TIME"
+                entry["sla_detail"] = (
+                    f"Finished {completed_on.strftime('%H:%M')} UTC "
+                    f"(deadline {sla_deadline} UTC)")
+            else:
+                entry["sla_status"] = "BREACHED"
+                entry["sla_detail"] = (
+                    f"Finished {completed_on.strftime('%H:%M')} UTC "
+                    f"(deadline {sla_deadline} UTC)")
+        elif entry["status"] == "RUNNING":
+            entry["sla_status"] = "RUNNING"
+            entry["sla_detail"] = "Job still running"
+
+        results.append(entry)
+
+    logger.info("Glue job check: %d jobs, %d ran today, %d not run",
+                len(results),
+                sum(1 for r in results if r["ran_today"]),
+                sum(1 for r in results if not r["ran_today"]))
+    return results
+
+
+def check_s3_folders_summary(s3_folder_configs):
+    """
+    End-of-batch S3 folder check:
+      - For each configured S3 path, count subfolders
+      - Subfolder count must NOT exceed 3
+      - Subfolders must have been created/modified in the last 3 hours
+
+    s3_folder_configs: list of dicts with keys: bucket, prefix, label,
+                       max_subfolders (default 3), max_age_hours (default 3)
+    Returns: list of check result dicts
+    """
+    now = datetime.now(timezone.utc)
+    results = []
+
+    for folder_cfg in s3_folder_configs:
+        bucket = folder_cfg["bucket"]
+        prefix = folder_cfg["prefix"]
+        label = folder_cfg.get("label", prefix)
+        max_subfolders = folder_cfg.get("max_subfolders", 3)
+        max_age_hours = folder_cfg.get("max_age_hours", 3)
+
+        entry = {
+            "bucket": bucket,
+            "prefix": prefix,
+            "label": label,
+            "subfolder_count": 0,
+            "max_subfolders": max_subfolders,
+            "max_age_hours": max_age_hours,
+            "status": STATUS_PASS,
+            "detail": "",
+            "subfolders": [],
+            "stale_subfolders": [],
+            "over_limit": False,
+        }
+
+        try:
+            subfolders = list_subfolders(bucket, prefix)
+            entry["subfolder_count"] = len(subfolders)
+
+            if len(subfolders) > max_subfolders:
+                entry["status"] = STATUS_FAIL
+                entry["over_limit"] = True
+                entry["detail"] = (
+                    f"Subfolder count {len(subfolders)} exceeds limit "
+                    f"of {max_subfolders}")
+
+            # Check age of each subfolder
+            stale_list = []
+            for sf in subfolders:
+                sf_name = sf["prefix"].rstrip("/").split("/")[-1]
+                sf_entry = {
+                    "name": sf_name,
+                    "prefix": sf["prefix"],
+                    "last_modified": None,
+                    "age_hours": None,
+                    "fresh": False,
+                }
+                if sf["latest_modified"]:
+                    age_hours = (now - sf["latest_modified"]).total_seconds() / 3600
+                    sf_entry["last_modified"] = sf["latest_modified"].strftime(
+                        "%Y-%m-%d %H:%M UTC")
+                    sf_entry["age_hours"] = round(age_hours, 1)
+                    sf_entry["fresh"] = age_hours <= max_age_hours
+                    if not sf_entry["fresh"]:
+                        stale_list.append(sf_name)
+                else:
+                    stale_list.append(sf_name)
+
+                entry["subfolders"].append(sf_entry)
+
+            entry["stale_subfolders"] = stale_list
+            if stale_list and entry["status"] != STATUS_FAIL:
+                entry["status"] = STATUS_WARN
+                entry["detail"] = (
+                    f"{len(stale_list)} subfolder(s) older than "
+                    f"{max_age_hours}h: {', '.join(stale_list)}")
+
+            if not entry["detail"]:
+                entry["detail"] = (
+                    f"{len(subfolders)} subfolder(s), all within {max_age_hours}h")
+
+        except Exception as exc:
+            entry["status"] = STATUS_FAIL
+            entry["detail"] = f"Error checking S3: {exc}"
+            logger.error("[%s] S3 folder check error: %s", label, exc)
+
+        results.append(entry)
+
+    logger.info("S3 folder check: %d paths, %d PASS, %d FAIL/WARN",
+                len(results),
+                sum(1 for r in results if r["status"] == STATUS_PASS),
+                sum(1 for r in results if r["status"] != STATUS_PASS))
+    return results
+
+
+# ============================================================================
 # 3. GLUE JOB TRIGGER
 # ============================================================================
 def trigger_glue_job(source, stale_subfolders, run_id):
@@ -1836,9 +2077,12 @@ def _generate_summary_report(
     run_id, run_date, overall_status, overall_color, now_str,
     duration_str, total_cost_usd, audit_s3_path,
     audit_day_summary, validation_results, comparison_results,
-    run_duration_sec
+    run_duration_sec, glue_job_statuses=None, s3_folder_results=None
 ):
-    """Generate End of Batch Summary Report — audit-centric, per-layer, no charts."""
+    """Generate End of Batch Summary Report — audit-centric, per-layer,
+    with Glue job status and S3 folder freshness checks."""
+    glue_job_statuses = glue_job_statuses or []
+    s3_folder_results = s3_folder_results or []
 
     # ---- Compute totals from audit or fallback to validation results ----
     if audit_day_summary:
@@ -2234,6 +2478,179 @@ def _generate_summary_report(
         html += "</tbody></table>"
         section_num += 1
 
+    # ======== GLUE JOB STATUS ========
+    if glue_job_statuses:
+        total_jobs = len(glue_job_statuses)
+        ran_today = sum(1 for g in glue_job_statuses if g["ran_today"])
+        not_run = total_jobs - ran_today
+        succeeded = sum(1 for g in glue_job_statuses if g["status"] == "SUCCEEDED")
+        failed_jobs = sum(1 for g in glue_job_statuses if g["status"] in ("FAILED", "ERROR", "TIMEOUT"))
+        sla_on_time = sum(1 for g in glue_job_statuses if g["sla_status"] == "ON TIME")
+        sla_breached = sum(1 for g in glue_job_statuses if g["sla_status"] == "BREACHED")
+        total_glue_cost = sum(g["cost_today"] for g in glue_job_statuses)
+
+        html += f"""
+    <h2>&#x2699; {section_num}. Glue Job Status</h2>
+    <p style="color:#666;font-size:12px;">
+        Checking {total_jobs} configured Glue job(s) for today's runs.</p>
+
+    <!-- Glue summary pills -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;">
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#17a2b8;
+                   color:white;font-size:11px;font-weight:bold;">Jobs: {total_jobs}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#28a745;
+                   color:white;font-size:11px;font-weight:bold;">Ran Today: {ran_today}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;
+                   background:{'#dc3545' if not_run > 0 else '#28a745'};
+                   color:white;font-size:11px;font-weight:bold;">Not Run: {not_run}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#28a745;
+                   color:white;font-size:11px;font-weight:bold;">Succeeded: {succeeded}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;
+                   background:{'#dc3545' if failed_jobs else '#6c757d'};
+                   color:white;font-size:11px;font-weight:bold;">Failed: {failed_jobs}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#28a745;
+                   color:white;font-size:11px;font-weight:bold;">SLA On Time: {sla_on_time}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;
+                   background:{'#dc3545' if sla_breached else '#28a745'};
+                   color:white;font-size:11px;font-weight:bold;">SLA Breached: {sla_breached}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#8e44ad;
+                   color:white;font-size:11px;font-weight:bold;">Cost: ${total_glue_cost:.2f}</span>
+    </div>
+
+    <table><thead><tr>
+        <th>#</th><th>Job Name</th><th>Domain</th><th>Status</th>
+        <th>Ran Today</th><th>SLA</th><th>SLA Status</th>
+        <th>Exec Time</th><th>Last Run</th><th>Worker</th>
+        <th>Workers</th><th>Runs</th><th>Cost</th>
+    </tr></thead><tbody>"""
+
+        for i, gj in enumerate(glue_job_statuses, 1):
+            st = gj["status"]
+            st_color = {
+                "SUCCEEDED": "#28a745", "FAILED": "#dc3545", "RUNNING": "#007bff",
+                "ERROR": "#dc3545", "TIMEOUT": "#dc3545", "NOT_RUN": "#6c757d",
+            }.get(st, "#6c757d")
+            sla_color = {
+                "ON TIME": "#28a745", "BREACHED": "#dc3545", "RUNNING": "#007bff",
+            }.get(gj["sla_status"], "#6c757d")
+            row_class = ' class="red-row"' if (
+                st in ("FAILED", "ERROR", "TIMEOUT") or not gj["ran_today"]
+            ) else ""
+            ran_icon = "&#x2705;" if gj["ran_today"] else "&#x274C;"
+            ran_text = "Yes" if gj["ran_today"] else "No"
+
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{gj['job_name']}</b></td>
+                <td>{gj['domain']}</td>
+                <td><span class="badge" style="background:{st_color};">{st}</span></td>
+                <td style="text-align:center;">{ran_icon} {ran_text}</td>
+                <td>{gj['sla_deadline']}</td>
+                <td title="{gj['sla_detail']}">
+                    <span class="badge" style="background:{sla_color};">
+                        {gj['sla_status']}</span></td>
+                <td>{gj['execution_time_min']}</td>
+                <td style="font-size:11px;">{gj['last_run']}</td>
+                <td>{gj['worker_type']}</td>
+                <td>{gj['num_workers']}</td>
+                <td style="text-align:center;">{gj['runs_today']}</td>
+                <td style="text-align:right;">${gj['cost_today']:.4f}</td>
+            </tr>"""
+
+            if gj["error_message"] and st in ("FAILED", "ERROR", "TIMEOUT"):
+                html += f"""<tr{row_class}>
+                    <td colspan="13" style="color:#dc3545;font-size:11px;padding-left:30px;">
+                        <b>Error:</b> {gj['error_message'][:300]}</td>
+                </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== S3 FOLDER FRESHNESS CHECK ========
+    if s3_folder_results:
+        s3_pass = sum(1 for s in s3_folder_results if s["status"] == STATUS_PASS)
+        s3_warn = sum(1 for s in s3_folder_results if s["status"] == STATUS_WARN)
+        s3_fail = sum(1 for s in s3_folder_results if s["status"] == STATUS_FAIL)
+
+        html += f"""
+    <h2>&#x1F4C2; {section_num}. S3 Folder Freshness Check</h2>
+    <p style="color:#666;font-size:12px;">
+        End-of-batch check: subfolders must be &le; max limit and created/modified within
+        the configured time window.</p>
+
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;">
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#17a2b8;
+                   color:white;font-size:11px;font-weight:bold;">
+          Folders: {len(s3_folder_results)}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;background:#28a745;
+                   color:white;font-size:11px;font-weight:bold;">Pass: {s3_pass}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;
+                   background:{'#fd7e14' if s3_warn else '#6c757d'};
+                   color:white;font-size:11px;font-weight:bold;">Warn: {s3_warn}</span>
+      <span style="display:inline-block;padding:6px 14px;border-radius:20px;
+                   background:{'#dc3545' if s3_fail else '#6c757d'};
+                   color:white;font-size:11px;font-weight:bold;">Fail: {s3_fail}</span>
+    </div>
+"""
+        for sf in s3_folder_results:
+            sf_color = {STATUS_PASS: "#28a745", STATUS_WARN: "#fd7e14",
+                        STATUS_FAIL: "#dc3545"}.get(sf["status"], "#6c757d")
+            sf_icon = {STATUS_PASS: "&#x2705;", STATUS_WARN: "&#x26A0;",
+                       STATUS_FAIL: "&#x274C;"}.get(sf["status"], "&#x2139;")
+            over_badge = ""
+            if sf["over_limit"]:
+                over_badge = (
+                    f' <span class="badge" style="background:#dc3545;margin-left:6px;">'
+                    f'OVER LIMIT ({sf["subfolder_count"]}/{sf["max_subfolders"]})</span>'
+                )
+
+            html += f"""
+        <div class="layer-card" style="border-left:5px solid {sf_color};">
+          <div class="layer-card-header">
+            <div>
+              <span style="font-size:16px;margin-right:6px;">{sf_icon}</span>
+              <span style="font-weight:bold;color:#2c3e50;font-size:13px;">
+                  {sf['label']}</span>
+              <span class="badge" style="background:{sf_color};margin-left:8px;">
+                  {sf['status']}</span>
+              {over_badge}
+            </div>
+            <div style="font-size:11px;color:#888;">
+              {sf['subfolder_count']} subfolder(s) &nbsp;|&nbsp;
+              Max: {sf['max_subfolders']} &nbsp;|&nbsp;
+              Freshness: {sf['max_age_hours']}h
+            </div>
+          </div>
+          <div class="layer-card-body">
+            <p style="color:#555;font-size:12px;margin:4px 0 10px 0;">
+              &#x1F4DD; {sf['detail']}</p>"""
+
+            # Subfolder detail table
+            if sf["subfolders"]:
+                html += """<table style="margin-top:8px;"><thead><tr>
+                    <th>#</th><th>Subfolder</th><th>Last Modified</th>
+                    <th>Age (Hours)</th><th>Fresh</th>
+                </tr></thead><tbody>"""
+                for si, sub in enumerate(sf["subfolders"], 1):
+                    fresh_icon = "&#x2705;" if sub["fresh"] else "&#x274C;"
+                    fresh_color = "#28a745" if sub["fresh"] else "#dc3545"
+                    age_str = f'{sub["age_hours"]:.1f}h' if sub["age_hours"] is not None else "N/A"
+                    html += f"""<tr>
+                        <td>{si}</td>
+                        <td><b>{sub['name']}</b></td>
+                        <td style="font-size:11px;">{sub['last_modified'] or 'N/A'}</td>
+                        <td style="text-align:center;">{age_str}</td>
+                        <td style="text-align:center;color:{fresh_color};font-weight:bold;">
+                            {fresh_icon}</td>
+                    </tr>"""
+                html += "</tbody></table>"
+
+            html += """
+          </div>
+        </div>"""
+
+        section_num += 1
+
     # ======== FOOTER ========
     html += f"""
     </div><!-- end content -->
@@ -2260,12 +2677,14 @@ def generate_dashboard_html(
     validation_results, comparison_results, summary_results,
     overall_status, audit_s3_path, run_duration_sec=0, total_cost_usd=0.0,
     deviation_alerts=None, summary_config=None, audit_day_summary=None,
-    zscore_results=None
+    zscore_results=None, glue_job_statuses=None, s3_folder_results=None
 ):
     """Generate a full dashboard HTML email body with charts, KPI scorecards,
     z-score analysis, optional GIF embeds, and today's audit summary."""
     deviation_alerts = deviation_alerts or []
     zscore_results = zscore_results or []
+    glue_job_statuses = glue_job_statuses or []
+    s3_folder_results = s3_folder_results or []
     summary_config = summary_config or {}
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     overall_color = "#28a745" if overall_status == STATUS_PASS else "#dc3545"
@@ -2279,7 +2698,7 @@ def generate_dashboard_html(
             run_id, run_date, overall_status, overall_color, now_str,
             duration_str, total_cost_usd, audit_s3_path,
             audit_day_summary, validation_results, comparison_results,
-            run_duration_sec)
+            run_duration_sec, glue_job_statuses, s3_folder_results)
 
     total_sources = len(stale_results)
     stale_count = sum(1 for r in stale_results if r["status"] == STATUS_STALE)
@@ -3007,11 +3426,20 @@ def main():
     run_mode = orch_cfg.get("run_mode", "full_pipeline")
 
     # If summary config is not defined anywhere, fall back to non-summary mode
+    # (unless glue_jobs or s3_folders are configured for end-of-batch checks)
     has_summary = bool(
         (summary_config and summary_config.get("summary", {}).get("queries"))
         or config.get("summary", {}).get("queries")
     )
-    if run_mode == "summary" and not has_summary:
+    has_eob_checks = bool(
+        config.get("summary", {}).get("glue_jobs")
+        or config.get("summary", {}).get("s3_folders")
+        or (summary_config and (
+            summary_config.get("summary", {}).get("glue_jobs")
+            or summary_config.get("summary", {}).get("s3_folders")
+        ))
+    )
+    if run_mode == "summary" and not has_summary and not has_eob_checks:
         has_validations = bool(
             config.get("validations", {}).get("queries")
             or config.get("validations", {}).get("comparison_checks")
@@ -3041,6 +3469,8 @@ def main():
     comparison_results = []
     summary_results = []
     zscore_results = []
+    glue_job_statuses = []
+    s3_folder_results = []
     aborted = False
 
     # ================================================================
@@ -3103,11 +3533,38 @@ def main():
     # ================================================================
     elif run_mode == "summary":
         logger.info("-" * 50)
-        logger.info("SUMMARY MODE: Parallel queries + chart generation")
+        logger.info("SUMMARY MODE: End of Batch Summary")
         logger.info("-" * 50)
         # Use separate summary config if provided, else fall back to main config
         effective_summary_config = summary_config if summary_config else config
-        summary_results = run_summary_queries(effective_summary_config)
+        effective_summary_section = effective_summary_config.get("summary", {})
+
+        # ---- Phase 1: Glue Job Status Check ----
+        glue_job_configs = effective_summary_section.get("glue_jobs", [])
+        glue_job_statuses = []
+        if glue_job_configs:
+            logger.info("Checking %d Glue job(s) for today's runs...", len(glue_job_configs))
+            glue_job_statuses = check_glue_jobs_today(glue_job_configs)
+            # Mark overall FAIL if any job didn't run or failed
+            for gj in glue_job_statuses:
+                if gj["status"] in ("FAILED", "ERROR", "TIMEOUT"):
+                    overall_status = STATUS_FAIL
+                elif not gj["ran_today"]:
+                    logger.warning("Glue job '%s' did not run today", gj["job_name"])
+
+        # ---- Phase 2: S3 Folder Freshness Check ----
+        s3_folder_configs = effective_summary_section.get("s3_folders", [])
+        s3_folder_results = []
+        if s3_folder_configs:
+            logger.info("Checking %d S3 folder(s) for freshness...", len(s3_folder_configs))
+            s3_folder_results = check_s3_folders_summary(s3_folder_configs)
+            for sf in s3_folder_results:
+                if sf["status"] == STATUS_FAIL:
+                    overall_status = STATUS_FAIL
+
+        # ---- Phase 3: Summary Queries (if configured) ----
+        if effective_summary_section.get("queries"):
+            summary_results = run_summary_queries(effective_summary_config)
 
         # Also run validations if configured
         val_cfg = config.get("validations", {})
@@ -3206,6 +3663,10 @@ def main():
         _esc = summary_config if summary_config else config
         _effective_summary_cfg = _esc.get("summary", {})
 
+    # Collect end-of-batch data (only populated in summary mode)
+    _glue_job_statuses = glue_job_statuses if run_mode == "summary" else []
+    _s3_folder_results = s3_folder_results if run_mode == "summary" else []
+
     html = generate_dashboard_html(
         run_id, run_date, run_mode, stale_results, glue_results,
         validation_results, comparison_results, summary_results,
@@ -3214,7 +3675,9 @@ def main():
         total_cost_usd=total_cost_usd,
         summary_config=_effective_summary_cfg,
         audit_day_summary=audit_day_summary,
-        zscore_results=zscore_results)
+        zscore_results=zscore_results,
+        glue_job_statuses=_glue_job_statuses,
+        s3_folder_results=_s3_folder_results)
     send_email(html, email_cfg, overall_status, run_mode)
 
     # ---- Final Summary ----
