@@ -1,0 +1,9 @@
+# Requirements for Daily Health Check Glue Job
+# Install these in Glue using --additional-python-modules parameter
+
+matplotlib==3.7.1
+numpy==1.24.3
+
+# Already available in Glue runtime:
+# boto3
+# awsglue

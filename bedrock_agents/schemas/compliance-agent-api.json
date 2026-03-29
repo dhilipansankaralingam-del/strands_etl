@@ -1,0 +1,163 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Strands Compliance Agent API",
+    "description": "API for data governance and regulatory compliance checks",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/detect_pii": {
+      "post": {
+        "summary": "Detect PII in dataset",
+        "description": "Scans dataset for personally identifiable information",
+        "operationId": "detectPII",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string",
+                    "description": "Execution ID"
+                  },
+                  "dataset_path": {
+                    "type": "string",
+                    "description": "S3 path to dataset"
+                  },
+                  "sample_size": {
+                    "type": "integer",
+                    "description": "Number of records to sample for PII detection",
+                    "default": 1000
+                  }
+                },
+                "required": ["execution_id", "dataset_path"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PII detection results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pii_detected": {
+                      "type": "boolean"
+                    },
+                    "pii_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "total_pii_records": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/check_gdpr_compliance": {
+      "post": {
+        "summary": "Check GDPR compliance",
+        "description": "Verifies GDPR requirements for the execution",
+        "operationId": "checkGDPRCompliance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "job_metadata": {
+                    "type": "object"
+                  }
+                },
+                "required": ["execution_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "GDPR compliance status"
+          }
+        }
+      }
+    },
+    "/check_hipaa_compliance": {
+      "post": {
+        "summary": "Check HIPAA compliance",
+        "description": "Verifies HIPAA requirements for the execution",
+        "operationId": "checkHIPAACompliance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "dataset_contains_phi": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["execution_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "HIPAA compliance status"
+          }
+        }
+      }
+    },
+    "/generate_audit_report": {
+      "post": {
+        "summary": "Generate compliance audit report",
+        "description": "Creates comprehensive compliance report for auditors",
+        "operationId": "generateAuditReport",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "include_remediation": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": ["execution_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Audit report generated"
+          }
+        }
+      }
+    }
+  }
+}

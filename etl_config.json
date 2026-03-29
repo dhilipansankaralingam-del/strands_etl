@@ -1,263 +1,529 @@
 {
-  "workload": {
-    "name": "customer_order_summary_etl",
-    "description": "Multi-table join ETL: customers + orders + products → customer_order_summary with insert overwrite",
-    "data_volume": "high",
-    "complexity": "high",
-    "criticality": "high",
-    "time_sensitivity": "medium",
-    "estimated_runtime": "45min",
-    "data_sources": [
-      {
-        "type": "glue",
-        "database": "ecommerce_db",
-        "table": "customers",
-        "query": "SELECT customer_id, name, email, region, signup_date FROM ecommerce_db.customers WHERE active = true",
-        "description": "Active customer data with demographics"
-      },
-      {
-        "type": "glue",
-        "database": "ecommerce_db",
-        "table": "orders",
-        "query": "SELECT order_id, customer_id, product_id, order_date, quantity, total_amount, status FROM ecommerce_db.orders WHERE order_date >= '2023-01-01' AND status = 'completed'",
-        "description": "Completed orders from 2023 onwards"
-      },
-      {
-        "type": "glue",
-        "database": "ecommerce_db",
-        "table": "products",
-        "query": "SELECT product_id, product_name, category, price, cost, supplier_id FROM ecommerce_db.products WHERE active = true",
-        "description": "Active product catalog with pricing"
-      }
-    ],
-    "target": {
-      "type": "glue",
-      "database": "analytics_db",
-      "table": "customer_order_summary",
-      "mode": "insert_overwrite",
-      "schema": {
-        "customer_id": "string",
-        "customer_name": "string",
-        "region": "string",
-        "total_orders": "integer",
-        "total_quantity": "integer",
-        "total_revenue": "decimal(10,2)",
-        "avg_order_value": "decimal(10,2)",
-        "last_order_date": "date",
-        "top_category": "string",
-        "customer_lifetime_value": "decimal(10,2)",
-        "processed_at": "timestamp"
-      },
-      "description": "Aggregated customer analytics table"
+  "config_version": "2.0",
+  "config_metadata": {
+    "description": "Strands ETL Framework - Config-Driven Multi-Agent Orchestration",
+    "created_by": "Strands Framework",
+    "last_updated": "2026-01-27"
+  },
+
+  "templates": {
+    "default_platform": {
+      "allow_agent_override": true,
+      "glue_version": "3.0",
+      "python_version": "3",
+      "enable_spark_ui": true,
+      "enable_continuous_logging": true
+    },
+    "default_quality_checks": {
+      "enabled": true,
+      "fail_on_error": true
+    },
+    "default_compliance": {
+      "data_classification": "confidential",
+      "retention_days": 2555
     }
   },
-  "platform": {
-    "preferred": "glue",
-    "fallback": ["emr", "lambda"],
-    "resource_allocation": {
-      "cpu": "8",
-      "memory": "32GB",
-      "workers": 20,
-      "worker_type": "G.2X",
-      "timeout": "2h"
-    }
+
+  "variables": {
+    "data_bucket": "my-data-bucket",
+    "raw_prefix": "raw",
+    "processed_prefix": "processed",
+    "dimensions_prefix": "dimensions",
+    "glue_database": "analytics_db",
+    "environment": "${ENV:production}"
   },
-  "scripts": {
-    "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py",
-    "python": "s3://strands-etl-scripts/customer_order_summary_lambda.py"
-  },
-  "transformations": [
+
+  "jobs": [
     {
-      "name": "join_customers_orders",
-      "type": "join",
-      "left_table": "customers",
-      "right_table": "orders",
-      "join_type": "inner",
-      "on": "customer_id",
-      "result_table": "customer_orders",
-      "description": "Join customers with their orders"
-    },
-    {
-      "name": "join_with_products",
-      "type": "join",
-      "left_table": "customer_orders",
-      "right_table": "products",
-      "join_type": "left",
-      "on": "product_id",
-      "result_table": "full_customer_orders",
-      "description": "Add product details to orders"
-    },
-    {
-      "name": "calculate_profit_margin",
-      "type": "derived_column",
-      "expression": "(price - cost) / price * 100",
-      "column_name": "profit_margin_pct",
-      "description": "Calculate profit margin percentage"
-    },
-    {
-      "name": "aggregate_customer_summary",
-      "type": "group_by",
-      "table": "full_customer_orders",
-      "columns": ["customer_id", "name", "region"],
-      "aggregations": [
-        {"column": "order_id", "function": "count", "alias": "total_orders"},
-        {"column": "quantity", "function": "sum", "alias": "total_quantity"},
-        {"column": "total_amount", "function": "sum", "alias": "total_revenue"},
-        {"column": "total_amount", "function": "avg", "alias": "avg_order_value"},
-        {"column": "order_date", "function": "max", "alias": "last_order_date"},
-        {"column": "profit_margin_pct", "function": "avg", "alias": "avg_profit_margin"}
+      "job_id": "customer_order_summary",
+      "job_name": "Customer Order Summary ETL",
+      "description": "Aggregates customer purchase data with product and customer dimensions",
+      "enabled": true,
+      "extends": "default_platform",
+
+      "execution": {
+        "script_path": "./pyscript/customer_order_summary_glue.py",
+        "script_type": "pyspark",
+        "schedule": "0 2 * * *",
+        "timeout_minutes": 180,
+        "max_retries": 3,
+        "retry_delay_minutes": 10
+      },
+
+      "platform": {
+        "user_preference": "glue",
+        "allow_agent_override": true,
+        "glue_job_name": "customer-order-summary-etl",
+        "dpu_count": 10,
+        "auto_adjust_dpu": true,
+        "min_dpu": 2,
+        "max_dpu": 20
+      },
+
+      "workload": {
+        "data_volume_gb": null,
+        "auto_calculate_volume": true,
+        "estimated_file_count": null,
+        "auto_calculate_file_count": true,
+        "complexity": "complex",
+        "query_pattern": "batch",
+        "incremental": false,
+        "partition_keys": ["transaction_date"],
+        "expected_growth_rate_monthly": 0.15
+      },
+
+      "data_sources": [
+        {
+          "name": "transactions",
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "fact_transactions",
+          "alias": "txn",
+          "auto_detect_size": true,
+          "auto_detect_partitions": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "fact",
+          "joins_with": ["customers", "products"],
+          "join_keys": {
+            "customers": "customer_id",
+            "products": "product_id"
+          },
+          "filter_pushdown": true,
+          "partition_filter": "transaction_date >= date_sub(current_date(), 7)",
+          "broadcast_eligible": "auto",
+          "cache_recommended": false,
+          "read_options": {
+            "mergeSchema": false,
+            "recursiveFileLookup": true
+          }
+        },
+        {
+          "name": "customers",
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "dim_customers",
+          "alias": "cust",
+          "auto_detect_size": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "dimension",
+          "dimension_type": "scd_type_2",
+          "joins_with": ["transactions"],
+          "broadcast_eligible": "auto",
+          "cache_recommended": true,
+          "expected_size_hint": "small"
+        },
+        {
+          "name": "products",
+          "source_type": "glue_catalog",
+          "database": "${variables.glue_database}",
+          "table": "dim_products",
+          "alias": "prod",
+          "auto_detect_size": true,
+          "auto_detect_schema": true,
+          "role_in_flow": "dimension",
+          "dimension_type": "scd_type_1",
+          "joins_with": ["transactions"],
+          "broadcast_eligible": "auto",
+          "cache_recommended": true,
+          "expected_size_hint": "small"
+        },
+        {
+          "name": "customer_segments",
+          "source_type": "s3",
+          "path": "s3://${variables.data_bucket}/${variables.dimensions_prefix}/customer_segments/",
+          "format": "parquet",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension",
+          "joins_with": ["customers"],
+          "join_keys": {
+            "customers": "segment_id"
+          },
+          "broadcast_eligible": "auto",
+          "optional": true
+        }
       ],
-      "description": "Aggregate data by customer"
+
+      "data_flow": {
+        "analysis_enabled": true,
+        "auto_detect_joins": true,
+        "join_strategy": "auto",
+        "shuffle_optimization": "auto",
+        "flow_description": "Load fact_transactions, enrich with dim_customers and dim_products, aggregate by customer and product category"
+      },
+
+      "data_quality": {
+        "enabled": true,
+        "fail_on_error": true,
+        "sample_size": 10000,
+        "parallel_validation": true,
+        "completeness_checks": [
+          {
+            "field": "transaction_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "fail_job"
+          },
+          {
+            "field": "customer_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "fail_job"
+          },
+          {
+            "field": "product_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "fail_job"
+          },
+          {
+            "field": "amount",
+            "required": true,
+            "null_threshold_percent": 5,
+            "severity": "high",
+            "action": "warn"
+          }
+        ],
+        "accuracy_rules": [
+          {
+            "field": "email",
+            "rule_type": "regex",
+            "pattern": "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}$",
+            "severity": "high",
+            "action": "quarantine"
+          },
+          {
+            "field": "amount",
+            "rule_type": "range",
+            "min": 0,
+            "max": 1000000,
+            "severity": "high",
+            "action": "quarantine"
+          },
+          {
+            "field": "transaction_date",
+            "rule_type": "date_range",
+            "min_date": "2020-01-01",
+            "max_date": "current_date + 1 day",
+            "severity": "critical",
+            "action": "fail_job"
+          }
+        ],
+        "duplicate_check": {
+          "enabled": true,
+          "key_fields": ["transaction_id"],
+          "threshold_percent": 1,
+          "action": "warn",
+          "dedup_strategy": "keep_first"
+        },
+        "referential_integrity": [
+          {
+            "child_table": "transactions",
+            "child_key": "customer_id",
+            "parent_table": "customers",
+            "parent_key": "customer_id",
+            "allow_orphans": false,
+            "severity": "critical"
+          },
+          {
+            "child_table": "transactions",
+            "child_key": "product_id",
+            "parent_table": "products",
+            "parent_key": "product_id",
+            "allow_orphans": false,
+            "severity": "critical"
+          }
+        ],
+        "custom_validations": [
+          {
+            "name": "check_transaction_amount_consistency",
+            "sql": "amount = quantity * unit_price",
+            "severity": "high",
+            "action": "warn"
+          }
+        ]
+      },
+
+      "compliance": {
+        "pii_fields": ["email", "phone", "customer_name", "address"],
+        "auto_detect_pii": true,
+        "gdpr_applicable": true,
+        "gdpr_config": {
+          "consent_required": true,
+          "right_to_deletion": true,
+          "right_to_export": true,
+          "data_minimization": true
+        },
+        "hipaa_applicable": false,
+        "data_classification": "confidential",
+        "retention_days": 2555,
+        "encryption_at_rest": true,
+        "encryption_in_transit": true,
+        "audit_logging": true,
+        "data_lineage_tracking": true
+      },
+
+      "cost": {
+        "budget_per_run_usd": 25.0,
+        "optimization_priority": "balanced",
+        "cost_alerts": {
+          "enabled": true,
+          "threshold_percent": 90,
+          "alert_channels": ["slack", "email"]
+        },
+        "spot_instances": {
+          "enabled": true,
+          "max_spot_percentage": 70
+        }
+      },
+
+      "sla": {
+        "max_duration_minutes": 180,
+        "alert_threshold_minutes": 150,
+        "failure_notification": ["pagerduty", "slack"]
+      },
+
+      "monitoring": {
+        "enabled": true,
+        "metrics": [
+          "execution_time",
+          "data_volume_processed",
+          "cost_per_run",
+          "quality_score",
+          "cpu_utilization",
+          "memory_utilization",
+          "shuffle_read_gb",
+          "shuffle_write_gb"
+        ],
+        "cloudwatch_dashboard": true,
+        "custom_metrics": true
+      }
     },
+
     {
-      "name": "calculate_customer_lifetime_value",
-      "type": "derived_column",
-      "expression": "total_revenue * (1 + avg_profit_margin / 100)",
-      "column_name": "customer_lifetime_value",
-      "description": "Calculate CLV including profit margin"
+      "job_id": "real_time_clickstream",
+      "job_name": "Real-Time Clickstream Processing",
+      "description": "Processes clickstream data in near real-time using Kinesis and Lambda",
+      "enabled": true,
+
+      "execution": {
+        "script_path": "./lambda/clickstream_processor.py",
+        "script_type": "python",
+        "schedule": "streaming",
+        "timeout_minutes": 15
+      },
+
+      "platform": {
+        "user_preference": "lambda",
+        "allow_agent_override": true,
+        "lambda_function_name": "clickstream-processor",
+        "memory_mb": 1024,
+        "auto_adjust_memory": true,
+        "concurrent_executions": 100
+      },
+
+      "workload": {
+        "complexity": "simple",
+        "query_pattern": "streaming",
+        "incremental": true,
+        "avg_event_size_kb": 5,
+        "events_per_second": 1000
+      },
+
+      "data_sources": [
+        {
+          "name": "clickstream_events",
+          "source_type": "kinesis",
+          "stream_name": "clickstream-events-${variables.environment}",
+          "role_in_flow": "streaming_source",
+          "auto_detect_throughput": true,
+          "batch_size": 100,
+          "batch_window_seconds": 10
+        },
+        {
+          "name": "user_profiles",
+          "source_type": "dynamodb",
+          "table_name": "user-profiles-${variables.environment}",
+          "role_in_flow": "lookup",
+          "cache_recommended": true,
+          "cache_ttl_seconds": 300
+        }
+      ],
+
+      "data_quality": {
+        "enabled": true,
+        "fail_on_error": false,
+        "completeness_checks": [
+          {
+            "field": "user_id",
+            "required": true,
+            "null_threshold_percent": 0,
+            "severity": "critical",
+            "action": "dead_letter_queue"
+          }
+        ]
+      },
+
+      "cost": {
+        "budget_per_run_usd": 5.0,
+        "optimization_priority": "cost"
+      }
     },
+
     {
-      "name": "find_top_category",
-      "type": "window_function",
-      "partition_by": ["customer_id"],
-      "order_by": ["category_count DESC"],
-      "function": "first(category)",
-      "column_name": "top_category",
-      "description": "Find customer's most purchased category"
+      "job_id": "multi_table_join_example",
+      "job_name": "Multi-Table Join Example",
+      "description": "Example showing multiple table joins with auto-detection",
+      "enabled": false,
+
+      "execution": {
+        "script_path": "./pyscript/multi_table_join.py",
+        "script_type": "pyspark"
+      },
+
+      "platform": {
+        "user_preference": null,
+        "allow_agent_override": true,
+        "auto_select_platform": true
+      },
+
+      "data_sources": [
+        {
+          "name": "orders",
+          "source_type": "glue_catalog",
+          "database": "sales_db",
+          "table": "orders",
+          "auto_detect_size": true,
+          "role_in_flow": "fact",
+          "joins_with": ["customers", "products", "stores", "promotions"]
+        },
+        {
+          "name": "customers",
+          "source_type": "glue_catalog",
+          "database": "master_db",
+          "table": "customers",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "products",
+          "source_type": "redshift",
+          "cluster": "analytics-cluster",
+          "database": "master_db",
+          "schema": "public",
+          "table": "products",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "stores",
+          "source_type": "rds",
+          "instance": "operational-db",
+          "database": "retail",
+          "table": "stores",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension"
+        },
+        {
+          "name": "promotions",
+          "source_type": "s3",
+          "path": "s3://marketing-data/promotions/",
+          "format": "csv",
+          "auto_detect_size": true,
+          "role_in_flow": "dimension",
+          "optional": true
+        }
+      ],
+
+      "data_flow": {
+        "analysis_enabled": true,
+        "auto_detect_joins": true,
+        "auto_detect_broadcast_candidates": true,
+        "auto_optimize_join_order": true
+      }
     }
   ],
-  "checks": {
-    "data_quality": [
-      {
-        "name": "customer_completeness",
-        "table": "customers",
-        "column": "customer_id",
-        "rule": "not_null",
-        "threshold": 0.99,
-        "description": "Ensure all customers have IDs"
+
+  "global_settings": {
+    "aws_region": "us-east-1",
+    "environment": "production",
+    "enable_agent_learning": true,
+    "learning_storage": {
+      "type": "s3",
+      "bucket": "strands-etl-learning",
+      "prefix": "execution-history/"
+    },
+    "agents": {
+      "decision_agent": {
+        "enabled": true,
+        "respect_user_preference": true,
+        "always_provide_recommendation": true,
+        "auto_platform_selection": true,
+        "consider_cost": true,
+        "consider_performance": true,
+        "consider_reliability": true
       },
-      {
-        "name": "order_amount_validation",
-        "table": "orders",
-        "column": "total_amount",
-        "rule": "between",
-        "min": 0,
-        "max": 10000,
-        "threshold": 0.95,
-        "description": "Validate order amounts are reasonable"
+      "quality_agent": {
+        "enabled": true,
+        "fail_job_on_critical_issues": true,
+        "auto_generate_validation_rules": true,
+        "profiling_enabled": true
       },
-      {
-        "name": "product_price_validation",
-        "table": "products",
-        "column": "price",
-        "rule": "greater_than",
-        "value": 0,
-        "threshold": 1.0,
-        "description": "Ensure all products have positive prices"
+      "optimization_agent": {
+        "enabled": true,
+        "auto_tune_spark_config": true,
+        "auto_adjust_resources": true,
+        "learning_from_history": true
       },
-      {
-        "name": "join_completeness",
-        "table": "customer_orders",
-        "column": "customer_id",
-        "rule": "not_null",
-        "threshold": 0.95,
-        "description": "Ensure joins didn't drop too many records"
+      "learning_agent": {
+        "enabled": true,
+        "similarity_threshold": 0.85,
+        "min_history_samples": 5,
+        "vector_storage": "s3"
+      },
+      "compliance_agent": {
+        "enabled": true,
+        "auto_detect_pii": true,
+        "enforce_gdpr": true,
+        "enforce_hipaa": false,
+        "audit_all_access": true
+      },
+      "cost_tracking_agent": {
+        "enabled": true,
+        "track_all_costs": true,
+        "forecast_monthly_costs": true,
+        "alert_on_budget_overrun": true
       }
-    ],
-    "business_logic": [
-      {
-        "name": "order_date_consistency",
-        "rule": "order_date <= current_date",
-        "threshold": 1.0,
-        "description": "Orders shouldn't be in the future"
+    },
+    "notifications": {
+      "slack": {
+        "enabled": true,
+        "webhook_url": "${SECRET:slack_webhook}",
+        "channels": {
+          "success": "#etl-success",
+          "failure": "#etl-alerts",
+          "cost_alerts": "#etl-cost-alerts"
+        }
       },
-      {
-        "name": "positive_quantity",
-        "rule": "quantity > 0",
-        "threshold": 1.0,
-        "description": "All orders should have positive quantities"
+      "email": {
+        "enabled": true,
+        "smtp_server": "smtp.company.com",
+        "recipients": ["data-team@company.com"]
       },
-      {
-        "name": "revenue_calculation",
-        "rule": "total_revenue = quantity * price",
-        "threshold": 0.99,
-        "description": "Revenue should match quantity × price"
-      },
-      {
-        "name": "customer_regions",
-        "rule": "region IN ('North America', 'Europe', 'Asia')",
-        "threshold": 0.95,
-        "description": "Customers should be in valid regions"
+      "pagerduty": {
+        "enabled": true,
+        "api_key": "${SECRET:pagerduty_api_key}",
+        "escalation_policy": "data-platform-oncall"
       }
-    ],
-    "compliance": [
-      {
-        "name": "pii_masking",
-        "columns": ["email", "name"],
-        "method": "hash",
-        "description": "Mask PII data for compliance"
-      },
-      {
-        "name": "data_retention",
-        "rule": "delete_after_7_years",
-        "description": "Implement data retention policy"
-      }
-    ]
-  },
-  "housekeeping": {
-    "cleanup_rules": [
-      {
-        "action": "delete",
-        "path": "s3://strands-etl-temp/*",
-        "after_hours": 24,
-        "description": "Clean up temporary files after 24 hours"
-      }
-    ],
-    "archiving": {
-      "enabled": true,
-      "archive_path": "s3://strands-etl-archive/",
-      "retention_days": 2555,
-      "description": "Long-term archiving"
-    }
-  },
-  "audit": {
-    "enabled": true,
-    "log_level": "INFO",
-    "log_destination": "s3://strands-etl-audit/logs/",
-    "track_changes": true,
-    "description": "Comprehensive audit logging"
-  },
-  "monitoring": {
-    "metrics": ["execution_time", "records_processed", "data_quality_score", "join_efficiency", "cost_per_gb", "error_rate"],
-    "alerts": [
-      {
-        "metric": "error_rate",
-        "threshold": 0.05,
-        "action": "notify_team",
-        "description": "Alert when error rate exceeds 5%"
-      },
-      {
-        "metric": "execution_time",
-        "threshold": 3600,
-        "action": "notify_team",
-        "description": "Alert when job takes longer than 1 hour"
-      },
-      {
-        "metric": "data_quality_score",
-        "threshold": 0.9,
-        "action": "notify_team",
-        "description": "Alert when data quality drops below 90%"
-      }
-    ]
-  },
-  "ai_optimization": {
-    "enabled": true,
-    "learning_mode": true,
-    "performance_targets": {
-      "max_execution_time": "60min",
-      "min_data_quality_score": 0.95,
-      "max_cost_per_gb": 0.05,
-      "min_join_efficiency": 0.85
+    },
+    "feature_flags": {
+      "enable_auto_size_detection": true,
+      "enable_data_flow_analysis": true,
+      "enable_auto_optimization": true,
+      "enable_cost_optimization": true,
+      "enable_predictive_scaling": true
     }
   }
 }

@@ -1,0 +1,182 @@
+{
+  "jobs": [
+    {
+      "job_name": "Customer Staging Load",
+      "s3_bucket": "etl-demo-yourname-2024",
+      "landing_loc": "landing/customers/",
+      "file_pattern_name": "*.csv",
+      "database_name": "etl_demo_db",
+      "landing_table": "staging_customers",
+      "archive_s3_path": "archive/customers/",
+      "temp_s3_path": "temp/customers/",
+
+      "validation_queries": [
+        {
+          "name": "Check for NULL customer IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE customer_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Customer ID is a required field"
+        },
+        {
+          "name": "Check for invalid email formats",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE email NOT RLIKE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$'",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Email must be in valid format"
+        },
+        {
+          "name": "Check for duplicate customer IDs",
+          "query": "SELECT COUNT(*) FROM (SELECT customer_id, COUNT(*) as cnt FROM staging_temp GROUP BY customer_id HAVING cnt > 1)",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Customer ID must be unique"
+        },
+        {
+          "name": "Check for negative amounts",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE amount < 0",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Amount cannot be negative"
+        },
+        {
+          "name": "Check for future dates",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE transaction_date > CURRENT_DATE()",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Transaction date cannot be in the future"
+        }
+      ]
+    },
+    {
+      "job_name": "Transaction Staging Load",
+      "s3_bucket": "etl-demo-yourname-2024",
+      "landing_loc": "landing/transactions/",
+      "file_pattern_name": "*.csv",
+      "database_name": "etl_demo_db",
+      "landing_table": "staging_transactions",
+      "archive_s3_path": "archive/transactions/",
+      "temp_s3_path": "temp/transactions/",
+
+      "validation_queries": [
+        {
+          "name": "Check for NULL transaction IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE transaction_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Transaction ID is required"
+        },
+        {
+          "name": "Check for NULL customer IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE customer_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Customer ID is required"
+        },
+        {
+          "name": "Check for NULL product IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE product_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "Product ID is required"
+        },
+        {
+          "name": "Check for invalid amounts",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE amount <= 0 OR amount > 1000000",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Amount must be between 0 and 1,000,000"
+        },
+        {
+          "name": "Check for quantity issues",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE quantity <= 0 OR quantity > 100",
+          "max_allowed": 0,
+          "severity": "medium",
+          "description": "Quantity must be between 1 and 100"
+        },
+        {
+          "name": "Check for amount/price consistency",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE ABS(amount - (quantity * unit_price)) > 0.01",
+          "max_allowed": 0,
+          "severity": "high",
+          "description": "Amount must equal quantity * unit_price"
+        },
+        {
+          "name": "Check for orphan customers",
+          "query": "SELECT COUNT(*) FROM staging_temp st LEFT JOIN glue_catalog.{database}.dim_customers c ON st.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical",
+          "description": "All customer IDs must exist in dim_customers"
+        }
+      ]
+    },
+    {
+      "job_name": "Product Staging Load",
+      "s3_bucket": "etl-demo-yourname-2024",
+      "landing_loc": "landing/products/",
+      "file_pattern_name": "*.csv",
+      "database_name": "etl_demo_db",
+      "landing_table": "staging_products",
+      "archive_s3_path": "archive/products/",
+      "temp_s3_path": "temp/products/",
+
+      "validation_queries": [
+        {
+          "name": "Check for NULL product IDs",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE product_id IS NULL",
+          "max_allowed": 0,
+          "severity": "critical"
+        },
+        {
+          "name": "Check for NULL product names",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE product_name IS NULL OR TRIM(product_name) = ''",
+          "max_allowed": 0,
+          "severity": "critical"
+        },
+        {
+          "name": "Check for invalid prices",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE price <= 0",
+          "max_allowed": 0,
+          "severity": "high"
+        },
+        {
+          "name": "Check for negative stock",
+          "query": "SELECT COUNT(*) FROM staging_temp WHERE stock < 0",
+          "max_allowed": 0,
+          "severity": "medium"
+        }
+      ]
+    }
+  ],
+
+  "global_settings": {
+    "folder_age_threshold_minutes": 59,
+    "fail_on_no_files": true,
+    "fail_on_count_mismatch": true,
+    "archive_after_success_only": true,
+    "enable_fail_file_check": true,
+    "audit_enabled": true,
+    "audit_s3_prefix": "audit/",
+
+    "health_check": {
+      "enabled": true,
+      "trigger_hour": 21,
+      "database": "etl_demo_db",
+      "audit_table": "etl_audit_log",
+      "athena_output_location": "s3://your-bucket-name/athena-results/",
+
+      "email": {
+        "sender": "master@ace.aaa.com",
+        "recipients": [
+          "email@ab.com",
+          "data-team@company.com"
+        ],
+        "smtp_host": "10.19.10.29",
+        "smtp_port": 25,
+        "use_tls": true,
+        "username": "",
+        "password": ""
+      }
+    }
+  }
+}
