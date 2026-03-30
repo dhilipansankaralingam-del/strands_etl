@@ -1629,9 +1629,29 @@ def fetch_audit_summary_for_today(audit_cfg, run_date, output_location, workgrou
         ORDER BY MIN(event_timestamp) DESC
     """
 
+    # Query 3: Runs grouped by run_id + event_type (layer)
+    sql_runs_by_layer = f"""
+        SELECT
+            run_id,
+            event_type,
+            MAX(overall_status) AS overall_status,
+            COUNT(*) AS event_count,
+            SUM(CASE WHEN status = 'PASS' THEN 1 ELSE 0 END) AS pass_count,
+            SUM(CASE WHEN status = 'FAIL' THEN 1 ELSE 0 END) AS fail_count,
+            ROUND(SUM(CAST(COALESCE(NULLIF(cost_usd, ''), '0') AS DOUBLE)), 4) AS total_cost,
+            MIN(event_timestamp) AS first_event,
+            MAX(event_timestamp) AS last_event
+        FROM {database}.{table}
+        WHERE run_date = '{run_date}'
+        GROUP BY run_id, event_type
+        ORDER BY run_id, event_type
+    """
+
     try:
         result_layer = run_athena_query(sql_by_layer, database, output_location, workgroup)
         result_run = run_athena_query(sql_by_run, database, output_location, workgroup)
+        result_runs_by_layer = run_athena_query(
+            sql_runs_by_layer, database, output_location, workgroup)
     except Exception as exc:
         logger.warning("Audit summary query failed (non-fatal): %s", exc)
         return None
@@ -1677,11 +1697,29 @@ def fetch_audit_summary_for_today(audit_cfg, run_date, output_location, workgrou
         })
     totals["distinct_runs"] = len(runs)
 
+    # Parse runs-by-layer results
+    runs_by_layer = []
+    if result_runs_by_layer["state"] == "SUCCEEDED":
+        rbl_headers, rbl_data = parse_athena_rows(result_runs_by_layer["rows"])
+        for row in rbl_data:
+            runs_by_layer.append({
+                "run_id": row.get("run_id", ""),
+                "event_type": row.get("event_type", ""),
+                "overall_status": row.get("overall_status", ""),
+                "event_count": int(float(row.get("event_count", 0))),
+                "pass_count": int(float(row.get("pass_count", 0))),
+                "fail_count": int(float(row.get("fail_count", 0))),
+                "cost_usd": float(row.get("total_cost", 0)),
+                "first_event": row.get("first_event", ""),
+                "last_event": row.get("last_event", ""),
+            })
+
     overall = "PASS" if totals["fail"] == 0 else "FAIL"
     return {
         "by_layer": by_layer,
         "totals": totals,
         "runs": runs,
+        "runs_by_layer": runs_by_layer,
         "status": overall,
     }
 
@@ -2080,7 +2118,9 @@ def _generate_summary_report(
     run_duration_sec, glue_job_statuses=None, s3_folder_results=None
 ):
     """Generate End of Batch Summary Report — audit-centric, per-layer,
-    with Glue job status and S3 folder freshness checks."""
+    with Glue job status and S3 folder freshness checks.
+    Section order: 1=Overview, 2=Glue Jobs, 3=S3 Folders, 4=Layer Breakdown,
+    5=Runs (grouped by layer), 6=Validations, 7=Comparisons."""
     glue_job_statuses = glue_job_statuses or []
     s3_folder_results = s3_folder_results or []
 
@@ -2106,6 +2146,8 @@ def _generate_summary_report(
     aud_pass_color = "#28a745" if aud_pass_rate >= 80 else (
         "#fd7e14" if aud_pass_rate >= 60 else "#dc3545")
     batch_status_icon = "&#x2705;" if overall_status == STATUS_PASS else "&#x274C;"
+    # Bright badge color for header
+    header_badge_bg = "#00e676" if overall_status == STATUS_PASS else "#ff1744"
 
     html = f"""
     <html><head><style>
@@ -2114,25 +2156,26 @@ def _generate_summary_report(
         .container {{ max-width: 960px; margin: 0 auto; background: white;
                       border-radius: 12px; overflow: hidden;
                       box-shadow: 0 4px 20px rgba(0,0,0,0.12); }}
-        .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 70%, #533483 100%);
+        .header {{ background: linear-gradient(135deg, #0d47a1 0%, #1565c0 40%, #1976d2 70%, #42a5f5 100%);
                    padding: 35px 35px 28px 35px; color: white; position: relative; }}
         .header h1 {{ margin: 0 0 6px 0; font-size: 24px; letter-spacing: 0.5px;
-                      text-shadow: 0 2px 4px rgba(0,0,0,0.3); }}
-        .header p {{ margin: 0; font-size: 12px; opacity: 0.85; }}
-        .header .batch-badge {{ display: inline-block; padding: 5px 16px; border-radius: 20px;
-                                font-size: 12px; font-weight: bold; margin-left: 12px;
-                                vertical-align: middle; }}
+                      color: #ffffff; text-shadow: 0 2px 4px rgba(0,0,0,0.3); }}
+        .header p {{ margin: 0; font-size: 12px; opacity: 0.9; color: #e3f2fd; }}
+        .header .batch-badge {{ display: inline-block; padding: 6px 18px; border-radius: 20px;
+                                font-size: 13px; font-weight: bold; margin-left: 12px;
+                                vertical-align: middle; letter-spacing: 0.5px;
+                                box-shadow: 0 2px 8px rgba(0,0,0,0.25); }}
         .content {{ padding: 30px 35px; }}
 
-        h2 {{ color: #2c3e50; margin-top: 32px; margin-bottom: 16px; font-size: 17px;
+        h2 {{ color: #1a237e; margin-top: 32px; margin-bottom: 16px; font-size: 17px;
               padding: 10px 16px; border-radius: 8px;
-              background: linear-gradient(90deg, #f8f9ff 0%, #fff 100%);
-              border-left: 5px solid #533483; }}
+              background: linear-gradient(90deg, #e8eaf6 0%, #fff 100%);
+              border-left: 5px solid #1565c0; }}
 
         table {{ border-collapse: collapse; width: 100%; margin-top: 12px; margin-bottom: 16px;
                  font-size: 12px; border-radius: 8px; overflow: hidden;
                  box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
-        th {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #e0e0e0;
+        th {{ background: #212121; color: #ffffff;
               padding: 10px 12px; text-align: left;
               font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
               text-transform: uppercase; white-space: nowrap; }}
@@ -2144,6 +2187,9 @@ def _generate_summary_report(
                   color: white; font-weight: bold; font-size: 10px;
                   letter-spacing: 0.5px; text-transform: uppercase;
                   box-shadow: 0 2px 4px rgba(0,0,0,0.15); }}
+
+        .pill {{ display: inline-block; padding: 6px 14px; border-radius: 20px;
+                 color: white; font-size: 11px; font-weight: bold; }}
 
         .kpi-card {{ flex: 1; min-width: 130px; border-radius: 10px; padding: 18px 14px;
                      text-align: center; border-left: 4px solid; }}
@@ -2163,11 +2209,16 @@ def _generate_summary_report(
                               border-bottom: 1px solid #eee; }}
         .layer-card-body {{ padding: 14px 18px; }}
 
-        .status-row {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }}
-        .status-item {{ display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: bold; }}
+        .status-row {{ display: flex; gap: 18px; flex-wrap: wrap; margin-top: 8px; }}
+        .status-item {{ display: flex; align-items: center; gap: 5px;
+                        font-size: 12px; font-weight: bold; min-width: 100px; }}
+
+        .layer-group-header {{ background: #e8eaf6; padding: 10px 16px; margin: 20px 0 4px 0;
+                               border-radius: 8px; border-left: 4px solid #1565c0;
+                               font-weight: bold; color: #1a237e; font-size: 13px; }}
 
         .red-row {{ background-color: #fff0f0 !important; }}
-        .total-row {{ background-color: #eaf4ff !important; font-weight: bold; }}
+        .total-row {{ background-color: #e3f2fd !important; font-weight: bold; }}
 
         .footer {{ padding: 25px 35px; font-size: 11px; color: #888;
                    border-top: 2px solid #eee;
@@ -2178,13 +2229,13 @@ def _generate_summary_report(
 
     <!-- ======== HEADER ======== -->
     <div class="header">
-        <h1>&#x1F4CB; End of Batch Summary Report
-            <span class="batch-badge" style="background:{overall_color};">
+        <h1 style="color:#ffffff;">&#x1F4CB; End of Batch Summary Report
+            <span class="batch-badge" style="background:{header_badge_bg};color:#000;">
                 {batch_status_icon} {overall_status}</span></h1>
         <p>&#x1F4C5; {run_date} &nbsp;&bull;&nbsp; &#x23F1; Duration: {duration_str}
            &nbsp;&bull;&nbsp; &#x1F550; Generated: {now_str}</p>
-        <p style="margin-top:4px;">&#x1F194; Run ID: <code style="background:rgba(255,255,255,0.15);
-           padding:2px 8px;border-radius:4px;font-size:11px;">{run_id}</code></p>
+        <p style="margin-top:4px;">&#x1F194; Run ID: <code style="background:rgba(255,255,255,0.2);
+           padding:2px 8px;border-radius:4px;font-size:11px;color:#fff;">{run_id}</code></p>
     </div>
 
     <div class="content">
@@ -2248,237 +2299,7 @@ def _generate_summary_report(
 
     section_num = 2
 
-    # ======== 2. LAYER-WISE BREAKDOWN ========
-    if audit_day_summary and audit_day_summary.get("by_layer"):
-        layers = audit_day_summary["by_layer"]
-        html += f"""
-    <h2>&#x1F4C2; {section_num}. Breakdown by Layer</h2>
-    <p style="color:#666;font-size:12px;">
-        Aggregated from <b>{tot['distinct_runs']}</b> run(s) in
-        <code>audit_db.etl_orchestrator_audit</code> for {run_date}.</p>
-"""
-
-        # Layer cards — each layer as a card with status bar (like glue_job_status_report)
-        for idx, layer in enumerate(layers):
-            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
-            lfr = (layer["fail"] / layer["total"] * 100) if layer["total"] > 0 else 0
-            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
-            layer_status = "PASS" if layer["fail"] == 0 else "FAIL"
-            layer_color = "#28a745" if layer_status == "PASS" else "#dc3545"
-            layer_icon = "&#x2705;" if layer_status == "PASS" else "&#x274C;"
-
-            # Health score for layer: pass_rate weighted
-            health = min(int(lpr), 100)
-            h_color = "#28a745" if health >= 80 else ("#fd7e14" if health >= 60 else "#dc3545")
-
-            html += f"""
-        <div class="layer-card" style="border-left:5px solid {layer_color};">
-          <div class="layer-card-header">
-            <div>
-              <span style="font-size:16px;margin-right:6px;">{layer_icon}</span>
-              <span style="font-weight:bold;color:#2c3e50;font-size:14px;">
-                  {layer['event_type']}</span>
-              <span class="badge" style="background:{layer_color};margin-left:8px;">
-                  {layer_status}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span style="font-size:11px;color:#888;">{layer['total']} checks</span>
-              <div class="health-bar" style="width:{health}px;background:{h_color};"></div>
-              <span style="font-size:11px;color:{h_color};font-weight:bold;">{health}</span>
-            </div>
-          </div>
-          <div class="layer-card-body">
-            <div class="status-row">
-              <div class="status-item">
-                <span style="color:#28a745;">&#x2705;</span>
-                <span style="color:#28a745;">Pass: {layer['pass']}</span>
-              </div>
-              <div class="status-item">
-                <span style="color:#dc3545;">&#x274C;</span>
-                <span style="color:#dc3545;">Fail: {layer['fail']}</span>
-              </div>
-              <div class="status-item">
-                <span style="color:#fd7e14;">&#x26A0;</span>
-                <span style="color:#fd7e14;">Warn: {layer['warn']}</span>
-              </div>
-              <div class="status-item">
-                <span style="color:#6c757d;">&#x23F8;</span>
-                <span style="color:#6c757d;">Not Exec: {layer['not_exec']}</span>
-              </div>
-              <div class="status-item">
-                <span style="color:#8e44ad;">&#x1F4B0;</span>
-                <span style="color:#8e44ad;">Cost: ${layer['cost_usd']:.4f}</span>
-              </div>
-            </div>
-            <!-- Pass rate mini bar -->
-            <div style="margin-top:10px;">
-              <div style="display:flex;justify-content:space-between;font-size:10px;color:#666;
-                          margin-bottom:4px;">
-                <span>Pass Rate</span>
-                <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span>
-              </div>
-              <div style="background:#e9ecef;border-radius:6px;height:12px;overflow:hidden;">
-                <div style="background:{lpr_color};height:100%;width:{lpr:.0f}%;
-                            border-radius:6px;"></div>
-              </div>
-            </div>
-          </div>
-        </div>"""
-
-        # Summary table (like glue_job_status_report)
-        html += """
-        <table style="margin-top:20px;"><thead><tr>
-            <th>#</th><th>Layer / Event Type</th><th>Total</th><th>Passed</th>
-            <th>Failed</th><th>Warnings</th><th>Not Exec</th>
-            <th>Pass Rate</th><th>Cost (USD)</th><th>Status</th>
-        </tr></thead><tbody>"""
-
-        for i, layer in enumerate(layers, 1):
-            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
-            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
-            l_status = "PASS" if layer["fail"] == 0 else "FAIL"
-            l_color = "#28a745" if l_status == "PASS" else "#dc3545"
-            fail_style = ' style="color:#dc3545;font-weight:bold;"' if layer["fail"] > 0 else ""
-            row_class = ' class="red-row"' if layer["fail"] > 0 else ""
-
-            html += f"""<tr{row_class}>
-                <td>{i}</td>
-                <td><b>{layer['event_type']}</b></td>
-                <td style="text-align:center;">{layer['total']}</td>
-                <td style="text-align:center;color:#28a745;font-weight:bold;">{layer['pass']}</td>
-                <td style="text-align:center;"{fail_style}>{layer['fail']}</td>
-                <td style="text-align:center;">{layer['warn']}</td>
-                <td style="text-align:center;">{layer['not_exec']}</td>
-                <td style="text-align:center;">
-                    <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span></td>
-                <td style="text-align:right;">${layer['cost_usd']:.4f}</td>
-                <td><span class="badge" style="background:{l_color};">{l_status}</span></td>
-            </tr>"""
-
-        # Totals row
-        html += f"""<tr class="total-row">
-            <td></td>
-            <td><b>TOTAL</b></td>
-            <td style="text-align:center;">{tot['total']}</td>
-            <td style="text-align:center;color:#28a745;">{tot['pass']}</td>
-            <td style="text-align:center;color:#dc3545;">{tot['fail']}</td>
-            <td style="text-align:center;">{tot['warn']}</td>
-            <td style="text-align:center;">{tot['not_exec']}</td>
-            <td style="text-align:center;">
-                <span style="color:{aud_pass_color};font-weight:bold;">{aud_pass_rate:.1f}%</span></td>
-            <td style="text-align:right;">${tot['cost_usd']:.4f}</td>
-            <td><span class="badge" style="background:{overall_color};">{overall_status}</span></td>
-        </tr>"""
-        html += "</tbody></table>"
-        section_num += 1
-
-    # ======== 3. TODAY'S RUNS ========
-    if audit_day_summary and audit_day_summary.get("runs"):
-        runs = audit_day_summary["runs"]
-        html += f"""
-    <h2>&#x1F504; {section_num}. Today's Batch Runs</h2>
-    <p style="color:#666;font-size:12px;">
-        Individual pipeline executions recorded for {run_date}.</p>
-
-    <table><thead><tr>
-        <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
-        <th>Cost (USD)</th><th>First Event</th><th>Last Event</th><th>Health</th>
-    </tr></thead><tbody>"""
-
-        for i, r in enumerate(runs, 1):
-            r_status = r.get("overall_status", "")
-            r_color = "#28a745" if r_status == "PASS" else (
-                "#dc3545" if r_status == "FAIL" else "#6c757d")
-            row_class = ' class="red-row"' if r_status == "FAIL" else ""
-
-            # Simple health score for run: PASS=100, FAIL=30, else=50
-            r_health = 100 if r_status == "PASS" else (30 if r_status == "FAIL" else 50)
-            rh_color = "#28a745" if r_health >= 80 else (
-                "#fd7e14" if r_health >= 60 else "#dc3545")
-
-            # Calculate duration from first_event to last_event
-            run_dur = ""
-            try:
-                fe = datetime.fromisoformat(r["first_event"].replace("Z", "+00:00"))
-                le = datetime.fromisoformat(r["last_event"].replace("Z", "+00:00"))
-                rd_sec = (le - fe).total_seconds()
-                run_dur = f" ({int(rd_sec // 60)}m {int(rd_sec % 60)}s)"
-            except Exception:
-                pass
-
-            html += f"""<tr{row_class}>
-                <td>{i}</td>
-                <td><code style="font-size:11px;">{r['run_id'][:12]}...</code></td>
-                <td><span class="badge" style="background:{r_color};">{r_status}</span></td>
-                <td style="text-align:center;">{r['event_count']}</td>
-                <td style="text-align:right;">${r['cost_usd']:.4f}</td>
-                <td style="font-size:11px;">{r['first_event']}</td>
-                <td style="font-size:11px;">{r['last_event']}{run_dur}</td>
-                <td>
-                  <div class="health-bar" style="width:{r_health}px;background:{rh_color};"></div>
-                  <span style="font-size:11px;color:{rh_color};font-weight:bold;">{r_health}</span>
-                </td>
-            </tr>"""
-
-        html += "</tbody></table>"
-        section_num += 1
-
-    # ======== 4. VALIDATION DETAILS (if any ran alongside summary) ========
-    if validation_results:
-        html += f"""
-    <h2>&#x1F50D; {section_num}. Validation Check Details</h2>
-    <table><thead><tr>
-        <th>#</th><th>Validation</th><th>Check Type</th>
-        <th>Status</th><th>Actual</th><th>Cost</th><th>Detail</th>
-    </tr></thead><tbody>"""
-
-        for i, vr in enumerate(validation_results, 1):
-            color = _status_color(vr["status"])
-            cost_str = f"${vr.get('cost_usd', 0):.4f}" if vr.get("cost_usd") else "-"
-            row_class = ' class="red-row"' if vr["status"] == STATUS_FAIL else ""
-            retry_badge = (' <span style="color:#fd7e14;font-size:10px;">[retried]</span>'
-                           if vr.get("retried") else "")
-            html += f"""<tr{row_class}>
-                <td>{i}</td>
-                <td><b>{vr['name']}</b>{retry_badge}<br>
-                    <small style="color:#888;">{vr.get('description', '')}</small></td>
-                <td>{vr.get('check_type', '-')}</td>
-                <td><span class="badge" style="background:{color};">{vr['status']}</span></td>
-                <td>{vr.get('actual_value', '-')}</td>
-                <td style="font-size:11px;">{cost_str}</td>
-                <td>{vr.get('detail', '-')}</td>
-            </tr>"""
-
-        html += "</tbody></table>"
-        section_num += 1
-
-    # ======== 5. COMPARISON CHECKS (if any) ========
-    if comparison_results:
-        html += f"""
-    <h2>&#x2696; {section_num}. Cross-Query Comparisons</h2>
-    <table><thead><tr>
-        <th>#</th><th>Comparison</th><th>Rule</th>
-        <th>Value A</th><th>Value B</th><th>Status</th><th>Detail</th>
-    </tr></thead><tbody>"""
-
-        for i, cr in enumerate(comparison_results, 1):
-            color = _status_color(cr["status"])
-            row_class = ' class="red-row"' if cr["status"] == STATUS_FAIL else ""
-            html += f"""<tr{row_class}>
-                <td>{i}</td>
-                <td><b>{cr['name']}</b><br>
-                    <small style="color:#888;">{cr.get('description', '')}</small></td>
-                <td>{cr.get('rule', '-')}</td>
-                <td><b>{cr.get('label_a', 'A')}:</b> {cr.get('value_a', '-')}</td>
-                <td><b>{cr.get('label_b', 'B')}:</b> {cr.get('value_b', '-')}</td>
-                <td><span class="badge" style="background:{color};">{cr['status']}</span></td>
-                <td>{cr.get('detail', '-')}</td>
-            </tr>"""
-
-        html += "</tbody></table>"
-        section_num += 1
-
-    # ======== GLUE JOB STATUS ========
+    # ======== 2. GLUE JOB STATUS ========
     if glue_job_statuses:
         total_jobs = len(glue_job_statuses)
         ran_today = sum(1 for g in glue_job_statuses if g["ran_today"])
@@ -2566,7 +2387,7 @@ def _generate_summary_report(
         html += "</tbody></table>"
         section_num += 1
 
-    # ======== S3 FOLDER FRESHNESS CHECK ========
+    # ======== 3. S3 FOLDER FRESHNESS CHECK ========
     if s3_folder_results:
         s3_pass = sum(1 for s in s3_folder_results if s["status"] == STATUS_PASS)
         s3_warn = sum(1 for s in s3_folder_results if s["status"] == STATUS_WARN)
@@ -2649,6 +2470,317 @@ def _generate_summary_report(
           </div>
         </div>"""
 
+        section_num += 1
+
+    # ======== 4. LAYER-WISE BREAKDOWN ========
+    if audit_day_summary and audit_day_summary.get("by_layer"):
+        layers = audit_day_summary["by_layer"]
+        html += f"""
+    <h2>&#x1F4C2; {section_num}. Breakdown by Layer</h2>
+    <p style="color:#666;font-size:12px;">
+        Aggregated from <b>{tot['distinct_runs']}</b> run(s) in
+        <code>audit_db.etl_orchestrator_audit</code> for {run_date}.</p>
+"""
+
+        # Layer cards
+        for idx, layer in enumerate(layers):
+            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lfr = (layer["fail"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
+            layer_status = "PASS" if layer["fail"] == 0 else "FAIL"
+            layer_color = "#28a745" if layer_status == "PASS" else "#dc3545"
+            layer_icon = "&#x2705;" if layer_status == "PASS" else "&#x274C;"
+
+            health = min(int(lpr), 100)
+            h_color = "#28a745" if health >= 80 else ("#fd7e14" if health >= 60 else "#dc3545")
+
+            html += f"""
+        <div class="layer-card" style="border-left:5px solid {layer_color};">
+          <div class="layer-card-header">
+            <div>
+              <span style="font-size:16px;margin-right:6px;">{layer_icon}</span>
+              <span style="font-weight:bold;color:#2c3e50;font-size:14px;">
+                  {layer['event_type']}</span>
+              <span class="badge" style="background:{layer_color};margin-left:8px;">
+                  {layer_status}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:#888;">{layer['total']} checks</span>
+              <div class="health-bar" style="width:{health}px;background:{h_color};"></div>
+              <span style="font-size:11px;color:{h_color};font-weight:bold;">{health}</span>
+            </div>
+          </div>
+          <div class="layer-card-body">
+            <div class="status-row">
+              <div class="status-item">
+                <span style="color:#28a745;">&#x2705;</span>
+                <span style="color:#28a745;">Pass: {layer['pass']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#dc3545;">&#x274C;</span>
+                <span style="color:#dc3545;">Fail: {layer['fail']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#fd7e14;">&#x26A0;</span>
+                <span style="color:#fd7e14;">Warn: {layer['warn']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#6c757d;">&#x23F8;</span>
+                <span style="color:#6c757d;">Not Exec: {layer['not_exec']}</span>
+              </div>
+              <div class="status-item">
+                <span style="color:#8e44ad;">&#x1F4B0;</span>
+                <span style="color:#8e44ad;">Cost: ${layer['cost_usd']:.4f}</span>
+              </div>
+            </div>
+            <!-- Pass rate mini bar -->
+            <div style="margin-top:10px;">
+              <div style="display:flex;justify-content:space-between;font-size:10px;color:#666;
+                          margin-bottom:4px;">
+                <span>Pass Rate</span>
+                <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span>
+              </div>
+              <div style="background:#e9ecef;border-radius:6px;height:12px;overflow:hidden;">
+                <div style="background:{lpr_color};height:100%;width:{lpr:.0f}%;
+                            border-radius:6px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>"""
+
+        # Summary table
+        html += """
+        <table style="margin-top:20px;"><thead><tr>
+            <th>#</th><th>Layer / Event Type</th><th>Total</th><th>Passed</th>
+            <th>Failed</th><th>Warnings</th><th>Not Exec</th>
+            <th>Pass Rate</th><th>Cost (USD)</th><th>Status</th>
+        </tr></thead><tbody>"""
+
+        for i, layer in enumerate(layers, 1):
+            lpr = (layer["pass"] / layer["total"] * 100) if layer["total"] > 0 else 0
+            lpr_color = "#28a745" if lpr >= 80 else ("#fd7e14" if lpr >= 60 else "#dc3545")
+            l_status = "PASS" if layer["fail"] == 0 else "FAIL"
+            l_color = "#28a745" if l_status == "PASS" else "#dc3545"
+            fail_style = ' style="color:#dc3545;font-weight:bold;"' if layer["fail"] > 0 else ""
+            row_class = ' class="red-row"' if layer["fail"] > 0 else ""
+
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{layer['event_type']}</b></td>
+                <td style="text-align:center;">{layer['total']}</td>
+                <td style="text-align:center;color:#28a745;font-weight:bold;">{layer['pass']}</td>
+                <td style="text-align:center;"{fail_style}>{layer['fail']}</td>
+                <td style="text-align:center;">{layer['warn']}</td>
+                <td style="text-align:center;">{layer['not_exec']}</td>
+                <td style="text-align:center;">
+                    <span style="color:{lpr_color};font-weight:bold;">{lpr:.1f}%</span></td>
+                <td style="text-align:right;">${layer['cost_usd']:.4f}</td>
+                <td><span class="badge" style="background:{l_color};">{l_status}</span></td>
+            </tr>"""
+
+        # Totals row
+        html += f"""<tr class="total-row">
+            <td></td>
+            <td><b>TOTAL</b></td>
+            <td style="text-align:center;">{tot['total']}</td>
+            <td style="text-align:center;color:#28a745;">{tot['pass']}</td>
+            <td style="text-align:center;color:#dc3545;">{tot['fail']}</td>
+            <td style="text-align:center;">{tot['warn']}</td>
+            <td style="text-align:center;">{tot['not_exec']}</td>
+            <td style="text-align:center;">
+                <span style="color:{aud_pass_color};font-weight:bold;">{aud_pass_rate:.1f}%</span></td>
+            <td style="text-align:right;">${tot['cost_usd']:.4f}</td>
+            <td><span class="badge" style="background:{overall_color};">{overall_status}</span></td>
+        </tr>"""
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 5. TODAY'S BATCH RUNS (grouped by layer) ========
+    runs_by_layer = (audit_day_summary or {}).get("runs_by_layer", [])
+    plain_runs = (audit_day_summary or {}).get("runs", [])
+
+    if runs_by_layer:
+        html += f"""
+    <h2>&#x1F504; {section_num}. Today's Batch Runs</h2>
+    <p style="color:#666;font-size:12px;">
+        Individual pipeline executions recorded for {run_date}, grouped by layer.</p>"""
+
+        # Group runs_by_layer by event_type (layer)
+        layer_order = ["STAGING", "DATALAKE", "BASE", "MASTER", "SUMMARY"]
+        grouped = OrderedDict()
+        for rbl in runs_by_layer:
+            et = rbl.get("event_type", "UNKNOWN")
+            grouped.setdefault(et, []).append(rbl)
+        # Sort groups by canonical layer order
+        sorted_groups = []
+        for lo in layer_order:
+            if lo in grouped:
+                sorted_groups.append((lo, grouped.pop(lo)))
+        for remaining_key, remaining_val in grouped.items():
+            sorted_groups.append((remaining_key, remaining_val))
+
+        row_num = 0
+        for layer_name, layer_runs in sorted_groups:
+            layer_pass = all(r.get("overall_status") == "PASS" for r in layer_runs)
+            lg_color = "#28a745" if layer_pass else "#dc3545"
+            lg_icon = "&#x2705;" if layer_pass else "&#x274C;"
+            html += f"""
+        <div class="layer-group-header">
+            {lg_icon} Layer: {layer_name}
+            <span style="float:right;font-size:11px;color:#666;">
+                {len(layer_runs)} run(s)</span>
+        </div>
+        <table><thead><tr>
+            <th>#</th><th>Run ID</th><th>Layer</th><th>Status</th><th>Events</th>
+            <th>Pass</th><th>Fail</th>
+            <th>Cost (USD)</th><th>First Event</th><th>Last Event</th><th>Health</th>
+        </tr></thead><tbody>"""
+
+            for r in layer_runs:
+                row_num += 1
+                r_status = r.get("overall_status", "")
+                r_color = "#28a745" if r_status == "PASS" else (
+                    "#dc3545" if r_status == "FAIL" else "#6c757d")
+                row_class = ' class="red-row"' if r_status == "FAIL" else ""
+                r_health = 100 if r_status == "PASS" else (30 if r_status == "FAIL" else 50)
+                rh_color = "#28a745" if r_health >= 80 else (
+                    "#fd7e14" if r_health >= 60 else "#dc3545")
+
+                run_dur = ""
+                try:
+                    fe = datetime.fromisoformat(r["first_event"].replace("Z", "+00:00"))
+                    le = datetime.fromisoformat(r["last_event"].replace("Z", "+00:00"))
+                    rd_sec = (le - fe).total_seconds()
+                    run_dur = f" ({int(rd_sec // 60)}m {int(rd_sec % 60)}s)"
+                except Exception:
+                    pass
+
+                display_id = f'{r["run_id"][:12]}...[{r.get("event_type", "")}]'
+
+                html += f"""<tr{row_class}>
+                    <td>{row_num}</td>
+                    <td><code style="font-size:11px;">{display_id}</code></td>
+                    <td><b>{r.get('event_type', '-')}</b></td>
+                    <td><span class="badge" style="background:{r_color};">{r_status}</span></td>
+                    <td style="text-align:center;">{r.get('event_count', 0)}</td>
+                    <td style="text-align:center;color:#28a745;font-weight:bold;">
+                        {r.get('pass_count', 0)}</td>
+                    <td style="text-align:center;color:#dc3545;font-weight:bold;">
+                        {r.get('fail_count', 0)}</td>
+                    <td style="text-align:right;">${r.get('cost_usd', 0):.4f}</td>
+                    <td style="font-size:11px;">{r.get('first_event', '-')}</td>
+                    <td style="font-size:11px;">{r.get('last_event', '-')}{run_dur}</td>
+                    <td>
+                      <div class="health-bar" style="width:{r_health}px;background:{rh_color};"></div>
+                      <span style="font-size:11px;color:{rh_color};font-weight:bold;">
+                          {r_health}</span>
+                    </td>
+                </tr>"""
+
+            html += "</tbody></table>"
+
+        section_num += 1
+
+    elif plain_runs:
+        # Fallback: show ungrouped runs if runs_by_layer is not available
+        html += f"""
+    <h2>&#x1F504; {section_num}. Today's Batch Runs</h2>
+    <p style="color:#666;font-size:12px;">
+        Individual pipeline executions recorded for {run_date}.</p>
+
+    <table><thead><tr>
+        <th>#</th><th>Run ID</th><th>Status</th><th>Events</th>
+        <th>Cost (USD)</th><th>First Event</th><th>Last Event</th><th>Health</th>
+    </tr></thead><tbody>"""
+
+        for i, r in enumerate(plain_runs, 1):
+            r_status = r.get("overall_status", "")
+            r_color = "#28a745" if r_status == "PASS" else (
+                "#dc3545" if r_status == "FAIL" else "#6c757d")
+            row_class = ' class="red-row"' if r_status == "FAIL" else ""
+            r_health = 100 if r_status == "PASS" else (30 if r_status == "FAIL" else 50)
+            rh_color = "#28a745" if r_health >= 80 else (
+                "#fd7e14" if r_health >= 60 else "#dc3545")
+
+            run_dur = ""
+            try:
+                fe = datetime.fromisoformat(r["first_event"].replace("Z", "+00:00"))
+                le = datetime.fromisoformat(r["last_event"].replace("Z", "+00:00"))
+                rd_sec = (le - fe).total_seconds()
+                run_dur = f" ({int(rd_sec // 60)}m {int(rd_sec % 60)}s)"
+            except Exception:
+                pass
+
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><code style="font-size:11px;">{r['run_id'][:12]}...</code></td>
+                <td><span class="badge" style="background:{r_color};">{r_status}</span></td>
+                <td style="text-align:center;">{r['event_count']}</td>
+                <td style="text-align:right;">${r['cost_usd']:.4f}</td>
+                <td style="font-size:11px;">{r['first_event']}</td>
+                <td style="font-size:11px;">{r['last_event']}{run_dur}</td>
+                <td>
+                  <div class="health-bar" style="width:{r_health}px;background:{rh_color};"></div>
+                  <span style="font-size:11px;color:{rh_color};font-weight:bold;">{r_health}</span>
+                </td>
+            </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 6. VALIDATION DETAILS (if any ran alongside summary) ========
+    if validation_results:
+        html += f"""
+    <h2>&#x1F50D; {section_num}. Validation Check Details</h2>
+    <table><thead><tr>
+        <th>#</th><th>Validation</th><th>Check Type</th>
+        <th>Status</th><th>Actual</th><th>Cost</th><th>Detail</th>
+    </tr></thead><tbody>"""
+
+        for i, vr in enumerate(validation_results, 1):
+            color = _status_color(vr["status"])
+            cost_str = f"${vr.get('cost_usd', 0):.4f}" if vr.get("cost_usd") else "-"
+            row_class = ' class="red-row"' if vr["status"] == STATUS_FAIL else ""
+            retry_badge = (' <span style="color:#fd7e14;font-size:10px;">[retried]</span>'
+                           if vr.get("retried") else "")
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{vr['name']}</b>{retry_badge}<br>
+                    <small style="color:#888;">{vr.get('description', '')}</small></td>
+                <td>{vr.get('check_type', '-')}</td>
+                <td><span class="badge" style="background:{color};">{vr['status']}</span></td>
+                <td>{vr.get('actual_value', '-')}</td>
+                <td style="font-size:11px;">{cost_str}</td>
+                <td>{vr.get('detail', '-')}</td>
+            </tr>"""
+
+        html += "</tbody></table>"
+        section_num += 1
+
+    # ======== 7. COMPARISON CHECKS (if any) ========
+    if comparison_results:
+        html += f"""
+    <h2>&#x2696; {section_num}. Cross-Query Comparisons</h2>
+    <table><thead><tr>
+        <th>#</th><th>Comparison</th><th>Rule</th>
+        <th>Value A</th><th>Value B</th><th>Status</th><th>Detail</th>
+    </tr></thead><tbody>"""
+
+        for i, cr in enumerate(comparison_results, 1):
+            color = _status_color(cr["status"])
+            row_class = ' class="red-row"' if cr["status"] == STATUS_FAIL else ""
+            html += f"""<tr{row_class}>
+                <td>{i}</td>
+                <td><b>{cr['name']}</b><br>
+                    <small style="color:#888;">{cr.get('description', '')}</small></td>
+                <td>{cr.get('rule', '-')}</td>
+                <td><b>{cr.get('label_a', 'A')}:</b> {cr.get('value_a', '-')}</td>
+                <td><b>{cr.get('label_b', 'B')}:</b> {cr.get('value_b', '-')}</td>
+                <td><span class="badge" style="background:{color};">{cr['status']}</span></td>
+                <td>{cr.get('detail', '-')}</td>
+            </tr>"""
+
+        html += "</tbody></table>"
         section_num += 1
 
     # ======== FOOTER ========
