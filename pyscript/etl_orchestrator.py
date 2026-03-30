@@ -1957,15 +1957,20 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
                         validation_results, comparison_results,
                         summary_results, overall_status, layer=None):
     """Flatten all events into a list of audit record dicts.
-    If *layer* is provided (e.g. STAGING, BASE, MASTER), it is used as the
-    event_type so that summary reports can group runs by layer."""
+    If *layer* is provided (e.g. STAGING, BASE, MASTER), it is prepended to the
+    check type as event_type (e.g. BASE_VALIDATION, MASTER_COMPARISON) so that
+    summary reports can group runs by layer."""
     records = []
     ts = datetime.now(timezone.utc).isoformat()
+
+    def _evt(check_type):
+        """Return event_type: 'LAYER_CHECKTYPE' if layer set, else 'CHECKTYPE'."""
+        return f"{layer}_{check_type}" if layer else check_type
 
     for sr in stale_results:
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", layer or "STALE_CHECK"), ("source_label", sr["label"]),
+            ("event_type", _evt("STALE_CHECK")), ("source_label", sr["label"]),
             ("source_bucket", sr["bucket"]), ("source_prefix", sr["prefix"]),
             ("subfolder_count", str(sr["subfolder_count"])),
             ("status", sr["status"]), ("detail", sr["detail"]),
@@ -1981,7 +1986,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
     for label, gr in glue_results.items():
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", layer or "GLUE_TRIGGER"), ("source_label", label),
+            ("event_type", _evt("GLUE_TRIGGER")), ("source_label", label),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", gr["status"]), ("detail", gr.get("detail", "")),
             ("glue_job_name", gr.get("job_name", "")),
@@ -2000,7 +2005,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
         fail_reason = vr.get("failure_reason", "")
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", layer or "VALIDATION"), ("source_label", ""),
+            ("event_type", _evt("VALIDATION")), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", vr["status"]),
             ("detail", vr["detail"] + retry_info),
@@ -2030,7 +2035,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             )
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", layer or "COMPARISON"), ("source_label", ""),
+            ("event_type", _evt("COMPARISON")), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", cr["status"]), ("detail", cr["detail"]),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
@@ -2047,7 +2052,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
     for sr in summary_results:
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", layer or "SUMMARY_QUERY"), ("source_label", ""),
+            ("event_type", _evt("SUMMARY_QUERY")), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", sr["status"]), ("detail", sr["detail"]),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
@@ -2611,12 +2616,26 @@ def _generate_summary_report(
     <p style="color:#666;font-size:12px;">
         Individual pipeline executions recorded for {run_date}, grouped by layer.</p>"""
 
-        # Group runs_by_layer by event_type (layer)
+        # Group runs_by_layer by layer prefix extracted from event_type
+        # event_type format: "BASE_VALIDATION", "MASTER_COMPARISON", or legacy "VALIDATION"
+        check_types = {"VALIDATION", "COMPARISON", "STALE_CHECK", "GLUE_TRIGGER", "SUMMARY_QUERY"}
         layer_order = ["STAGING", "DATALAKE", "BASE", "MASTER", "SUMMARY"]
+
+        def _extract_layer(event_type):
+            """Extract layer from event_type like BASE_VALIDATION -> BASE."""
+            for ct in check_types:
+                if event_type.endswith(f"_{ct}"):
+                    return event_type[: -(len(ct) + 1)]
+            # Legacy format: event_type IS the check type (no layer prefix)
+            if event_type in check_types:
+                return event_type
+            return event_type
+
         grouped = OrderedDict()
         for rbl in runs_by_layer:
             et = rbl.get("event_type", "UNKNOWN")
-            grouped.setdefault(et, []).append(rbl)
+            layer_key = _extract_layer(et)
+            grouped.setdefault(layer_key, []).append(rbl)
         # Sort groups by canonical layer order
         sorted_groups = []
         for lo in layer_order:
@@ -2661,7 +2680,8 @@ def _generate_summary_report(
                 except Exception:
                     pass
 
-                display_id = f'{r["run_id"][:12]}...[{r.get("event_type", "")}]'
+                et = r.get("event_type", "")
+                display_id = f'{r["run_id"][:12]}...[{et}]'
 
                 html += f"""<tr{row_class}>
                     <td>{row_num}</td>
