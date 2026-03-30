@@ -1955,15 +1955,17 @@ def generate_html_bar_chart(chart_cfg, headers, data):
 # ============================================================================
 def build_audit_records(run_id, run_date, stale_results, glue_results,
                         validation_results, comparison_results,
-                        summary_results, overall_status):
-    """Flatten all events into a list of audit record dicts."""
+                        summary_results, overall_status, layer=None):
+    """Flatten all events into a list of audit record dicts.
+    If *layer* is provided (e.g. STAGING, BASE, MASTER), it is used as the
+    event_type so that summary reports can group runs by layer."""
     records = []
     ts = datetime.now(timezone.utc).isoformat()
 
     for sr in stale_results:
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", "STALE_CHECK"), ("source_label", sr["label"]),
+            ("event_type", layer or "STALE_CHECK"), ("source_label", sr["label"]),
             ("source_bucket", sr["bucket"]), ("source_prefix", sr["prefix"]),
             ("subfolder_count", str(sr["subfolder_count"])),
             ("status", sr["status"]), ("detail", sr["detail"]),
@@ -1979,7 +1981,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
     for label, gr in glue_results.items():
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", "GLUE_TRIGGER"), ("source_label", label),
+            ("event_type", layer or "GLUE_TRIGGER"), ("source_label", label),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", gr["status"]), ("detail", gr.get("detail", "")),
             ("glue_job_name", gr.get("job_name", "")),
@@ -1998,7 +2000,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
         fail_reason = vr.get("failure_reason", "")
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", "VALIDATION"), ("source_label", ""),
+            ("event_type", layer or "VALIDATION"), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", vr["status"]),
             ("detail", vr["detail"] + retry_info),
@@ -2028,7 +2030,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
             )
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", "COMPARISON"), ("source_label", ""),
+            ("event_type", layer or "COMPARISON"), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", cr["status"]), ("detail", cr["detail"]),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
@@ -2045,7 +2047,7 @@ def build_audit_records(run_id, run_date, stale_results, glue_results,
     for sr in summary_results:
         records.append(OrderedDict([
             ("run_id", run_id), ("run_date", run_date), ("event_timestamp", ts),
-            ("event_type", "SUMMARY_QUERY"), ("source_label", ""),
+            ("event_type", layer or "SUMMARY_QUERY"), ("source_label", ""),
             ("source_bucket", ""), ("source_prefix", ""), ("subfolder_count", ""),
             ("status", sr["status"]), ("detail", sr["detail"]),
             ("glue_job_name", ""), ("glue_job_run_id", ""), ("glue_duration_sec", ""),
@@ -2229,8 +2231,12 @@ def _generate_summary_report(
 
     <!-- ======== HEADER ======== -->
     <div class="header">
-        <h1 style="color:#ffffff;">&#x1F4CB; End of Batch Summary Report
-            <span class="batch-badge" style="background:{header_badge_bg};color:#000;">
+        <h1 style="color:#ffffff;margin:0 0 6px 0;font-size:24px;">&#x1F4CB; End of Batch Summary Report
+            <span style="display:inline-block;padding:6px 18px;border-radius:20px;
+                         font-size:13px;font-weight:bold;margin-left:12px;
+                         vertical-align:middle;letter-spacing:0.5px;
+                         box-shadow:0 2px 8px rgba(0,0,0,0.25);
+                         background:{header_badge_bg};color:#000;">
                 {batch_status_icon} {overall_status}</span></h1>
         <p>&#x1F4C5; {run_date} &nbsp;&bull;&nbsp; &#x23F1; Duration: {duration_str}
            &nbsp;&bull;&nbsp; &#x1F550; Generated: {now_str}</p>
@@ -3742,9 +3748,11 @@ def main():
     logger.info("-" * 50)
     logger.info("AUDIT LOGGING")
     logger.info("-" * 50)
+    config_layer = orch_cfg.get("layer", None)
     audit_records = build_audit_records(
         run_id, run_date, stale_results, glue_results,
-        validation_results, comparison_results, summary_results, overall_status)
+        validation_results, comparison_results, summary_results, overall_status,
+        layer=config_layer)
     audit_s3_path = None
     try:
         audit_s3_path = write_audit_to_s3(audit_records, audit_cfg, run_date)
