@@ -1,0 +1,179 @@
+{
+  "pipeline": {
+    "name": "membership_base_load",
+    "description": "Load membership base tables from staging Iceberg sources",
+    "layer": "BASE",
+    "database": "membership_base",
+    "athena_output": "s3://your-bucket/athena-results/pipeline/",
+    "workgroup": "primary",
+    "retry_attempts": 2,
+    "timeout_minutes": 120,
+    "variables": {
+      "run_date": "{CURRENT_DATE}",
+      "prev_date": "{CURRENT_DATE-1}",
+      "source_db": "membership_staging",
+      "target_db": "membership_base",
+      "catalog": "awsdatacatalog"
+    },
+
+    "pre_validations": [
+      {
+        "name": "source_member_info_exists",
+        "description": "Verify member info staging data is available for today",
+        "database": "membership_staging",
+        "sql": "SELECT COUNT(*) AS cnt FROM {source_db}.mrd_mbr_info WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "source_product_detail_exists",
+        "description": "Verify product detail staging data is available for today",
+        "database": "membership_staging",
+        "sql": "SELECT COUNT(*) AS cnt FROM {source_db}.mrd_prd_dtl WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "source_household_exists",
+        "description": "Verify household staging data is available",
+        "database": "membership_staging",
+        "sql": "SELECT COUNT(*) AS cnt FROM {source_db}.mrd_mbrshp_household WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}' OR substring(cast(update_timestamp as varchar), 1, 10) = '{run_date}'",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      }
+    ],
+
+    "steps": [
+      {
+        "name": "create_member_dedup_temp",
+        "type": "ctas",
+        "description": "Deduplicate member info staging records by member_id",
+        "database": "membership_base",
+        "sql": "CREATE TABLE {target_db}.member_info_dedup_temp WITH (table_type = 'ICEBERG', format = 'PARQUET', location = 's3://your-bucket/warehouse/{target_db}/member_info_dedup_temp/', is_external = 'false') AS SELECT *, ROW_NUMBER() OVER (PARTITION BY member_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbr_info WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
+        "rollback_sql": "DROP TABLE IF EXISTS {target_db}.member_info_dedup_temp",
+        "timeout_minutes": 30,
+        "abort_on_failure": true,
+        "depends_on": []
+      },
+      {
+        "name": "merge_member_base",
+        "type": "merge",
+        "description": "Merge deduplicated member records into base table",
+        "database": "membership_base",
+        "target_table": "{target_db}.member_product_detail_base",
+        "capture_snapshot": true,
+        "sql": "MERGE INTO {target_db}.member_product_detail_base t USING (SELECT * FROM {target_db}.member_info_dedup_temp WHERE rn = 1) s ON t.member_id = s.member_id WHEN MATCHED THEN UPDATE SET t.first_name = s.first_name, t.last_name = s.last_name, t.load_timestamp = s.load_timestamp, t.update_timestamp = CURRENT_TIMESTAMP WHEN NOT MATCHED THEN INSERT (member_id, first_name, last_name, load_timestamp, update_timestamp) VALUES (s.member_id, s.first_name, s.last_name, s.load_timestamp, CURRENT_TIMESTAMP)",
+        "timeout_minutes": 45,
+        "abort_on_failure": true,
+        "depends_on": ["create_member_dedup_temp"]
+      },
+      {
+        "name": "create_household_dedup_temp",
+        "type": "ctas",
+        "description": "Deduplicate household staging records",
+        "database": "membership_base",
+        "sql": "CREATE TABLE {target_db}.household_dedup_temp WITH (table_type = 'ICEBERG', format = 'PARQUET', location = 's3://your-bucket/warehouse/{target_db}/household_dedup_temp/', is_external = 'false') AS SELECT *, ROW_NUMBER() OVER (PARTITION BY household_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbrshp_household WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}' OR substring(cast(update_timestamp as varchar), 1, 10) = '{run_date}'",
+        "rollback_sql": "DROP TABLE IF EXISTS {target_db}.household_dedup_temp",
+        "timeout_minutes": 30,
+        "abort_on_failure": true,
+        "depends_on": []
+      },
+      {
+        "name": "merge_household_base",
+        "type": "merge",
+        "description": "Merge household records into base table",
+        "database": "membership_base",
+        "target_table": "{target_db}.household_members_base",
+        "capture_snapshot": true,
+        "sql": "MERGE INTO {target_db}.household_members_base t USING (SELECT * FROM {target_db}.household_dedup_temp WHERE rn = 1) s ON t.household_id = s.household_id WHEN MATCHED THEN UPDATE SET t.member_id = s.member_id, t.relationship = s.relationship, t.load_timestamp = s.load_timestamp, t.update_timestamp = CURRENT_TIMESTAMP WHEN NOT MATCHED THEN INSERT (household_id, member_id, relationship, load_timestamp, update_timestamp) VALUES (s.household_id, s.member_id, s.relationship, s.load_timestamp, CURRENT_TIMESTAMP)",
+        "timeout_minutes": 45,
+        "abort_on_failure": true,
+        "depends_on": ["create_household_dedup_temp"]
+      },
+      {
+        "name": "optimize_member_base",
+        "type": "optimize",
+        "description": "Compact small files in member base table",
+        "database": "membership_base",
+        "sql": "OPTIMIZE {target_db}.member_product_detail_base REWRITE DATA USING BIN_PACK",
+        "timeout_minutes": 30,
+        "abort_on_failure": false,
+        "depends_on": ["merge_member_base"]
+      },
+      {
+        "name": "optimize_household_base",
+        "type": "optimize",
+        "description": "Compact small files in household base table",
+        "database": "membership_base",
+        "sql": "OPTIMIZE {target_db}.household_members_base REWRITE DATA USING BIN_PACK",
+        "timeout_minutes": 30,
+        "abort_on_failure": false,
+        "depends_on": ["merge_household_base"]
+      },
+      {
+        "name": "cleanup_member_temp",
+        "type": "drop",
+        "description": "Drop temporary member dedup table",
+        "database": "membership_base",
+        "sql": "DROP TABLE IF EXISTS {target_db}.member_info_dedup_temp",
+        "abort_on_failure": false,
+        "depends_on": ["merge_member_base"]
+      },
+      {
+        "name": "cleanup_household_temp",
+        "type": "drop",
+        "description": "Drop temporary household dedup table",
+        "database": "membership_base",
+        "sql": "DROP TABLE IF EXISTS {target_db}.household_dedup_temp",
+        "abort_on_failure": false,
+        "depends_on": ["merge_household_base"]
+      }
+    ],
+
+    "post_validations": [
+      {
+        "name": "member_base_row_count",
+        "description": "Verify member base table has today's loaded records",
+        "database": "membership_base",
+        "sql": "SELECT COUNT(*) AS cnt FROM {target_db}.member_product_detail_base WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
+        "condition": "cnt > 0"
+      },
+      {
+        "name": "household_base_row_count",
+        "description": "Verify household base table has today's loaded records",
+        "database": "membership_base",
+        "sql": "SELECT COUNT(*) AS cnt FROM {target_db}.household_members_base WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}' OR substring(cast(update_timestamp as varchar), 1, 10) = '{run_date}'",
+        "condition": "cnt > 0"
+      },
+      {
+        "name": "member_base_no_duplicates",
+        "description": "Ensure no duplicate member_id in base table",
+        "database": "membership_base",
+        "sql": "SELECT COUNT(*) AS dup_cnt FROM (SELECT member_id, COUNT(*) AS c FROM {target_db}.member_product_detail_base GROUP BY member_id HAVING COUNT(*) > 1)",
+        "condition": "dup_cnt == 0"
+      },
+      {
+        "name": "staging_vs_base_reconciliation",
+        "description": "Compare staging record count vs base loaded count",
+        "database": "membership_base",
+        "sql": "SELECT (SELECT COUNT(*) FROM {source_db}.mrd_mbr_info WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}') AS staging_cnt, (SELECT COUNT(*) FROM {target_db}.member_product_detail_base WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}') AS base_cnt",
+        "condition": "base_cnt >= staging_cnt * 0.95"
+      }
+    ]
+  },
+
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/pipeline/",
+    "database": "audit_db",
+    "table": "etl_pipeline_audit"
+  },
+
+  "email": {
+    "sender": "pipeline@example.com",
+    "recipients": ["data-team@example.com"],
+    "subject_prefix": "ETL Pipeline",
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 25
+  }
+}
