@@ -974,6 +974,16 @@ def _to_float(row, col):
         return None
 
 
+def _safe_float(val):
+    """Safely convert a value to float, returning None on failure."""
+    if val is None or val == "":
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def _execute_data_diff(cdef, result_a, result_b, cost_usd):
     """
     Row-level data diff between two query results for delta-flow comparisons.
@@ -1782,11 +1792,29 @@ def _render_chart_frame(chart_cfg, headers, data, fraction=1.0):
             except (ValueError, TypeError):
                 values.append(0)
 
+        # Guard: pie chart cannot render if all values are zero or empty
+        if not values or sum(values) == 0:
+            ax.text(0.5, 0.5, "No data to display", ha="center", va="center",
+                    fontsize=14, color="#888", transform=ax.transAxes)
+            ax.set_title(title, fontsize=14, fontweight="bold", color="#2c3e50", pad=20)
+            plt.tight_layout()
+            return fig
+
         # For pie, animate by showing only first N slices
         n_show = max(1, int(len(values) * fraction))
         show_vals = values[:n_show] + [sum(values[n_show:])] if n_show < len(values) else values
         show_labels = labels[:n_show] + (["..."] if n_show < len(values) else [])
         show_colors = colors[:len(show_labels)]
+
+        # Filter out zero-value slices to avoid autopct issues
+        filtered = [(v, l, c) for v, l, c in zip(show_vals, show_labels, show_colors) if v > 0]
+        if not filtered:
+            ax.text(0.5, 0.5, "No data to display", ha="center", va="center",
+                    fontsize=14, color="#888", transform=ax.transAxes)
+            ax.set_title(title, fontsize=14, fontweight="bold", color="#2c3e50", pad=20)
+            plt.tight_layout()
+            return fig
+        show_vals, show_labels, show_colors = zip(*filtered)
 
         wedges, texts, autotexts = ax.pie(
             show_vals, labels=show_labels, colors=show_colors,
@@ -3481,7 +3509,13 @@ def generate_dashboard_html(
                 # Chart (animated GIF if Pillow available)
                 if sr.get("chart") and sr["data"]:
                     chart_cfg_copy = dict(sr["chart"])
-                    chart_b64 = generate_chart_base64(chart_cfg_copy, sr["headers"], sr["data"])
+                    try:
+                        chart_b64 = generate_chart_base64(
+                            chart_cfg_copy, sr["headers"], sr["data"])
+                    except Exception as chart_exc:
+                        logger.error("Chart generation error for '%s': %s",
+                                     sr["name"], chart_exc)
+                        chart_b64 = None
                     if chart_b64:
                         mime = chart_cfg_copy.get("_mime", "image/png")
                         html += f"""<div class="chart-container">
@@ -3493,6 +3527,28 @@ def generate_dashboard_html(
                         if sr["chart"].get("type") == "bar":
                             html += generate_html_bar_chart(
                                 sr["chart"], sr["headers"], sr["data"])
+                        elif sr["chart"].get("type") == "pie":
+                            # HTML fallback for pie chart
+                            lbl_c = sr["chart"].get("label_column",
+                                        sr["headers"][0] if sr["headers"] else "")
+                            val_c = sr["chart"].get("value_column",
+                                        sr["headers"][1] if len(sr["headers"]) > 1 else "")
+                            pie_title = sr["chart"].get("title", "Pie Chart")
+                            html += f'<h3 style="color:#2c3e50;">{pie_title}</h3>'
+                            html += '<table><thead><tr>'
+                            html += f'<th>{lbl_c}</th><th>{val_c}</th><th>%</th>'
+                            html += '</tr></thead><tbody>'
+                            pie_total = sum(
+                                float(r.get(val_c, 0)) for r in sr["data"]
+                                if _safe_float(r.get(val_c, 0)) is not None)
+                            for row in sr["data"]:
+                                lbl = row.get(lbl_c, "")
+                                val = _safe_float(row.get(val_c, 0)) or 0
+                                pct = (val / pie_total * 100) if pie_total else 0
+                                html += f'<tr><td><b>{lbl}</b></td>'
+                                html += f'<td style="text-align:right;">{val:,.0f}</td>'
+                                html += f'<td style="text-align:right;">{pct:.1f}%</td></tr>'
+                            html += '</tbody></table>'
                         else:
                             html += '<p style="color:#888;">(Chart requires matplotlib)</p>'
 
