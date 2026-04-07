@@ -43,19 +43,69 @@
       }
     ],
 
+    "max_parallel": 4,
+
     "steps": [
       {
+        "_comment": "──── WAVE 1: These two temp_iceberg steps run IN PARALLEL (no dependencies) ────",
         "name": "create_member_dedup_temp",
-        "type": "ctas",
-        "description": "Deduplicate member info staging records by member_id",
+        "type": "temp_iceberg",
+        "description": "Deduplicate member info staging records by member_id (auto-cleanup temp table)",
         "database": "membership_base",
-        "sql": "CREATE TABLE {target_db}.member_info_dedup_temp WITH (table_type = 'ICEBERG', format = 'PARQUET', location = 's3://your-bucket/warehouse/{target_db}/member_info_dedup_temp/', is_external = 'false') AS SELECT *, ROW_NUMBER() OVER (PARTITION BY member_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbr_info WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
-        "rollback_sql": "DROP TABLE IF EXISTS {target_db}.member_info_dedup_temp",
+        "temp_table_name": "{target_db}.member_info_dedup_temp",
+        "temp_location": "s3://your-bucket/warehouse/{target_db}/member_info_dedup_temp/",
+        "temp_format": "PARQUET",
+        "select_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY member_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbr_info WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
         "timeout_minutes": 30,
         "abort_on_failure": true,
         "depends_on": []
       },
       {
+        "name": "create_household_dedup_temp",
+        "type": "temp_iceberg",
+        "description": "Deduplicate household staging records (auto-cleanup temp table)",
+        "database": "membership_base",
+        "temp_table_name": "{target_db}.household_dedup_temp",
+        "temp_location": "s3://your-bucket/warehouse/{target_db}/household_dedup_temp/",
+        "temp_format": "PARQUET",
+        "select_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY household_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbrshp_household WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}' OR substring(cast(update_timestamp as varchar), 1, 10) = '{run_date}'",
+        "timeout_minutes": 30,
+        "abort_on_failure": true,
+        "depends_on": []
+      },
+      {
+        "_comment": "──── WAVE 1 (also parallel): Read external parquet files directly from S3 ────",
+        "name": "load_external_product_ref",
+        "type": "create_external",
+        "description": "Create external table pointing to product reference parquet files on S3",
+        "database": "membership_base",
+        "external_table_name": "{target_db}.product_ref_ext",
+        "external_location": "s3://your-bucket/reference-data/product/",
+        "external_format": "PARQUET",
+        "external_columns": [
+          {"name": "product_id", "type": "STRING"},
+          {"name": "product_name", "type": "STRING"},
+          {"name": "category", "type": "STRING"},
+          {"name": "effective_date", "type": "STRING"}
+        ],
+        "timeout_minutes": 5,
+        "abort_on_failure": true,
+        "depends_on": []
+      },
+      {
+        "_comment": "──── WAVE 1 (also parallel): Create a view as zero-storage virtual temp table ────",
+        "name": "create_active_members_view",
+        "type": "create_view",
+        "description": "Virtual view of active members (zero storage cost, like Spark lazy DataFrame)",
+        "database": "membership_base",
+        "view_name": "{target_db}.active_members_vw",
+        "view_sql": "SELECT member_id, first_name, last_name FROM {source_db}.mrd_mbr_info WHERE status = 'ACTIVE' AND substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}'",
+        "timeout_minutes": 5,
+        "abort_on_failure": true,
+        "depends_on": []
+      },
+      {
+        "_comment": "──── WAVE 2: Merges depend on their respective temp tables (run in PARALLEL) ────",
         "name": "merge_member_base",
         "type": "merge",
         "description": "Merge deduplicated member records into base table",
@@ -66,17 +116,6 @@
         "timeout_minutes": 45,
         "abort_on_failure": true,
         "depends_on": ["create_member_dedup_temp"]
-      },
-      {
-        "name": "create_household_dedup_temp",
-        "type": "ctas",
-        "description": "Deduplicate household staging records",
-        "database": "membership_base",
-        "sql": "CREATE TABLE {target_db}.household_dedup_temp WITH (table_type = 'ICEBERG', format = 'PARQUET', location = 's3://your-bucket/warehouse/{target_db}/household_dedup_temp/', is_external = 'false') AS SELECT *, ROW_NUMBER() OVER (PARTITION BY household_id ORDER BY load_timestamp DESC) AS rn FROM {source_db}.mrd_mbrshp_household WHERE substring(cast(load_timestamp as varchar), 1, 10) = '{run_date}' OR substring(cast(update_timestamp as varchar), 1, 10) = '{run_date}'",
-        "rollback_sql": "DROP TABLE IF EXISTS {target_db}.household_dedup_temp",
-        "timeout_minutes": 30,
-        "abort_on_failure": true,
-        "depends_on": []
       },
       {
         "name": "merge_household_base",
@@ -91,6 +130,7 @@
         "depends_on": ["create_household_dedup_temp"]
       },
       {
+        "_comment": "──── WAVE 3: Optimize steps depend on merges (run in PARALLEL) ────",
         "name": "optimize_member_base",
         "type": "optimize",
         "description": "Compact small files in member base table",
@@ -107,24 +147,6 @@
         "database": "membership_base",
         "sql": "OPTIMIZE {target_db}.household_members_base REWRITE DATA USING BIN_PACK",
         "timeout_minutes": 30,
-        "abort_on_failure": false,
-        "depends_on": ["merge_household_base"]
-      },
-      {
-        "name": "cleanup_member_temp",
-        "type": "drop",
-        "description": "Drop temporary member dedup table",
-        "database": "membership_base",
-        "sql": "DROP TABLE IF EXISTS {target_db}.member_info_dedup_temp",
-        "abort_on_failure": false,
-        "depends_on": ["merge_member_base"]
-      },
-      {
-        "name": "cleanup_household_temp",
-        "type": "drop",
-        "description": "Drop temporary household dedup table",
-        "database": "membership_base",
-        "sql": "DROP TABLE IF EXISTS {target_db}.household_dedup_temp",
         "abort_on_failure": false,
         "depends_on": ["merge_household_base"]
       }

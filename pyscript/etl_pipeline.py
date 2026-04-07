@@ -26,6 +26,7 @@ import re
 import smtplib
 from datetime import datetime, timezone, timedelta
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -57,7 +58,12 @@ DEFAULT_POLL_INTERVAL_SEC = 5
 DEFAULT_TIMEOUT_MINUTES = 60
 
 STEP_TYPES = {"sql", "ctas", "insert", "merge", "drop", "validation",
-              "optimize", "snapshot"}
+              "optimize", "snapshot", "create_view", "create_external",
+              "s3_read", "temp_iceberg"}
+
+DEFAULT_MAX_PARALLEL = 5
+DEFAULT_TEMP_TABLE_FORMAT = "PARQUET"  # or ORC
+DEFAULT_TEMP_TABLE_TYPE = "ICEBERG"
 
 # ============================================================================
 # AWS CLIENT LAZY INIT
@@ -386,7 +392,212 @@ def rollback_iceberg_to_snapshot(table_fqn, snapshot_id, database,
 
 
 # ============================================================================
-# 4. STEP DEPENDENCY RESOLUTION
+# 3b. TEMP TABLE & S3 READ STRATEGIES
+# ============================================================================
+def build_temp_iceberg_sql(step, variables):
+    """Build SQL to create a temporary Iceberg table from a SELECT query.
+
+    Config step:
+        "type": "temp_iceberg",
+        "name": "dedup_staging",
+        "database": "my_db",
+        "temp_table": "my_db.tmp_dedup_{run_id}",
+        "select_sql": "SELECT *, ROW_NUMBER() OVER (...) AS rn FROM source",
+        "location": "s3://bucket/tmp/dedup_{run_id}/",   # optional
+        "format": "PARQUET",                               # optional, default PARQUET
+        "partition_by": ["region"],                         # optional
+        "cleanup": true                                     # drop after pipeline (default true)
+
+    Returns (create_sql, cleanup_sql) with variables resolved.
+    """
+    db = step.get("database", "default")
+    temp_table = resolve_variables(step.get("temp_table", ""), variables)
+    select_sql = resolve_variables(step.get("select_sql", step.get("sql", "")), variables)
+    location = resolve_variables(step.get("location", ""), variables)
+    fmt = step.get("format", DEFAULT_TEMP_TABLE_FORMAT)
+    partition_by = step.get("partition_by", [])
+
+    with_props = [
+        f"table_type = '{DEFAULT_TEMP_TABLE_TYPE}'",
+        f"format = '{fmt}'",
+        "is_external = 'false'",
+    ]
+    if location:
+        with_props.append(f"location = '{location}'")
+    if partition_by:
+        cols = ", ".join(f"'{c}'" for c in partition_by)
+        with_props.append(f"partitioning = ARRAY[{cols}]")
+
+    props_str = ", ".join(with_props)
+    create_sql = (
+        f"CREATE TABLE {temp_table}\n"
+        f"  WITH ({props_str})\n"
+        f"  AS\n{select_sql}"
+    )
+    cleanup_sql = f"DROP TABLE IF EXISTS {temp_table}"
+    return create_sql, cleanup_sql
+
+
+def build_create_view_sql(step, variables):
+    """Build SQL to create a view as a virtual temp table (zero storage cost).
+
+    Config step:
+        "type": "create_view",
+        "name": "vw_enriched_members",
+        "database": "my_db",
+        "view_name": "my_db.vw_enriched_{run_id}",
+        "select_sql": "SELECT a.*, b.region FROM ...",
+        "cleanup": true  # drop view after pipeline (default true)
+
+    Returns (create_sql, cleanup_sql).
+    """
+    view_name = resolve_variables(step.get("view_name", ""), variables)
+    select_sql = resolve_variables(step.get("select_sql", step.get("sql", "")), variables)
+
+    create_sql = f"CREATE OR REPLACE VIEW {view_name} AS\n{select_sql}"
+    cleanup_sql = f"DROP VIEW IF EXISTS {view_name}"
+    return create_sql, cleanup_sql
+
+
+def build_create_external_sql(step, variables):
+    """Build SQL to create an external table pointing to S3 parquet/ORC files.
+
+    This enables direct reads from raw S3 data without Iceberg overhead —
+    similar to Spark's spark.read.parquet("s3://..."). Useful when:
+    - Source is raw parquet files (not an Iceberg table)
+    - You need fast reads without table metadata overhead
+    - Data is partitioned on S3 in Hive-style layout
+
+    Config step:
+        "type": "create_external",
+        "name": "ext_raw_claims",
+        "database": "my_db",
+        "external_table": "my_db.ext_raw_claims_{run_id}",
+        "s3_location": "s3://data-lake/raw/claims/date=2026-04-07/",
+        "format": "PARQUET",   # PARQUET, ORC, JSON, CSV
+        "columns": [
+            {"name": "claim_id", "type": "STRING"},
+            {"name": "amount", "type": "DOUBLE"},
+            {"name": "claim_date", "type": "DATE"}
+        ],
+        "serde_properties": {},   # optional
+        "skip_header": false,     # optional, for CSV
+        "cleanup": true
+
+    Returns (create_sql, cleanup_sql).
+    """
+    ext_table = resolve_variables(step.get("external_table", ""), variables)
+    s3_loc = resolve_variables(step.get("s3_location", ""), variables)
+    fmt = step.get("format", "PARQUET").upper()
+    columns = step.get("columns", [])
+    skip_header = step.get("skip_header", False)
+
+    col_defs = ",\n    ".join(f'`{c["name"]}` {c["type"]}' for c in columns)
+
+    if fmt == "PARQUET":
+        row_format = "STORED AS PARQUET"
+    elif fmt == "ORC":
+        row_format = "STORED AS ORC"
+    elif fmt == "JSON":
+        row_format = ("ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'\n"
+                      "STORED AS TEXTFILE")
+    elif fmt == "CSV":
+        row_format = (
+            "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'\n"
+            "WITH SERDEPROPERTIES ('separatorChar' = ',')\n"
+            "STORED AS TEXTFILE")
+    else:
+        row_format = f"STORED AS {fmt}"
+
+    tbl_props = ""
+    props = {}
+    if skip_header:
+        props["skip.header.line.count"] = "1"
+    for k, v in step.get("serde_properties", {}).items():
+        props[k] = v
+    if props:
+        props_str = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
+        tbl_props = f"\nTBLPROPERTIES ({props_str})"
+
+    create_sql = (
+        f"CREATE EXTERNAL TABLE IF NOT EXISTS {ext_table} (\n"
+        f"    {col_defs}\n"
+        f")\n"
+        f"{row_format}\n"
+        f"LOCATION '{s3_loc}'"
+        f"{tbl_props}"
+    )
+    cleanup_sql = f"DROP TABLE IF EXISTS {ext_table}"
+    return create_sql, cleanup_sql
+
+
+def build_s3_read_ctas_sql(step, variables):
+    """Build CTAS that reads directly from S3 parquet files via Athena.
+
+    Athena v3 (Trino) does NOT support SELECT * FROM 's3://...' directly.
+    Instead, this creates a lightweight external table, runs a CTAS from it,
+    and schedules both for cleanup. This is the fastest way to query raw
+    S3 data — analogous to Spark's spark.read.parquet("s3://...").
+
+    Config step:
+        "type": "s3_read",
+        "name": "read_raw_files",
+        "database": "my_db",
+        "s3_location": "s3://bucket/raw/parquet/",
+        "format": "PARQUET",
+        "target_table": "my_db.stg_raw_data_{run_id}",
+        "select_sql": "SELECT * FROM my_db.ext_s3read_{run_id} WHERE amount > 0",
+        "columns": [...],          # for auto-created external table
+        "location": "s3://bucket/tmp/stg_raw_data_{run_id}/",  # optional
+        "cleanup": true
+
+    Returns (ext_create_sql, ctas_sql, ext_cleanup_sql, ctas_cleanup_sql).
+    """
+    db = step.get("database", "default")
+    s3_loc = resolve_variables(step.get("s3_location", ""), variables)
+    target = resolve_variables(step.get("target_table", ""), variables)
+    select_sql = resolve_variables(step.get("select_sql", ""), variables)
+    location = resolve_variables(step.get("location", ""), variables)
+    fmt = step.get("format", "PARQUET").upper()
+    columns = step.get("columns", [])
+
+    # Auto-generated external table name
+    ext_table = f"{db}.ext_s3read_{variables.get('run_id', 'tmp')}"
+    ext_table = resolve_variables(step.get("external_table", ext_table), variables)
+
+    # Build external table
+    col_defs = ",\n    ".join(f'`{c["name"]}` {c["type"]}' for c in columns)
+    stored_as = "STORED AS PARQUET" if fmt == "PARQUET" else f"STORED AS {fmt}"
+    ext_create_sql = (
+        f"CREATE EXTERNAL TABLE IF NOT EXISTS {ext_table} (\n"
+        f"    {col_defs}\n"
+        f")\n"
+        f"{stored_as}\n"
+        f"LOCATION '{s3_loc}'"
+    )
+
+    # Build CTAS from the external table
+    if not select_sql:
+        select_sql = f"SELECT * FROM {ext_table}"
+
+    with_props = [
+        f"table_type = '{DEFAULT_TEMP_TABLE_TYPE}'",
+        f"format = '{DEFAULT_TEMP_TABLE_FORMAT}'",
+        "is_external = 'false'",
+    ]
+    if location:
+        with_props.append(f"location = '{location}'")
+    props_str = ", ".join(with_props)
+
+    ctas_sql = f"CREATE TABLE {target} WITH ({props_str}) AS\n{select_sql}"
+    ext_cleanup_sql = f"DROP TABLE IF EXISTS {ext_table}"
+    ctas_cleanup_sql = f"DROP TABLE IF EXISTS {target}"
+
+    return ext_create_sql, ctas_sql, ext_cleanup_sql, ctas_cleanup_sql
+
+
+# ============================================================================
+# 4. STEP DEPENDENCY RESOLUTION & PARALLEL WAVE PLANNER
 # ============================================================================
 def resolve_execution_order(steps):
     """Topological sort of steps based on depends_on.
@@ -415,6 +626,58 @@ def resolve_execution_order(steps):
         visit(s["name"])
 
     return order
+
+
+def plan_parallel_waves(steps):
+    """Plan execution waves: steps in the same wave can run in parallel.
+
+    Returns list of waves, where each wave is a list of step dicts.
+    Example: [[step_a, step_b], [step_c], [step_d, step_e]]
+    means step_a & step_b run in parallel, then step_c, then step_d & step_e.
+
+    Also validates the DAG (circular deps, missing refs).
+    """
+    name_map = {s["name"]: s for s in steps}
+
+    # Validate references
+    for s in steps:
+        for dep in s.get("depends_on", []):
+            if dep not in name_map:
+                raise ValueError(
+                    f"Step '{s['name']}' depends on '{dep}' which is not defined")
+
+    # Kahn's algorithm for topological levels (BFS)
+    in_degree = {s["name"]: 0 for s in steps}
+    dependents = {s["name"]: [] for s in steps}
+    for s in steps:
+        for dep in s.get("depends_on", []):
+            in_degree[s["name"]] += 1
+            dependents[dep].append(s["name"])
+
+    # First wave: steps with no dependencies
+    waves = []
+    ready = [name for name, deg in in_degree.items() if deg == 0]
+    processed = set()
+
+    while ready:
+        # Sort for deterministic ordering within a wave
+        wave = sorted(ready)
+        waves.append([name_map[n] for n in wave])
+        processed.update(wave)
+        next_ready = []
+        for name in wave:
+            for dep_name in dependents[name]:
+                in_degree[dep_name] -= 1
+                if in_degree[dep_name] == 0:
+                    next_ready.append(dep_name)
+        ready = next_ready
+
+    if len(processed) != len(steps):
+        unprocessed = set(s["name"] for s in steps) - processed
+        raise ValueError(
+            f"Circular dependency detected involving steps: {unprocessed}")
+
+    return waves
 
 
 # ============================================================================
@@ -496,9 +759,12 @@ def run_validations(validations, variables, default_database, output_location,
 # 6. PIPELINE STEP EXECUTOR
 # ============================================================================
 def execute_step(step, variables, default_database, output_location, workgroup,
-                 pipeline_retry_attempts):
+                 pipeline_retry_attempts, cleanup_registry=None):
     """Execute a single pipeline step with retry logic.
-    Returns a step result dict."""
+    Returns a step result dict.
+
+    cleanup_registry: optional list to append cleanup SQLs for temp tables/views.
+    """
     name = step["name"]
     step_type = step.get("type", "sql")
     desc = step.get("description", "")
@@ -512,6 +778,71 @@ def execute_step(step, variables, default_database, output_location, workgroup,
     abort = step.get("abort_on_failure", True)
     timeout = step.get("timeout_minutes", DEFAULT_TIMEOUT_MINUTES)
     max_retries = step.get("retry_attempts", pipeline_retry_attempts)
+    should_cleanup = step.get("cleanup", True)
+    if cleanup_registry is None:
+        cleanup_registry = []
+
+    # ---- Handle new step types that generate SQL dynamically ----
+    if step_type == "temp_iceberg":
+        create_sql, cleanup_sql = build_temp_iceberg_sql(step, variables)
+        raw_sql = create_sql
+        if not rollback_sql_raw:
+            rollback_sql_raw = cleanup_sql
+        if should_cleanup:
+            cleanup_registry.append({"db": db, "sql": cleanup_sql, "label": name})
+
+    elif step_type == "create_view":
+        create_sql, cleanup_sql = build_create_view_sql(step, variables)
+        raw_sql = create_sql
+        if not rollback_sql_raw:
+            rollback_sql_raw = cleanup_sql
+        if should_cleanup:
+            cleanup_registry.append({"db": db, "sql": cleanup_sql, "label": name})
+
+    elif step_type == "create_external":
+        create_sql, cleanup_sql = build_create_external_sql(step, variables)
+        raw_sql = create_sql
+        if not rollback_sql_raw:
+            rollback_sql_raw = cleanup_sql
+        if should_cleanup:
+            cleanup_registry.append({"db": db, "sql": cleanup_sql, "label": name})
+
+    elif step_type == "s3_read":
+        # s3_read is a compound step: create external table + CTAS
+        ext_sql, ctas_sql, ext_cleanup, ctas_cleanup = build_s3_read_ctas_sql(
+            step, variables)
+        # Execute the external table creation first
+        logger.info("=" * 60)
+        logger.info("STEP: %s [S3_READ] — Phase 1: Create external table", name)
+        ext_result = run_athena_query(
+            ext_sql, db, output_location, workgroup,
+            timeout_minutes=5, max_retries=1)
+        if ext_result["state"] != "SUCCEEDED":
+            return {
+                "name": name, "type": step_type, "description": desc,
+                "database": db, "status": STATUS_FAIL,
+                "detail": f"External table creation failed: {ext_result['failure_reason']}",
+                "actual_value": "", "cost_usd": ext_result["cost_usd"],
+                "duration_sec": ext_result.get("duration_sec", 0),
+                "query_id": ext_result.get("query_id", ""),
+                "data_scanned_bytes": 0, "exec_time_ms": 0,
+                "attempts": 1, "max_attempts": 1,
+                "target_table": target_table,
+                "snapshot_before": None, "snapshot_after": None,
+                "rollback_executed": False, "rollback_status": "N/A",
+                "rollback_sql": ext_cleanup, "abort_on_failure": abort,
+                "sql_hash": sql_hash(ext_sql),
+            }
+        logger.info("  Phase 1 OK. Phase 2: CTAS from S3 data...")
+        raw_sql = ctas_sql
+        if not rollback_sql_raw:
+            rollback_sql_raw = ctas_cleanup
+        # Register both for cleanup
+        if should_cleanup:
+            cleanup_registry.append({"db": db, "sql": ext_cleanup,
+                                     "label": f"{name}_ext"})
+            cleanup_registry.append({"db": db, "sql": ctas_cleanup,
+                                     "label": f"{name}_ctas"})
 
     logger.info("=" * 60)
     logger.info("STEP: %s [%s]", name, step_type.upper())
@@ -1165,37 +1496,59 @@ def main():
          if not k.startswith("CURRENT_DATE") or k == "CURRENT_DATE"},
         indent=2))
 
-    # Resolve step execution order
+    # Resolve step execution order and parallel waves
     steps = pipeline_cfg.get("steps", [])
+    max_parallel = pipeline_cfg.get("max_parallel", DEFAULT_MAX_PARALLEL)
     try:
         ordered_steps = resolve_execution_order(steps)
+        waves = plan_parallel_waves(steps)
     except ValueError as exc:
         logger.error("FATAL: %s", exc)
         sys.exit(1)
 
     logger.info("Execution order: %s",
                 " -> ".join(s["name"] for s in ordered_steps))
+    logger.info("Parallel waves: %d", len(waves))
+    for wi, wave in enumerate(waves, 1):
+        names = [s["name"] for s in wave]
+        mode = "PARALLEL" if len(wave) > 1 else "SEQUENTIAL"
+        logger.info("  Wave %d [%s]: %s", wi, mode, ", ".join(names))
 
     # DRY RUN MODE
     if args.dry_run:
         logger.info("=" * 70)
         logger.info("DRY RUN MODE — No queries will be executed")
         logger.info("=" * 70)
-        for i, step in enumerate(ordered_steps, 1):
-            raw_sql = resolve_variables(step.get("sql", ""), variables)
+        step_num = 0
+        for wi, wave in enumerate(waves, 1):
+            mode = "PARALLEL" if len(wave) > 1 else "SEQUENTIAL"
             logger.info("")
-            logger.info("Step %d: %s [%s]", i, step["name"],
-                        step.get("type", "sql").upper())
-            logger.info("  Description: %s", step.get("description", ""))
-            logger.info("  Database: %s", step.get("database", default_database))
-            logger.info("  Target: %s",
-                        resolve_variables(step.get("target_table", ""), variables) or "N/A")
-            logger.info("  Depends on: %s", step.get("depends_on", []))
-            logger.info("  Capture snapshot: %s", step.get("capture_snapshot", False))
-            logger.info("  Abort on failure: %s", step.get("abort_on_failure", True))
-            logger.info("  Rollback SQL: %s",
-                        "Yes" if step.get("rollback_sql") else "No")
-            logger.info("  SQL:\n    %s", raw_sql[:500].replace("\n", "\n    "))
+            logger.info("--- Wave %d [%s] (%d step(s)) ---", wi, mode, len(wave))
+            for step in wave:
+                step_num += 1
+                stype = step.get("type", "sql")
+                raw_sql = resolve_variables(step.get("sql", ""), variables)
+                # Show generated SQL for new step types
+                if stype == "temp_iceberg":
+                    raw_sql, _ = build_temp_iceberg_sql(step, variables)
+                elif stype == "create_view":
+                    raw_sql, _ = build_create_view_sql(step, variables)
+                elif stype == "create_external":
+                    raw_sql, _ = build_create_external_sql(step, variables)
+                elif stype == "s3_read":
+                    ext, ctas, _, _ = build_s3_read_ctas_sql(step, variables)
+                    raw_sql = f"-- Phase 1: {ext}\n-- Phase 2: {ctas}"
+
+                logger.info("  Step %d: %s [%s]", step_num, step["name"],
+                            stype.upper())
+                logger.info("    Description: %s", step.get("description", ""))
+                logger.info("    Database: %s", step.get("database", default_database))
+                logger.info("    Target: %s",
+                            resolve_variables(step.get("target_table", ""), variables) or "N/A")
+                logger.info("    Depends on: %s", step.get("depends_on", []))
+                logger.info("    Cleanup: %s", step.get("cleanup", True))
+                logger.info("    Abort on failure: %s", step.get("abort_on_failure", True))
+                logger.info("    SQL:\n      %s", raw_sql[:500].replace("\n", "\n      "))
         logger.info("")
         logger.info("Pre-validations: %d",
                     len(pipeline_cfg.get("pre_validations", [])))
@@ -1209,12 +1562,48 @@ def main():
     # ================================================================
     overall_status = STATUS_PASS
     step_results = []
+    step_results_by_name = {}  # for quick dependency lookups
     pre_results = []
     post_results = []
     rollback_results = []
     total_cost = 0.0
     pipeline_aborted = False
     resume_from = args.resume_from
+    cleanup_registry = []  # temp tables/views to drop at end
+    completed_for_rollback = []
+
+    def _make_skip_result(step, detail):
+        return {
+            "name": step["name"], "type": step.get("type", "sql"),
+            "description": step.get("description", ""),
+            "database": step.get("database", default_database),
+            "status": STATUS_SKIPPED, "detail": detail,
+            "cost_usd": 0, "duration_sec": 0,
+            "attempts": 0, "max_attempts": retry_attempts + 1,
+            "target_table": step.get("target_table", ""),
+            "snapshot_before": None, "snapshot_after": None,
+            "rollback_executed": False, "rollback_status": "N/A",
+            "rollback_sql": step.get("rollback_sql", ""),
+            "abort_on_failure": step.get("abort_on_failure", True),
+            "sql_hash": sql_hash(step.get("sql", "")),
+        }
+
+    def _make_not_executed_result(step):
+        return {
+            "name": step["name"], "type": step.get("type", "sql"),
+            "description": step.get("description", ""),
+            "database": step.get("database", default_database),
+            "status": STATUS_NOT_EXECUTED,
+            "detail": "Pipeline aborted — step not executed",
+            "cost_usd": 0, "duration_sec": 0,
+            "attempts": 0, "max_attempts": retry_attempts + 1,
+            "target_table": step.get("target_table", ""),
+            "snapshot_before": None, "snapshot_after": None,
+            "rollback_executed": False, "rollback_status": "N/A",
+            "rollback_sql": step.get("rollback_sql", ""),
+            "abort_on_failure": step.get("abort_on_failure", True),
+            "sql_hash": sql_hash(step.get("sql", "")),
+        }
 
     # ---- PRE-VALIDATIONS ----
     pre_validations = pipeline_cfg.get("pre_validations", [])
@@ -1230,7 +1619,6 @@ def main():
         total_cost += sum(r.get("cost_usd", 0) for r in pre_results)
 
         if not pre_ok:
-            # Check if any abort_on_failure
             abort_checks = [r for r in pre_results
                             if r["status"] == STATUS_FAIL and r.get("abort_on_failure")]
             if abort_checks:
@@ -1238,123 +1626,184 @@ def main():
                 overall_status = STATUS_ABORTED
                 pipeline_aborted = True
 
-    # ---- STEP EXECUTION ----
+    # ---- WAVE-BASED STEP EXECUTION ----
     if not pipeline_aborted:
         logger.info("")
         logger.info("-" * 50)
-        logger.info("PIPELINE STEPS (%d steps)", len(ordered_steps))
+        logger.info("PIPELINE STEPS (%d steps in %d waves, max_parallel=%d)",
+                    len(ordered_steps), len(waves), max_parallel)
         logger.info("-" * 50)
 
-        skip_until_found = resume_from is not None
-        completed_for_rollback = []
+        # Track which steps have been reached for resume logic
+        resume_reached = resume_from is None
+        global_step_num = 0
 
-        for step_idx, step in enumerate(ordered_steps, 1):
-            # Resume logic
-            if skip_until_found:
-                if step["name"] == resume_from:
-                    skip_until_found = False
-                    logger.info("Resuming from step '%s'", resume_from)
-                else:
-                    logger.info("SKIP (resume): Step %d/%d: %s",
-                                step_idx, len(ordered_steps), step["name"])
-                    step_results.append({
-                        "name": step["name"],
-                        "type": step.get("type", "sql"),
-                        "description": step.get("description", ""),
-                        "database": step.get("database", default_database),
-                        "status": STATUS_SKIPPED,
-                        "detail": f"Skipped (resuming from '{resume_from}')",
-                        "cost_usd": 0, "duration_sec": 0,
-                        "attempts": 0, "max_attempts": retry_attempts + 1,
-                        "target_table": step.get("target_table", ""),
-                        "snapshot_before": None, "snapshot_after": None,
-                        "rollback_executed": False, "rollback_status": "N/A",
-                        "rollback_sql": step.get("rollback_sql", ""),
-                        "abort_on_failure": step.get("abort_on_failure", True),
-                        "sql_hash": sql_hash(step.get("sql", "")),
-                    })
+        for wave_idx, wave in enumerate(waves, 1):
+            if pipeline_aborted:
+                # Mark all remaining wave steps as NOT_EXECUTED
+                for step in wave:
+                    r = _make_not_executed_result(step)
+                    step_results.append(r)
+                    step_results_by_name[step["name"]] = r
+                continue
+
+            is_parallel = len(wave) > 1
+            mode = "PARALLEL" if is_parallel else "SEQUENTIAL"
+            logger.info("")
+            logger.info("=== Wave %d/%d [%s] (%d step(s)) ===",
+                        wave_idx, len(waves), mode, len(wave))
+
+            # Determine which steps in this wave to actually run
+            steps_to_run = []
+            for step in wave:
+                global_step_num += 1
+
+                # Resume logic
+                if not resume_reached:
+                    if step["name"] == resume_from:
+                        resume_reached = True
+                        logger.info("  Resuming from step '%s'", resume_from)
+                    else:
+                        r = _make_skip_result(
+                            step, f"Skipped (resuming from '{resume_from}')")
+                        step_results.append(r)
+                        step_results_by_name[step["name"]] = r
+                        continue
+
+                # Check dependencies
+                deps = step.get("depends_on", [])
+                deps_ok = True
+                failed_dep = ""
+                for dep_name in deps:
+                    dep_r = step_results_by_name.get(dep_name)
+                    if not dep_r or dep_r["status"] not in (STATUS_PASS, STATUS_SKIPPED):
+                        deps_ok = False
+                        failed_dep = dep_name
+                        break
+
+                if not deps_ok:
+                    r = _make_skip_result(
+                        step, f"Skipped: dependency '{failed_dep}' not met")
+                    step_results.append(r)
+                    step_results_by_name[step["name"]] = r
                     continue
 
-            if pipeline_aborted:
-                # Mark remaining steps as NOT_EXECUTED
-                step_results.append({
-                    "name": step["name"],
-                    "type": step.get("type", "sql"),
-                    "description": step.get("description", ""),
-                    "database": step.get("database", default_database),
-                    "status": STATUS_NOT_EXECUTED,
-                    "detail": "Pipeline aborted — step not executed",
-                    "cost_usd": 0, "duration_sec": 0,
-                    "attempts": 0, "max_attempts": retry_attempts + 1,
-                    "target_table": step.get("target_table", ""),
-                    "snapshot_before": None, "snapshot_after": None,
-                    "rollback_executed": False, "rollback_status": "N/A",
-                    "rollback_sql": step.get("rollback_sql", ""),
-                    "abort_on_failure": step.get("abort_on_failure", True),
-                    "sql_hash": sql_hash(step.get("sql", "")),
-                })
+                steps_to_run.append(step)
+
+            if not steps_to_run:
                 continue
 
-            # Check dependencies are met
-            deps = step.get("depends_on", [])
-            deps_met = True
-            for dep_name in deps:
-                dep_result = next((r for r in step_results if r["name"] == dep_name), None)
-                if not dep_result or dep_result["status"] not in (STATUS_PASS, STATUS_SKIPPED):
-                    deps_met = False
-                    break
+            # Execute wave steps
+            if is_parallel and len(steps_to_run) > 1:
+                # PARALLEL execution via ThreadPoolExecutor
+                logger.info("  Running %d steps in parallel...", len(steps_to_run))
+                wave_results = {}
+                with ThreadPoolExecutor(max_workers=min(max_parallel,
+                                                        len(steps_to_run))) as executor:
+                    futures = {}
+                    for step in steps_to_run:
+                        f = executor.submit(
+                            execute_step, step, variables, default_database,
+                            output_location, workgroup, retry_attempts,
+                            cleanup_registry)
+                        futures[f] = step
 
-            if not deps_met:
-                logger.warning("  Step '%s' skipped: dependency '%s' not met",
-                               step["name"], dep_name)
-                step_results.append({
-                    "name": step["name"],
-                    "type": step.get("type", "sql"),
-                    "description": step.get("description", ""),
-                    "database": step.get("database", default_database),
-                    "status": STATUS_SKIPPED,
-                    "detail": f"Skipped: dependency '{dep_name}' not met",
-                    "cost_usd": 0, "duration_sec": 0,
-                    "attempts": 0, "max_attempts": retry_attempts + 1,
-                    "target_table": step.get("target_table", ""),
-                    "snapshot_before": None, "snapshot_after": None,
-                    "rollback_executed": False, "rollback_status": "N/A",
-                    "rollback_sql": step.get("rollback_sql", ""),
-                    "abort_on_failure": step.get("abort_on_failure", True),
-                    "sql_hash": sql_hash(step.get("sql", "")),
-                })
-                continue
+                    for future in as_completed(futures):
+                        step = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            logger.error("  Step '%s' raised exception: %s",
+                                         step["name"], exc)
+                            result = {
+                                "name": step["name"],
+                                "type": step.get("type", "sql"),
+                                "description": step.get("description", ""),
+                                "database": step.get("database", default_database),
+                                "status": STATUS_FAIL,
+                                "detail": f"Exception: {exc}",
+                                "cost_usd": 0, "duration_sec": 0,
+                                "attempts": 0, "max_attempts": retry_attempts + 1,
+                                "target_table": step.get("target_table", ""),
+                                "snapshot_before": None, "snapshot_after": None,
+                                "rollback_executed": False, "rollback_status": "N/A",
+                                "rollback_sql": step.get("rollback_sql", ""),
+                                "abort_on_failure": step.get("abort_on_failure", True),
+                                "sql_hash": sql_hash(step.get("sql", "")),
+                            }
+                        wave_results[step["name"]] = result
 
-            # Execute step
-            logger.info("")
-            logger.info("[%d/%d] Executing step: %s",
-                        step_idx, len(ordered_steps), step["name"])
+                # Add results in config order (deterministic)
+                for step in steps_to_run:
+                    result = wave_results[step["name"]]
+                    step_results.append(result)
+                    step_results_by_name[step["name"]] = result
+                    total_cost += result.get("cost_usd", 0)
 
-            result = execute_step(
-                step, variables, default_database,
-                output_location, workgroup, retry_attempts)
-            step_results.append(result)
-            total_cost += result.get("cost_usd", 0)
+                    if result["status"] == STATUS_PASS:
+                        completed_for_rollback.append(result)
+                    elif result["status"] == STATUS_FAIL:
+                        overall_status = STATUS_FAIL
+                        if result.get("abort_on_failure", True):
+                            logger.error(
+                                "ABORT: Step '%s' failed with abort_on_failure=true",
+                                step["name"])
+                            pipeline_aborted = True
 
-            if result["status"] == STATUS_PASS:
-                completed_for_rollback.append(result)
-            elif result["status"] == STATUS_FAIL:
-                overall_status = STATUS_FAIL
-                if result.get("abort_on_failure", True):
-                    logger.error("ABORT: Step '%s' failed with abort_on_failure=true",
-                                 step["name"])
-                    pipeline_aborted = True
+            else:
+                # SEQUENTIAL execution (single step in wave)
+                for step in steps_to_run:
+                    if pipeline_aborted:
+                        r = _make_not_executed_result(step)
+                        step_results.append(r)
+                        step_results_by_name[step["name"]] = r
+                        continue
 
-                    # Cascade rollback
-                    if completed_for_rollback:
-                        logger.warning("")
-                        logger.warning("=" * 50)
-                        logger.warning("CASCADING ROLLBACK (%d completed steps)",
-                                       len(completed_for_rollback))
-                        logger.warning("=" * 50)
-                        rollback_results = cascade_rollback(
-                            completed_for_rollback, variables, default_database,
-                            output_location, workgroup)
+                    logger.info("")
+                    logger.info("  Executing: %s", step["name"])
+                    result = execute_step(
+                        step, variables, default_database,
+                        output_location, workgroup, retry_attempts,
+                        cleanup_registry)
+                    step_results.append(result)
+                    step_results_by_name[step["name"]] = result
+                    total_cost += result.get("cost_usd", 0)
+
+                    if result["status"] == STATUS_PASS:
+                        completed_for_rollback.append(result)
+                    elif result["status"] == STATUS_FAIL:
+                        overall_status = STATUS_FAIL
+                        if result.get("abort_on_failure", True):
+                            logger.error(
+                                "ABORT: Step '%s' failed with abort_on_failure=true",
+                                step["name"])
+                            pipeline_aborted = True
+
+            # If aborted after this wave, cascade rollback
+            if pipeline_aborted and completed_for_rollback:
+                logger.warning("")
+                logger.warning("=" * 50)
+                logger.warning("CASCADING ROLLBACK (%d completed steps)",
+                               len(completed_for_rollback))
+                logger.warning("=" * 50)
+                rollback_results = cascade_rollback(
+                    completed_for_rollback, variables, default_database,
+                    output_location, workgroup)
+
+    # ---- CLEANUP TEMP TABLES/VIEWS ----
+    if cleanup_registry and not pipeline_aborted:
+        logger.info("")
+        logger.info("-" * 50)
+        logger.info("CLEANUP: %d temp table(s)/view(s)", len(cleanup_registry))
+        logger.info("-" * 50)
+        for ci in cleanup_registry:
+            logger.info("  Dropping: %s", ci["label"])
+            try:
+                run_athena_query(ci["sql"], ci["db"], output_location,
+                                workgroup, timeout_minutes=5, max_retries=0)
+                logger.info("    -> Dropped OK")
+            except Exception as exc:
+                logger.warning("    -> Cleanup failed (non-fatal): %s", exc)
 
     # ---- POST-VALIDATIONS ----
     post_validations = pipeline_cfg.get("post_validations", [])
