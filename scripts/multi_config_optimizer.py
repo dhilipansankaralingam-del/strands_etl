@@ -16,6 +16,8 @@ Usage:
 import argparse
 import json
 import sys
+import time
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +27,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from framework.strands.orchestrator import StrandsOrchestrator
 from framework.strands.base_agent import AgentContext, AgentStatus
+
+
+class TokenTracker:
+    """Track token/step usage."""
+    def __init__(self):
+        self.steps = []
+        self.start_time = time.time()
+        self.errors = []
+
+    def step(self, msg: str, detail: str = None):
+        elapsed = time.time() - self.start_time
+        entry = {'time': f"{elapsed:.2f}s", 'step': msg}
+        if detail:
+            entry['detail'] = detail
+        self.steps.append(entry)
+        icon = ">" if not detail else "+"
+        print(f"  [{elapsed:6.2f}s] {icon} {msg}" + (f" ({detail})" if detail else ""))
+
+    def error(self, location: str, err: Exception):
+        self.errors.append({'location': location, 'error': str(err), 'trace': traceback.format_exc()})
+        print(f"  [ERROR] at {location}: {err}")
+        print(f"          {traceback.format_exc().splitlines()[-2]}")
+
+    def summary(self) -> Dict:
+        return {
+            'total_steps': len(self.steps),
+            'total_time': f"{time.time() - self.start_time:.2f}s",
+            'errors': len(self.errors),
+            'steps': self.steps,
+            'error_details': self.errors
+        }
 
 
 # Cross-platform cost reference ($/hr per compute unit)
@@ -44,46 +77,97 @@ PLATFORM_COSTS = {
 
 
 class MultiConfigOptimizer:
-    """Agent-based multi-config optimizer."""
+    """Agent-based multi-config optimizer with verbose logging."""
 
-    def __init__(self, source_dir: str, dest_dir: str):
+    def __init__(self, source_dir: str, dest_dir: str, verbose: bool = True):
         self.source_path = Path(source_dir)
         self.dest_path = Path(dest_dir)
         self.dest_path.mkdir(parents=True, exist_ok=True)
         self.results: List[Dict] = []
+        self.verbose = verbose
+        self.tracker = TokenTracker()
 
     def run(self) -> Dict[str, Any]:
         """Run agent-based analysis on all configs."""
-        configs = list(self.source_path.glob('*.json'))
-        print(f"\n{'='*60}")
-        print(f" Multi-Config ETL Optimizer (Agent-Based)")
-        print(f" Found {len(configs)} config(s)")
-        print(f"{'='*60}\n")
+        self.tracker.step("Starting Multi-Config Optimizer")
 
-        for cfg_path in configs:
-            print(f"  Processing: {cfg_path.name}")
+        configs = list(self.source_path.glob('*.json'))
+
+        print(f"\n{'='*70}")
+        print(f"  MULTI-CONFIG ETL OPTIMIZER (Agent-Based)")
+        print(f"  Source: {self.source_path}")
+        print(f"  Destination: {self.dest_path}")
+        print(f"  Configs found: {len(configs)}")
+        print(f"{'='*70}\n")
+
+        if not configs:
+            self.tracker.error("run", Exception(f"No .json files found in {self.source_path}"))
+            return {'error': 'No configs found', 'tracker': self.tracker.summary()}
+
+        self.tracker.step(f"Found {len(configs)} config files")
+
+        for i, cfg_path in enumerate(configs, 1):
+            print(f"\n{'─'*70}")
+            print(f"  [{i}/{len(configs)}] Processing: {cfg_path.name}")
+            print(f"{'─'*70}")
+
             result = self._analyze_with_agents(cfg_path)
             self.results.append(result)
 
+        self.tracker.step("Building summary")
         summary = self._build_summary()
+        summary['tracker'] = self.tracker.summary()
+
+        self.tracker.step("Saving reports")
         self._save_reports(summary)
+
+        self._print_final_summary(summary)
         return summary
 
     def _analyze_with_agents(self, cfg_path: Path) -> Dict[str, Any]:
-        """Run framework agents on a single config."""
-        with open(cfg_path) as f:
-            config = json.load(f)
+        """Run framework agents on a single config with detailed logging."""
+        job_tracker = TokenTracker()
+
+        # Step 1: Load config
+        job_tracker.step("Loading config file")
+        try:
+            with open(cfg_path) as f:
+                config = json.load(f)
+            job_tracker.step("Config loaded", f"{len(config)} keys")
+        except Exception as e:
+            job_tracker.error("load_config", e)
+            return {'status': 'error', 'error': str(e), 'tracker': job_tracker.summary()}
 
         job_name = config.get('job_name', cfg_path.stem)
         execution_id = str(uuid.uuid4())[:8]
+        job_tracker.step(f"Job: {job_name}", f"exec_id={execution_id}")
 
-        # Build agent config from input config
-        agent_config = self._build_agent_config(config)
+        # Step 2: Validate config
+        job_tracker.step("Validating config")
+        tables = config.get('source_tables', [])
+        script_path = config.get('script_path', '')
+        job_tracker.step("Config validation", f"{len(tables)} tables, script={'yes' if script_path else 'no'}")
 
-        # Initialize orchestrator with agents enabled
-        orchestrator = StrandsOrchestrator(config=agent_config)
+        # Step 3: Build agent config
+        job_tracker.step("Building agent config")
+        try:
+            agent_config = self._build_agent_config(config)
+            job_tracker.step("Agent config built", f"{len(agent_config)} settings")
+        except Exception as e:
+            job_tracker.error("build_agent_config", e)
+            return {'job_name': job_name, 'status': 'error', 'error': str(e), 'tracker': job_tracker.summary()}
 
-        # Execute agents
+        # Step 4: Initialize orchestrator
+        job_tracker.step("Initializing StrandsOrchestrator")
+        try:
+            orchestrator = StrandsOrchestrator(config=agent_config)
+            job_tracker.step("Orchestrator ready")
+        except Exception as e:
+            job_tracker.error("init_orchestrator", e)
+            return {'job_name': job_name, 'status': 'error', 'error': str(e), 'tracker': job_tracker.summary()}
+
+        # Step 5: Execute agents
+        job_tracker.step("Executing agents...")
         try:
             orch_result = orchestrator.execute(
                 job_name=job_name,
@@ -91,45 +175,77 @@ class MultiConfigOptimizer:
                 platform=config.get('platform', 'glue'),
                 use_llm=False
             )
-
-            # Extract agent outputs
-            agent_outputs = {}
-            recommendations = []
-
-            for agent_name, agent_result in orch_result.agent_results.items():
-                agent_outputs[agent_name] = {
-                    'status': agent_result.status.value,
-                    'output': agent_result.output,
-                    'metrics': agent_result.metrics
-                }
-                recommendations.extend(agent_result.recommendations)
-
-            # Add cross-platform analysis
-            platform_analysis = self._analyze_platforms(config, agent_outputs)
-
-            return {
-                'job_name': job_name,
-                'config_path': str(cfg_path),
-                'execution_id': execution_id,
-                'timestamp': datetime.utcnow().isoformat(),
-                'status': orch_result.status,
-                'agents_run': list(agent_outputs.keys()),
-                'agent_outputs': agent_outputs,
-                'recommendations': recommendations,
-                'platform_analysis': platform_analysis,
-                'total_time_ms': orch_result.total_time_ms
-            }
-
+            job_tracker.step("Agents completed", f"status={orch_result.status}")
         except Exception as e:
-            print(f"    Error: {e}")
+            job_tracker.error("execute_agents", e)
             return {
                 'job_name': job_name,
                 'config_path': str(cfg_path),
                 'execution_id': execution_id,
                 'status': 'error',
                 'error': str(e),
+                'tracker': job_tracker.summary(),
                 'platform_analysis': self._analyze_platforms(config, {})
             }
+
+        # Step 6: Extract agent outputs
+        job_tracker.step("Extracting agent outputs")
+        agent_outputs = {}
+        recommendations = []
+
+        for agent_name, agent_result in orch_result.agent_results.items():
+            status = agent_result.status.value
+            agent_outputs[agent_name] = {
+                'status': status,
+                'output': agent_result.output,
+                'metrics': agent_result.metrics
+            }
+            recommendations.extend(agent_result.recommendations)
+            job_tracker.step(f"  Agent: {agent_name}", f"status={status}, recs={len(agent_result.recommendations)}")
+
+        # Step 7: Platform analysis
+        job_tracker.step("Running platform analysis")
+        platform_analysis = self._analyze_platforms(config, agent_outputs)
+        best = platform_analysis.get('best_option', {})
+        job_tracker.step("Platform analysis done", f"best={best.get('platform', 'N/A')}, savings={best.get('savings_percent', 0):.0f}%")
+
+        self.tracker.step(f"Completed: {job_name}", f"{len(agent_outputs)} agents, {len(recommendations)} recs")
+
+        return {
+            'job_name': job_name,
+            'config_path': str(cfg_path),
+            'execution_id': execution_id,
+            'timestamp': datetime.utcnow().isoformat(),
+            'status': orch_result.status,
+            'agents_run': list(agent_outputs.keys()),
+            'agent_outputs': agent_outputs,
+            'recommendations': recommendations,
+            'platform_analysis': platform_analysis,
+            'total_time_ms': orch_result.total_time_ms,
+            'tracker': job_tracker.summary()
+        }
+
+    def _print_final_summary(self, summary: Dict):
+        """Print final summary with token/step usage."""
+        tracker = summary.get('tracker', {})
+        print(f"\n{'='*70}")
+        print(f"  FINAL SUMMARY")
+        print(f"{'='*70}")
+        print(f"  Jobs Analyzed:    {summary['total_jobs']}")
+        print(f"  Successful:       {summary['successful_analyses']}")
+        print(f"  Current Cost:     ${summary['total_current_monthly_cost']:,.0f}/month")
+        print(f"  Potential Savings:${summary['potential_monthly_savings']:,.0f}/month ({summary['savings_percent']:.0f}%)")
+        print(f"{'─'*70}")
+        print(f"  Total Steps:      {tracker.get('total_steps', 0)}")
+        print(f"  Total Time:       {tracker.get('total_time', 'N/A')}")
+        print(f"  Errors:           {tracker.get('errors', 0)}")
+
+        if tracker.get('error_details'):
+            print(f"\n  ERROR DETAILS:")
+            for err in tracker['error_details']:
+                print(f"    - {err['location']}: {err['error']}")
+
+        print(f"{'='*70}\n")
 
     def _build_agent_config(self, input_config: Dict) -> Dict:
         """Convert input config to agent config format matching what agents expect."""
@@ -375,18 +491,26 @@ th {{ background: #f8f9fa; }}
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Agent-Based Multi-Config Optimizer')
+    parser = argparse.ArgumentParser(
+        description='Agent-Based Multi-Config ETL Optimizer',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python scripts/multi_config_optimizer.py -s ./demo_configs/ -d ./reports/
+  python scripts/multi_config_optimizer.py --source ./configs --dest ./out --quiet
+        """
+    )
     parser.add_argument('--source', '-s', required=True, help='Directory with config JSONs')
-    parser.add_argument('--dest', '-d', required=True, help='Output directory')
+    parser.add_argument('--dest', '-d', required=True, help='Output directory for reports')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Reduce output verbosity')
     args = parser.parse_args()
 
-    optimizer = MultiConfigOptimizer(args.source, args.dest)
+    optimizer = MultiConfigOptimizer(args.source, args.dest, verbose=not args.quiet)
     summary = optimizer.run()
 
-    print(f"\n{'='*60}")
-    print(f" {summary['total_jobs']} jobs | ${summary['total_current_monthly_cost']:,.0f}/mo current")
-    print(f" Potential: ${summary['potential_monthly_savings']:,.0f}/mo savings ({summary['savings_percent']:.0f}%)")
-    print(f"{'='*60}\n")
+    # Return exit code based on errors
+    errors = summary.get('tracker', {}).get('errors', 0)
+    sys.exit(1 if errors > 0 else 0)
 
 
 if __name__ == '__main__':
