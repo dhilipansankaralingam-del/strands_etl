@@ -132,34 +132,40 @@ class MultiConfigOptimizer:
             }
 
     def _build_agent_config(self, input_config: Dict) -> Dict:
-        """Convert input config to agent config format."""
+        """Convert input config to agent config format matching what agents expect."""
         current = input_config.get('current_config', {})
         tables = input_config.get('source_tables', [])
 
-        # Calculate data metrics
-        total_size_gb = sum(
-            t.get('size_gb', t.get('estimated_rows', 1_000_000) / 2_000_000)
-            for t in tables
-        )
-        total_rows = sum(t.get('estimated_rows', 1_000_000) for t in tables)
+        # Normalize table format for sizing_agent
+        normalized_tables = []
+        for t in tables:
+            normalized_tables.append({
+                'database': t.get('database', 'default'),
+                'table': t.get('table', t.get('name', '')),
+                'location': t.get('location', t.get('s3_path', '')),
+                'auto_detect_size': 'Y' if t.get('location') or t.get('s3_path') else 'N',
+                'estimated_rows': t.get('estimated_rows', t.get('row_count', 1_000_000)),
+                'size_gb': t.get('size_gb', 0),
+            })
 
         return {
             'job_name': input_config.get('job_name', 'unknown'),
-            'script_path': input_config.get('script_path', ''),
 
-            # Sizing agent config
-            'sizing': {
+            # Script config for code_analysis_agent (expects script.local_path)
+            'script': {
+                'local_path': input_config.get('script_path', ''),
+            },
+
+            # Sizing agent config (expects source_sizing + source_tables)
+            'source_sizing': {
                 'enabled': 'Y',
-                'total_size_gb': total_size_gb,
-                'row_count': total_rows,
-                'current_workers': current.get('NumberOfWorkers', 10),
-                'worker_type': current.get('WorkerType', 'G.1X'),
+                'mode': 'auto_detect' if any(t.get('location') for t in normalized_tables) else 'config',
+                'cache_sizes': 'N',
             },
 
             # Code analysis config
             'code_analysis': {
                 'enabled': 'Y',
-                'script_path': input_config.get('script_path', ''),
                 'check_anti_patterns': 'Y',
                 'check_optimizations': 'Y',
             },
@@ -169,6 +175,8 @@ class MultiConfigOptimizer:
                 'enabled': 'Y',
                 'monthly_runs': input_config.get('monthly_runs', 30),
                 'avg_runtime_hours': input_config.get('avg_runtime_hours', 0.5),
+                'current_workers': current.get('NumberOfWorkers', 10),
+                'worker_type': current.get('WorkerType', 'G.1X'),
             },
 
             # Platform conversion config
@@ -190,8 +198,8 @@ class MultiConfigOptimizer:
                 'generate_implementation_plan': 'Y',
             },
 
-            # Pass through source tables
-            'source_tables': tables,
+            # Source tables in format sizing_agent expects
+            'source_tables': normalized_tables,
             'current_config': current,
         }
 
