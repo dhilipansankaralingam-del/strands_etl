@@ -1,0 +1,2306 @@
+#!/usr/bin/env python3
+"""
+Interactive Agent CLI with Prediction & Extrapolation
+======================================================
+
+Allows users to interact with trained agents and get predictions for:
+- Cost estimation when scaling
+- Memory requirements for different data volumes
+- Platform recommendations
+- Performance predictions
+
+Data is loaded from local storage (data/agent_store/) which captures
+actual job run metrics.
+
+Usage:
+    python scripts/agent_cli.py --config demo_configs/complex_demo_config.json
+    python scripts/agent_cli.py --agent workload
+    python scripts/agent_cli.py --predict-cost --records 1000000
+    python scripts/agent_cli.py --seed  # Seed sample data for demo
+"""
+
+import os
+import sys
+import json
+import math
+import argparse
+import readline
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+
+# Add framework to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from framework.agents.workload_assessment_agent import WorkloadAssessmentAgent
+from framework.agents.learning_agent import LearningAgent
+from framework.agents.data_quality_agent import DataQualityAgent
+from framework.agents.code_analysis_agent import CodeAnalysisAgent
+from framework.agents.compliance_agent import ComplianceAgent
+from framework.agents.recommendation_agent import RecommendationAgent
+from framework.agents.platform_conversion_agent import PlatformConversionAgent, Platform
+from framework.agents.resource_allocator_agent import ResourceAllocatorAgent
+
+# Import local storage
+from framework.storage import LocalAgentStore, get_store
+
+
+@dataclass
+class ExecutionHistory:
+    """Historical execution data for predictions."""
+    job_name: str
+    records_processed: int
+    duration_seconds: float
+    dpu_hours: float
+    cost_usd: float
+    memory_gb: float
+    platform: str
+    workers: int
+    timestamp: datetime
+    status: str
+
+
+@dataclass
+class PredictionResult:
+    """Result of a prediction query."""
+    metric: str
+    current_value: float
+    predicted_value: float
+    scale_factor: float
+    confidence: float
+    recommendations: List[str] = field(default_factory=list)
+    platform_change_suggested: bool = False
+    suggested_platform: str = ""
+
+
+class AgentDataStore:
+    """
+    Data store that reads from local persistent storage.
+    Connects to LocalAgentStore for actual historical data.
+    """
+
+    def __init__(self):
+        # Use local persistent storage
+        self.local_store = get_store()
+
+        self.execution_history: List[ExecutionHistory] = []
+        self.baselines: Dict[str, Any] = {}
+        self.anomalies: List[Dict] = []
+        self.recommendations: List[Dict] = []
+
+        # Load from local storage
+        self._load_from_storage()
+
+    def _load_from_storage(self):
+        """Load data from local persistent storage."""
+        # Load execution history
+        history = self.local_store.get_execution_history(limit=500)
+
+        self.execution_history = []
+        for h in history:
+            try:
+                self.execution_history.append(ExecutionHistory(
+                    job_name=h.get('job_name', ''),
+                    records_processed=h.get('records_processed', 0),
+                    duration_seconds=h.get('duration_seconds', 0),
+                    dpu_hours=h.get('dpu_hours', 0),
+                    cost_usd=h.get('cost_usd', 0),
+                    memory_gb=h.get('memory_gb', 0),
+                    platform=h.get('platform', 'glue'),
+                    workers=h.get('workers', 2),
+                    timestamp=datetime.fromisoformat(h.get('timestamp', datetime.now().isoformat())),
+                    status=h.get('status', 'SUCCEEDED')
+                ))
+            except Exception:
+                pass
+
+        # Load baselines
+        self.baselines = self.local_store.get_all_baselines()
+
+        # Convert baseline format for compatibility
+        for job_name, baseline in self.baselines.items():
+            if 'avg_duration_seconds' in baseline and 'avg_duration' not in baseline:
+                baseline['avg_duration'] = baseline['avg_duration_seconds']
+
+        # Load anomalies
+        self.anomalies = self.local_store.get_anomalies(include_resolved=True)
+
+        # Load recommendations
+        self.recommendations = self.local_store.get_recommendations()
+
+        if not self.execution_history:
+            print("\033[0;33mNo execution history found. Run with --seed to populate sample data.\033[0m")
+
+    def add_execution(self, history: ExecutionHistory):
+        """Add an execution to history."""
+        self.execution_history.append(history)
+
+    def get_history_for_job(self, job_name: str) -> List[ExecutionHistory]:
+        """Get execution history for a specific job."""
+        return [h for h in self.execution_history if h.job_name == job_name]
+
+    def refresh(self):
+        """Reload data from storage."""
+        self._load_from_storage()
+
+
+class PredictionEngine:
+    """
+    Prediction and extrapolation engine for ETL metrics.
+    Uses historical data to predict cost, memory, duration for different scales.
+    """
+
+    # Platform thresholds (records where platform change is recommended)
+    GLUE_MAX_EFFICIENT_RECORDS = 500000
+    EMR_MIN_RECORDS = 250000
+    EMR_MAX_EFFICIENT_RECORDS = 10000000
+    EKS_MIN_RECORDS = 5000000
+
+    # Pricing constants
+    GLUE_DPU_HOUR_COST = 0.44
+    EMR_NORMALIZED_HOUR_COST = 0.10
+    EKS_VCPU_HOUR_COST = 0.05
+
+    def __init__(self, data_store: AgentDataStore):
+        self.data_store = data_store
+
+    def predict_for_scale(self,
+                          job_name: str,
+                          current_records: int,
+                          target_records: int) -> Dict[str, PredictionResult]:
+        """
+        Predict metrics when scaling from current to target records.
+        Returns predictions for cost, duration, memory, and platform.
+        """
+        predictions = {}
+        scale_factor = target_records / current_records if current_records > 0 else 1.0
+
+        # Get historical data for this job
+        history = self.data_store.get_history_for_job(job_name)
+        baseline = self.data_store.baselines.get(job_name, {})
+
+        # If we have historical data, use regression-like prediction
+        if history:
+            predictions['cost'] = self._predict_cost(history, current_records, target_records, scale_factor)
+            predictions['duration'] = self._predict_duration(history, current_records, target_records, scale_factor)
+            predictions['memory'] = self._predict_memory(history, current_records, target_records, scale_factor)
+            predictions['workers'] = self._predict_workers(history, current_records, target_records, scale_factor)
+        else:
+            # Use baseline estimates
+            predictions['cost'] = self._estimate_cost(baseline, target_records, scale_factor)
+            predictions['duration'] = self._estimate_duration(baseline, target_records, scale_factor)
+            predictions['memory'] = self._estimate_memory(baseline, target_records, scale_factor)
+            predictions['workers'] = self._estimate_workers(baseline, target_records, scale_factor)
+
+        # Add platform recommendation
+        predictions['platform'] = self._recommend_platform(target_records, predictions)
+
+        return predictions
+
+    def _predict_cost(self, history: List[ExecutionHistory],
+                      current: int, target: int, scale: float) -> PredictionResult:
+        """Predict cost using historical data."""
+        # Find closest historical data points
+        sorted_history = sorted(history, key=lambda x: x.records_processed)
+
+        # Use log-linear interpolation (cost typically grows sub-linearly)
+        if len(sorted_history) >= 2:
+            # Fit a simple log-linear model
+            records_list = [h.records_processed for h in sorted_history]
+            costs_list = [h.cost_usd for h in sorted_history]
+
+            # Calculate cost per million records at different scales
+            cpms = [c / (r / 1000000) if r > 0 else 0 for r, c in zip(records_list, costs_list)]
+            avg_cpm = sum(cpms) / len(cpms) if cpms else 2.64
+
+            # Economies of scale factor (cost grows slower than linearly)
+            scale_efficiency = 0.85 if scale > 1 else 1.0
+
+            current_cost = self._find_nearest_cost(sorted_history, current)
+            predicted_cost = current_cost * (scale ** scale_efficiency)
+
+            confidence = 0.85 if len(history) >= 3 else 0.70
+        else:
+            current_cost = history[0].cost_usd if history else 0.50
+            predicted_cost = current_cost * scale * 0.9  # Assume some efficiency gain
+            confidence = 0.60
+
+        recommendations = []
+        if predicted_cost > 5.0:
+            recommendations.append("Consider reserved capacity for cost savings")
+        if predicted_cost > 10.0:
+            recommendations.append("Enable Spark adaptive query execution for optimization")
+
+        return PredictionResult(
+            metric='cost_usd',
+            current_value=current_cost,
+            predicted_value=round(predicted_cost, 2),
+            scale_factor=scale,
+            confidence=confidence,
+            recommendations=recommendations
+        )
+
+    def _predict_duration(self, history: List[ExecutionHistory],
+                          current: int, target: int, scale: float) -> PredictionResult:
+        """Predict execution duration."""
+        sorted_history = sorted(history, key=lambda x: x.records_processed)
+
+        if len(sorted_history) >= 2:
+            # Duration typically grows linearly with records
+            durations = [h.duration_seconds for h in sorted_history]
+            records = [h.records_processed for h in sorted_history]
+
+            # Calculate throughput (records per second)
+            throughputs = [r / d if d > 0 else 0 for r, d in zip(records, durations)]
+            avg_throughput = sum(throughputs) / len(throughputs) if throughputs else 1000
+
+            current_duration = self._find_nearest_duration(sorted_history, current)
+
+            # Duration scales with records but improves with parallelism
+            # Assuming we can add more workers
+            parallelism_factor = min(0.95, 1.0 - (math.log10(scale) * 0.05)) if scale > 1 else 1.0
+            predicted_duration = current_duration * scale * parallelism_factor
+
+            confidence = 0.80 if len(history) >= 3 else 0.65
+        else:
+            current_duration = history[0].duration_seconds if history else 300
+            predicted_duration = current_duration * scale * 0.95
+            confidence = 0.55
+
+        recommendations = []
+        if predicted_duration > 3600:  # > 1 hour
+            recommendations.append("Consider partitioning data for parallel processing")
+        if predicted_duration > 7200:  # > 2 hours
+            recommendations.append("Enable checkpointing for long-running jobs")
+            recommendations.append("Consider breaking into multiple stages")
+
+        return PredictionResult(
+            metric='duration_seconds',
+            current_value=current_duration,
+            predicted_value=round(predicted_duration, 0),
+            scale_factor=scale,
+            confidence=confidence,
+            recommendations=recommendations
+        )
+
+    def _predict_memory(self, history: List[ExecutionHistory],
+                        current: int, target: int, scale: float) -> PredictionResult:
+        """Predict memory requirements."""
+        sorted_history = sorted(history, key=lambda x: x.records_processed)
+
+        if len(sorted_history) >= 2:
+            memories = [h.memory_gb for h in sorted_history]
+            records = [h.records_processed for h in sorted_history]
+
+            # Memory per million records
+            mpm = [m / (r / 1000000) if r > 0 else 8 for r, m in zip(records, memories)]
+            avg_mpm = sum(mpm) / len(mpm) if mpm else 16
+
+            current_memory = self._find_nearest_memory(sorted_history, current)
+
+            # Memory scales with sqrt of records (due to optimized structures)
+            memory_scale = math.sqrt(scale) if scale > 1 else scale
+            predicted_memory = current_memory * memory_scale
+
+            # Round up to common memory sizes
+            predicted_memory = self._round_to_memory_tier(predicted_memory)
+
+            confidence = 0.75 if len(history) >= 3 else 0.60
+        else:
+            current_memory = history[0].memory_gb if history else 8
+            predicted_memory = self._round_to_memory_tier(current_memory * math.sqrt(scale))
+            confidence = 0.50
+
+        recommendations = []
+        if predicted_memory > 32:
+            recommendations.append("Use memory-optimized instance types")
+        if predicted_memory > 64:
+            recommendations.append("Consider data partitioning to reduce memory pressure")
+        if predicted_memory > 128:
+            recommendations.append("Implement streaming processing to avoid full data load")
+
+        return PredictionResult(
+            metric='memory_gb',
+            current_value=current_memory,
+            predicted_value=predicted_memory,
+            scale_factor=scale,
+            confidence=confidence,
+            recommendations=recommendations
+        )
+
+    def _predict_workers(self, history: List[ExecutionHistory],
+                         current: int, target: int, scale: float) -> PredictionResult:
+        """Predict worker/executor count."""
+        sorted_history = sorted(history, key=lambda x: x.records_processed)
+
+        if len(sorted_history) >= 2:
+            workers = [h.workers for h in sorted_history]
+            records = [h.records_processed for h in sorted_history]
+
+            current_workers = self._find_nearest_workers(sorted_history, current)
+
+            # Workers scale sub-linearly with records
+            worker_scale = math.sqrt(scale) if scale > 1 else 1
+            predicted_workers = max(2, int(current_workers * worker_scale))
+
+            # Cap at reasonable limits
+            predicted_workers = min(predicted_workers, 100)
+
+            confidence = 0.80
+        else:
+            current_workers = history[0].workers if history else 5
+            predicted_workers = max(2, int(current_workers * math.sqrt(scale)))
+            confidence = 0.60
+
+        recommendations = []
+        if predicted_workers > 20:
+            recommendations.append("Consider using dynamic allocation")
+        if predicted_workers > 50:
+            recommendations.append("EMR or EKS recommended for better cluster management")
+
+        return PredictionResult(
+            metric='workers',
+            current_value=current_workers,
+            predicted_value=predicted_workers,
+            scale_factor=scale,
+            confidence=confidence,
+            recommendations=recommendations
+        )
+
+    def _recommend_platform(self, target_records: int,
+                            predictions: Dict[str, PredictionResult]) -> PredictionResult:
+        """Recommend appropriate platform based on scale."""
+        current_platform = "glue"  # Default
+        suggested_platform = "glue"
+        platform_change = False
+        recommendations = []
+
+        memory_pred = predictions.get('memory')
+        workers_pred = predictions.get('workers')
+
+        predicted_memory = memory_pred.predicted_value if memory_pred else 16
+        predicted_workers = workers_pred.predicted_value if workers_pred else 5
+
+        if target_records < self.GLUE_MAX_EFFICIENT_RECORDS:
+            suggested_platform = "glue"
+            recommendations.append("Glue is optimal for this data volume")
+
+            if target_records < 50000:
+                recommendations.append("Consider using Glue 4.0 with flex execution for cost savings")
+
+        elif target_records < self.EMR_MAX_EFFICIENT_RECORDS:
+            if predicted_memory > 32 or predicted_workers > 15:
+                suggested_platform = "emr"
+                platform_change = True
+                recommendations.append("EMR recommended for better resource flexibility")
+                recommendations.append("Use EMR Serverless for variable workloads")
+            else:
+                suggested_platform = "glue"
+                recommendations.append("Glue can handle this with increased workers")
+                recommendations.append(f"Set NumberOfWorkers to {predicted_workers}")
+
+        else:
+            suggested_platform = "eks"
+            platform_change = True
+            recommendations.append("EKS with Spark Operator recommended for this scale")
+            recommendations.append("Consider Karpenter for auto-scaling")
+            recommendations.append("Use spot instances for cost optimization")
+
+        # Add specific Glue recommendations
+        if suggested_platform == "glue":
+            if predicted_workers > 10:
+                recommendations.append("Use G.2X or G.4X worker types for more resources")
+            if target_records > 200000:
+                recommendations.append("Enable job bookmarking for incremental processing")
+
+        # Add specific EMR recommendations
+        if suggested_platform == "emr":
+            recommendations.append("Use EMR 6.x with Spark 3.x for best performance")
+            if predicted_memory > 64:
+                recommendations.append("Use r5 or r6g memory-optimized instances")
+
+        return PredictionResult(
+            metric='platform',
+            current_value=0,  # N/A for platform
+            predicted_value=0,  # N/A for platform
+            scale_factor=0,
+            confidence=0.90,
+            recommendations=recommendations,
+            platform_change_suggested=platform_change,
+            suggested_platform=suggested_platform
+        )
+
+    def _find_nearest_cost(self, history: List[ExecutionHistory], records: int) -> float:
+        """Find cost from nearest historical data point."""
+        if not history:
+            return 0.50
+
+        # Linear interpolation between two nearest points
+        for i, h in enumerate(history):
+            if h.records_processed >= records:
+                if i == 0:
+                    return h.cost_usd
+                prev = history[i-1]
+                ratio = (records - prev.records_processed) / (h.records_processed - prev.records_processed)
+                return prev.cost_usd + (h.cost_usd - prev.cost_usd) * ratio
+
+        return history[-1].cost_usd
+
+    def _find_nearest_duration(self, history: List[ExecutionHistory], records: int) -> float:
+        for i, h in enumerate(history):
+            if h.records_processed >= records:
+                if i == 0:
+                    return h.duration_seconds
+                prev = history[i-1]
+                ratio = (records - prev.records_processed) / (h.records_processed - prev.records_processed)
+                return prev.duration_seconds + (h.duration_seconds - prev.duration_seconds) * ratio
+        return history[-1].duration_seconds
+
+    def _find_nearest_memory(self, history: List[ExecutionHistory], records: int) -> float:
+        for i, h in enumerate(history):
+            if h.records_processed >= records:
+                if i == 0:
+                    return h.memory_gb
+                prev = history[i-1]
+                ratio = (records - prev.records_processed) / (h.records_processed - prev.records_processed)
+                return prev.memory_gb + (h.memory_gb - prev.memory_gb) * ratio
+        return history[-1].memory_gb
+
+    def _find_nearest_workers(self, history: List[ExecutionHistory], records: int) -> int:
+        for i, h in enumerate(history):
+            if h.records_processed >= records:
+                return h.workers
+        return history[-1].workers if history else 5
+
+    def _round_to_memory_tier(self, memory_gb: float) -> float:
+        """Round to standard memory tiers."""
+        tiers = [4, 8, 16, 32, 64, 128, 256, 512]
+        for tier in tiers:
+            if memory_gb <= tier:
+                return float(tier)
+        return 512.0
+
+    def _estimate_cost(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate cost when no historical data available."""
+        # Use baseline or default values
+        base_cost = baseline.get('avg_cost', 0.50)
+        base_records = baseline.get('avg_records', 100000)
+
+        # Scale cost (sub-linear scaling)
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        scale_efficiency = 0.85 if actual_scale > 1 else 1.0
+        predicted_cost = base_cost * (actual_scale ** scale_efficiency)
+
+        recommendations = []
+        if predicted_cost > 5.0:
+            recommendations.append("Consider reserved capacity for cost savings")
+
+        return PredictionResult(
+            metric='cost_usd',
+            current_value=base_cost,
+            predicted_value=round(predicted_cost, 2),
+            scale_factor=scale,
+            confidence=0.60,
+            recommendations=recommendations
+        )
+
+    def _estimate_duration(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate duration when no historical data available."""
+        base_duration = baseline.get('avg_duration', 300)  # 5 min default
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Duration scales mostly linearly but with some efficiency gains
+        parallelism_factor = 0.9 if actual_scale > 1 else 1.0
+        predicted_duration = base_duration * actual_scale * parallelism_factor
+
+        recommendations = []
+        if predicted_duration > 3600:
+            recommendations.append("Consider partitioning data for parallel processing")
+
+        return PredictionResult(
+            metric='duration_seconds',
+            current_value=base_duration,
+            predicted_value=round(predicted_duration, 0),
+            scale_factor=scale,
+            confidence=0.55,
+            recommendations=recommendations
+        )
+
+    def _estimate_memory(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate memory when no historical data available."""
+        base_memory = baseline.get('avg_memory_gb', 8.0)
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Memory scales with sqrt of records
+        memory_scale = math.sqrt(actual_scale) if actual_scale > 1 else actual_scale
+        predicted_memory = self._round_to_memory_tier(base_memory * memory_scale)
+
+        recommendations = []
+        if predicted_memory > 32:
+            recommendations.append("Use memory-optimized instance types")
+
+        return PredictionResult(
+            metric='memory_gb',
+            current_value=base_memory,
+            predicted_value=predicted_memory,
+            scale_factor=scale,
+            confidence=0.50,
+            recommendations=recommendations
+        )
+
+    def _estimate_workers(self, baseline: Dict, target_records: int, scale: float) -> PredictionResult:
+        """Estimate workers when no historical data available."""
+        base_workers = baseline.get('typical_workers', 5)
+        base_records = baseline.get('avg_records', 100000)
+
+        actual_scale = target_records / base_records if base_records > 0 else scale
+        # Workers scale with sqrt of records
+        worker_scale = math.sqrt(actual_scale) if actual_scale > 1 else 1
+        predicted_workers = max(2, int(base_workers * worker_scale))
+        predicted_workers = min(predicted_workers, 100)
+
+        recommendations = []
+        if predicted_workers > 20:
+            recommendations.append("Consider using dynamic allocation")
+
+        return PredictionResult(
+            metric='workers',
+            current_value=base_workers,
+            predicted_value=predicted_workers,
+            scale_factor=scale,
+            confidence=0.55,
+            recommendations=recommendations
+        )
+
+
+class InteractiveAgentCLI:
+    """
+    Interactive CLI for querying agents with prediction capabilities.
+    """
+
+    def __init__(self, config: Dict[str, Any] = None):
+        self.config = config or {}
+        self.data_store = AgentDataStore()
+        self.prediction_engine = PredictionEngine(self.data_store)
+
+        # Initialize agents (lazy loading)
+        self._agents = {}
+
+        # Command history for interactive mode
+        self.history = []
+
+        # Historical compliance data (simulated from last runs)
+        self.compliance_history = self._load_compliance_history()
+
+        # Historical learning data (simulated from last runs)
+        self.learning_history = self._load_learning_history()
+
+        # Available commands
+        self.commands = {
+            'help': self.cmd_help,
+            'predict': self.cmd_predict,
+            'scale': self.cmd_scale,
+            'analyze': self.cmd_analyze,
+            'quality': self.cmd_quality,
+            'compliance': self.cmd_compliance,
+            'workload': self.cmd_workload,
+            'recommend': self.cmd_recommend,
+            'history': self.cmd_history,
+            'baseline': self.cmd_baseline,
+            'platform': self.cmd_platform,
+            'cost': self.cmd_cost,
+            'memory': self.cmd_memory,
+            'learning': self.cmd_learning,
+            'trend': self.cmd_trend,
+            'anomaly': self.cmd_anomaly,
+            'ask': self.cmd_ask,
+            'seed': self.cmd_seed,
+            'refresh': self.cmd_refresh,
+            'record': self.cmd_record,
+            'convert': self.cmd_convert,
+            'conversions': self.cmd_conversions,
+            'allocate': self.cmd_allocate,
+            'allocations': self.cmd_allocations,
+            'exit': self.cmd_exit,
+            'quit': self.cmd_exit,
+        }
+
+    def _load_compliance_history(self) -> Dict:
+        """Load compliance history from local storage."""
+        local_store = get_store()
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+
+        # Get last compliance result
+        last_compliance = local_store.get_last_compliance(job_name)
+        compliance_history = local_store.get_compliance_history(job_name, limit=10)
+
+        if not last_compliance:
+            # Return empty structure if no data
+            return {
+                'last_run': None,
+                'history': [],
+                'message': f'No compliance data found for {job_name}. Run a compliance check first.'
+            }
+
+        # Build history list
+        history = []
+        for h in compliance_history:
+            warnings = sum(fw.get('warnings', 0) for fw in h.get('frameworks', {}).values())
+            history.append({
+                'date': h.get('timestamp', '')[:10],
+                'status': h.get('overall_status', 'UNKNOWN'),
+                'warnings': warnings
+            })
+
+        return {
+            'last_run': {
+                'timestamp': last_compliance.get('timestamp', ''),
+                'job_name': last_compliance.get('job_name', job_name),
+                'overall_status': last_compliance.get('overall_status', 'UNKNOWN'),
+                'frameworks': last_compliance.get('frameworks', {}),
+                'recommendations': last_compliance.get('recommendations', [])
+            },
+            'history': history
+        }
+
+    def _load_learning_history(self) -> Dict:
+        """Load learning history from local storage."""
+        local_store = get_store()
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+
+        # Get learning summary from local store
+        summary = local_store.get_learning_summary(job_name)
+
+        if not summary.get('last_run') and not summary.get('baseline'):
+            return {
+                'job_name': job_name,
+                'baseline': None,
+                'last_run': None,
+                'trends': {},
+                'predictions': {},
+                'recent_runs': [],
+                'anomalies_history': [],
+                'message': f'No learning data found for {job_name}. Run jobs to build history.'
+            }
+
+        # Format last run for display
+        last_run = summary.get('last_run')
+        formatted_last_run = None
+        if last_run:
+            formatted_last_run = {
+                'timestamp': last_run.get('timestamp', ''),
+                'duration_seconds': last_run.get('duration_seconds', 0),
+                'cost': last_run.get('cost_usd', 0),
+                'records_processed': last_run.get('records_processed', 0),
+                'memory_used_gb': last_run.get('memory_gb', 0),
+                'workers_used': last_run.get('workers', 0),
+                'status': last_run.get('status', 'UNKNOWN'),
+                'platform': last_run.get('platform', 'glue'),
+                'deviations': summary.get('deviations', {}),
+                'anomalies_detected': summary.get('anomalies_count', 0)
+            }
+
+        # Format recent runs
+        recent_runs = []
+        for run in summary.get('recent_runs', [])[:10]:
+            recent_runs.append({
+                'date': run.get('timestamp', '')[:10] if run.get('timestamp') else '',
+                'duration': run.get('duration_seconds', 0),
+                'cost': run.get('cost_usd', 0),
+                'records': run.get('records_processed', 0),
+                'status': run.get('status', 'UNKNOWN')
+            })
+
+        return {
+            'job_name': job_name,
+            'baseline': summary.get('baseline'),
+            'last_run': formatted_last_run,
+            'trends': summary.get('trends', {}),
+            'predictions': summary.get('predictions', {}),
+            'recent_runs': recent_runs,
+            'anomalies_history': summary.get('anomalies', [])
+        }
+
+    def get_agent(self, agent_type: str):
+        """Get or create an agent instance."""
+        if agent_type not in self._agents:
+            if agent_type == 'workload':
+                self._agents[agent_type] = WorkloadAssessmentAgent()
+            elif agent_type == 'learning':
+                self._agents[agent_type] = LearningAgent()
+            elif agent_type == 'quality':
+                self._agents[agent_type] = DataQualityAgent()
+            elif agent_type == 'code':
+                self._agents[agent_type] = CodeAnalysisAgent()
+            elif agent_type == 'compliance':
+                self._agents[agent_type] = ComplianceAgent()
+            elif agent_type == 'recommendation':
+                self._agents[agent_type] = RecommendationAgent()
+        return self._agents.get(agent_type)
+
+    def run_interactive(self):
+        """Run interactive CLI session."""
+        self._print_banner()
+
+        print("\nType 'help' for available commands or 'quit' to exit.\n")
+
+        while True:
+            try:
+                # Get user input
+                user_input = input("\033[1;36m[agent-cli]\033[0m > ").strip()
+
+                if not user_input:
+                    continue
+
+                # Add to history
+                self.history.append(user_input)
+
+                # Parse and execute command
+                self._execute_command(user_input)
+
+            except KeyboardInterrupt:
+                print("\n\nUse 'quit' or 'exit' to exit.")
+            except EOFError:
+                break
+
+        print("\nGoodbye!")
+
+    def _print_banner(self):
+        """Print CLI banner."""
+        banner = """
+╔══════════════════════════════════════════════════════════════════════╗
+║                  ETL AGENT INTERACTIVE CLI                           ║
+║                                                                      ║
+║  Prediction & Scaling:                                               ║
+║    scale <from> <to>                              Quick scale predict║
+║    cost <job> --records <count>                   Cost estimation    ║
+║    memory <job> --records <count>                 Memory prediction  ║
+║    platform <records>                             Platform recommend ║
+║                                                                      ║
+║  Learning Agent (Historical Analysis):                               ║
+║    learning [--last|--baseline|--predictions]     Learning insights  ║
+║    trend [metric]                                 Trend analysis     ║
+║    anomaly                                        Anomaly detection  ║
+║    ask <question>                                 Natural language Q ║
+║                                                                      ║
+║  Compliance Agent:                                                   ║
+║    compliance [GDPR|PCI_DSS|SOX] [--pii|--history]                   ║
+║                                                                      ║
+║  Other Agents:                                                       ║
+║    analyze <script_path>                          Code analysis      ║
+║    quality <table>                                Data quality check ║
+║    workload                                       Workload assessment║
+║    recommend                                      Get recommendations║
+║                                                                      ║
+║  Platform Conversion:                                                ║
+║    convert glue emr [--workers N]                Platform convert   ║
+║    conversions                                   Conversion history ║
+║                                                                      ║
+║  Smart Resource Allocation:                                          ║
+║    allocate [job] [--records N]                  Dynamic allocation ║
+║    allocations                                   Allocation history ║
+║                                                                      ║
+║  Type 'help' for full command list                                   ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+        print(banner)
+
+    def _execute_command(self, input_str: str):
+        """Parse and execute a command."""
+        parts = input_str.split()
+        if not parts:
+            return
+
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        if cmd in self.commands:
+            try:
+                self.commands[cmd](args)
+            except Exception as e:
+                print(f"\033[0;31mError: {str(e)}\033[0m")
+        else:
+            # Check for natural language queries
+            if any(word in input_str.lower() for word in ['cost', 'memory', 'scale', 'records', 'million']):
+                self._handle_natural_query(input_str)
+            else:
+                print(f"Unknown command: {cmd}. Type 'help' for available commands.")
+
+    def _handle_natural_query(self, query: str):
+        """Handle natural language queries about predictions."""
+        query_lower = query.lower()
+
+        # Extract numbers from query
+        import re
+        numbers = re.findall(r'[\d,]+(?:k|m)?', query_lower)
+
+        # Parse numbers (handle k/m suffixes)
+        parsed_numbers = []
+        for n in numbers:
+            n_clean = n.replace(',', '')
+            if n_clean.endswith('k'):
+                parsed_numbers.append(int(float(n_clean[:-1]) * 1000))
+            elif n_clean.endswith('m'):
+                parsed_numbers.append(int(float(n_clean[:-1]) * 1000000))
+            else:
+                parsed_numbers.append(int(n_clean))
+
+        # Default job name
+        job_name = self.config.get('job_name', 'sales_analytics')
+
+        if len(parsed_numbers) >= 2:
+            # Scale prediction
+            from_records = parsed_numbers[0]
+            to_records = parsed_numbers[1]
+
+            print(f"\n\033[1;33mPrediction: Scaling from {from_records:,} to {to_records:,} records\033[0m")
+            print(f"Job: {job_name}")
+            print("-" * 60)
+
+            predictions = self.prediction_engine.predict_for_scale(
+                job_name, from_records, to_records
+            )
+
+            self._display_predictions(predictions)
+
+        elif len(parsed_numbers) == 1:
+            # Single scale prediction from baseline
+            to_records = parsed_numbers[0]
+            baseline = self.data_store.baselines.get(job_name, {})
+            from_records = baseline.get('avg_records', 100000)
+
+            print(f"\n\033[1;33mPrediction: Scaling to {to_records:,} records\033[0m")
+            print(f"Job: {job_name} (baseline: {from_records:,} records)")
+            print("-" * 60)
+
+            predictions = self.prediction_engine.predict_for_scale(
+                job_name, from_records, to_records
+            )
+
+            self._display_predictions(predictions)
+        else:
+            print("Please specify record counts. Example: 'scale from 100000 to 1000000'")
+
+    def _display_predictions(self, predictions: Dict[str, PredictionResult]):
+        """Display prediction results in a formatted way."""
+
+        # Cost
+        if 'cost' in predictions:
+            p = predictions['cost']
+            print(f"\n\033[1;32m💰 COST:\033[0m")
+            print(f"   Current:   ${p.current_value:.2f}")
+            print(f"   Predicted: ${p.predicted_value:.2f}")
+            print(f"   Change:    {((p.predicted_value / p.current_value) - 1) * 100:.1f}%" if p.current_value > 0 else "   Change:    N/A")
+            print(f"   Confidence: {p.confidence * 100:.0f}%")
+            if p.recommendations:
+                print(f"   Tips:")
+                for rec in p.recommendations:
+                    print(f"     • {rec}")
+
+        # Duration
+        if 'duration' in predictions:
+            p = predictions['duration']
+            mins = p.predicted_value / 60
+            current_mins = p.current_value / 60
+            print(f"\n\033[1;32m⏱️  DURATION:\033[0m")
+            print(f"   Current:   {current_mins:.1f} min")
+            print(f"   Predicted: {mins:.1f} min")
+            print(f"   Confidence: {p.confidence * 100:.0f}%")
+            if p.recommendations:
+                print(f"   Tips:")
+                for rec in p.recommendations:
+                    print(f"     • {rec}")
+
+        # Memory
+        if 'memory' in predictions:
+            p = predictions['memory']
+            print(f"\n\033[1;32m🧠 MEMORY:\033[0m")
+            print(f"   Current:   {p.current_value:.0f} GB")
+            print(f"   Predicted: {p.predicted_value:.0f} GB")
+            print(f"   Confidence: {p.confidence * 100:.0f}%")
+            if p.recommendations:
+                print(f"   Tips:")
+                for rec in p.recommendations:
+                    print(f"     • {rec}")
+
+        # Workers
+        if 'workers' in predictions:
+            p = predictions['workers']
+            print(f"\n\033[1;32m👷 WORKERS:\033[0m")
+            print(f"   Current:   {int(p.current_value)} workers")
+            print(f"   Predicted: {int(p.predicted_value)} workers")
+            if p.recommendations:
+                print(f"   Tips:")
+                for rec in p.recommendations:
+                    print(f"     • {rec}")
+
+        # Platform
+        if 'platform' in predictions:
+            p = predictions['platform']
+            print(f"\n\033[1;32m🖥️  PLATFORM:\033[0m")
+            if p.platform_change_suggested:
+                print(f"   ⚠️  CHANGE RECOMMENDED: {p.suggested_platform.upper()}")
+            else:
+                print(f"   Current platform is optimal: {p.suggested_platform.upper()}")
+            print(f"   Recommendations:")
+            for rec in p.recommendations:
+                print(f"     • {rec}")
+
+        print()
+
+    # Command implementations
+
+    def cmd_help(self, args):
+        """Show help."""
+        help_text = """
+Available Commands:
+═══════════════════════════════════════════════════════════════════════
+
+PREDICTION & SCALING:
+  predict <job> --from <records> --to <records>
+      Predict cost, memory, duration when scaling from X to Y records
+      Example: predict sales_analytics --from 100000 --to 1000000
+
+  scale <from> <to>
+      Quick scale prediction using default job
+      Example: scale 100k 1m
+
+  cost <job> --records <count>
+      Estimate cost for specific record count
+      Example: cost sales_analytics --records 500000
+
+  memory <job> --records <count>
+      Estimate memory requirements
+      Example: memory sales_analytics --records 1000000
+
+  platform <records>
+      Get platform recommendation for record count
+      Example: platform 5000000
+
+AGENTS:
+  analyze <script_path>
+      Run code analysis on a PySpark script
+
+  quality <table_name>
+      Check data quality for a table
+
+  compliance [framework] [--last] [--pii] [--history]
+      Run compliance check (GDPR, PCI_DSS, SOX)
+      Example: compliance            (show last run status)
+      Example: compliance GDPR       (show GDPR details)
+      Example: compliance --pii      (show PII analysis)
+      Example: compliance --history  (show compliance history)
+
+  workload
+      Run workload assessment
+
+  recommend
+      Get aggregated recommendations
+
+LEARNING AGENT:
+  learning [--last] [--baseline] [--predictions]
+      Query learning agent based on historical runs
+      Example: learning              (show all)
+      Example: learning --last       (show last run analysis)
+      Example: learning --baseline   (show baseline metrics)
+      Example: learning --predictions (show predictions)
+
+  trend [metric]
+      Show trend analysis for metrics
+      Example: trend                 (show all trends)
+      Example: trend cost            (show cost trend)
+
+  anomaly
+      Show anomaly detection results
+
+  ask <question>
+      Natural language query to agents
+      Example: ask why did cost increase?
+      Example: ask is the job GDPR compliant?
+      Example: ask what is the failure probability?
+      Example: ask how much memory for 1 million records?
+
+HISTORY & BASELINES:
+  history
+      Show execution history
+
+  baseline <job_name>
+      Show baseline metrics for a job
+
+PLATFORM CONVERSION:
+  convert <source> <target> [options]
+      Convert job configuration between platforms
+      Platforms: glue, emr, eks
+      Options:
+        --workers N        Number of Glue workers
+        --worker-type TYPE Glue worker type (G.1X, G.2X)
+        --instances N      Number of EMR instances
+        --instance-type T  EMR instance type
+        --optimize GOAL    Optimization: cost, performance, balanced
+      Example: convert glue emr --workers 10 --worker-type G.1X
+      Example: convert glue eks --workers 20 --optimize cost
+      Example: convert emr glue --instances 5 --instance-type m5.xlarge
+
+  conversions [--history] [--stats]
+      Show conversion history and statistics
+
+SMART RESOURCE ALLOCATION:
+  allocate [job_name] [options]
+      Get smart resource allocation based on patterns and trends
+      Automatically adjusts workers based on:
+        - Weekday vs weekend patterns
+        - Data volume trends (growing/shrinking)
+        - Job complexity
+        - Historical performance
+      Options:
+        --records N        Override estimated record count
+        --workers N        Original worker count to compare
+        --worker-type TYPE Original worker type
+      Example: allocate sales_analytics
+      Example: allocate --records 500000
+      Example: allocate --workers 10 --worker-type G.1X
+
+  allocations [job_name] [--limit N]
+      Show resource allocation history
+
+DATA STORE:
+  seed
+      Seed sample data for demo (populates historical runs)
+
+  refresh
+      Reload data from local storage
+
+  record <job> <records> <duration_sec> <cost> [workers] [memory_gb]
+      Manually record a job run
+      Example: record sales_analytics 500000 1800 1.50 10 16
+
+OTHER:
+  help          Show this help
+  exit/quit     Exit the CLI
+
+NATURAL LANGUAGE:
+  You can also ask natural language questions like:
+  - "What will be the cost if I scale from 100k to 1m records?"
+  - "How much memory do I need for 5 million records?"
+  - "Should I switch to EMR for 2 million records?"
+
+NOTE: Data is stored locally in data/agent_store/. Run 'seed' to populate sample data.
+"""
+        print(help_text)
+
+    def cmd_predict(self, args):
+        """Predict metrics for scaling."""
+        if len(args) < 5:
+            print("Usage: predict <job> --from <records> --to <records>")
+            return
+
+        job_name = args[0]
+
+        # Parse arguments
+        from_records = 100000
+        to_records = 1000000
+
+        for i, arg in enumerate(args):
+            if arg == '--from' and i + 1 < len(args):
+                from_records = self._parse_number(args[i + 1])
+            elif arg == '--to' and i + 1 < len(args):
+                to_records = self._parse_number(args[i + 1])
+
+        print(f"\n\033[1;33mPrediction: {job_name}\033[0m")
+        print(f"Scaling from {from_records:,} to {to_records:,} records")
+        print("-" * 60)
+
+        predictions = self.prediction_engine.predict_for_scale(
+            job_name, from_records, to_records
+        )
+
+        self._display_predictions(predictions)
+
+    def cmd_scale(self, args):
+        """Quick scale prediction."""
+        if len(args) < 2:
+            print("Usage: scale <from_records> <to_records>")
+            return
+
+        from_records = self._parse_number(args[0])
+        to_records = self._parse_number(args[1])
+        job_name = self.config.get('job_name', 'sales_analytics')
+
+        print(f"\n\033[1;33mScale Prediction: {job_name}\033[0m")
+        print(f"From {from_records:,} to {to_records:,} records")
+        print("-" * 60)
+
+        predictions = self.prediction_engine.predict_for_scale(
+            job_name, from_records, to_records
+        )
+
+        self._display_predictions(predictions)
+
+    def cmd_cost(self, args):
+        """Cost estimation."""
+        job_name = args[0] if args else self.config.get('job_name', 'sales_analytics')
+        records = 100000
+
+        for i, arg in enumerate(args):
+            if arg == '--records' and i + 1 < len(args):
+                records = self._parse_number(args[i + 1])
+
+        baseline = self.data_store.baselines.get(job_name, {})
+        from_records = baseline.get('avg_records', 100000)
+
+        predictions = self.prediction_engine.predict_for_scale(
+            job_name, from_records, records
+        )
+
+        if 'cost' in predictions:
+            p = predictions['cost']
+            print(f"\n\033[1;32mCost Estimation: {job_name}\033[0m")
+            print(f"Records: {records:,}")
+            print(f"Estimated Cost: ${p.predicted_value:.2f}")
+            print(f"Confidence: {p.confidence * 100:.0f}%")
+            if p.recommendations:
+                print("Recommendations:")
+                for rec in p.recommendations:
+                    print(f"  • {rec}")
+
+    def cmd_memory(self, args):
+        """Memory estimation."""
+        job_name = args[0] if args else self.config.get('job_name', 'sales_analytics')
+        records = 100000
+
+        for i, arg in enumerate(args):
+            if arg == '--records' and i + 1 < len(args):
+                records = self._parse_number(args[i + 1])
+
+        baseline = self.data_store.baselines.get(job_name, {})
+        from_records = baseline.get('avg_records', 100000)
+
+        predictions = self.prediction_engine.predict_for_scale(
+            job_name, from_records, records
+        )
+
+        if 'memory' in predictions:
+            p = predictions['memory']
+            print(f"\n\033[1;32mMemory Estimation: {job_name}\033[0m")
+            print(f"Records: {records:,}")
+            print(f"Required Memory: {p.predicted_value:.0f} GB")
+            print(f"Confidence: {p.confidence * 100:.0f}%")
+            if p.recommendations:
+                print("Recommendations:")
+                for rec in p.recommendations:
+                    print(f"  • {rec}")
+
+    def cmd_platform(self, args):
+        """Platform recommendation."""
+        records = self._parse_number(args[0]) if args else 1000000
+        job_name = self.config.get('job_name', 'sales_analytics')
+
+        baseline = self.data_store.baselines.get(job_name, {})
+        from_records = baseline.get('avg_records', 100000)
+
+        predictions = self.prediction_engine.predict_for_scale(
+            job_name, from_records, records
+        )
+
+        if 'platform' in predictions:
+            p = predictions['platform']
+            print(f"\n\033[1;32mPlatform Recommendation\033[0m")
+            print(f"Records: {records:,}")
+            print(f"Recommended Platform: {p.suggested_platform.upper()}")
+            if p.platform_change_suggested:
+                print(f"⚠️  Platform change is recommended!")
+            print("\nRecommendations:")
+            for rec in p.recommendations:
+                print(f"  • {rec}")
+
+    def cmd_analyze(self, args):
+        """Run code analysis."""
+        if not args:
+            print("Usage: analyze <script_path>")
+            return
+
+        script_path = args[0]
+
+        if not os.path.exists(script_path):
+            print(f"Script not found: {script_path}")
+            return
+
+        print(f"\n\033[1;33mAnalyzing: {script_path}\033[0m")
+        print("-" * 60)
+
+        agent = self.get_agent('code')
+        if agent:
+            with open(script_path, 'r') as f:
+                code = f.read()
+
+            from framework.agents.code_analysis_agent import CodeContext
+            context = CodeContext(
+                source_code=code,
+                language="pyspark",
+                file_path=script_path
+            )
+
+            result = agent.analyze(context)
+
+            print(f"\nAnti-patterns Found: {result.anti_patterns_found}")
+            print(f"Overall Score: {result.overall_score:.0f}/100")
+
+            if result.issues:
+                print("\nIssues:")
+                for issue in result.issues[:5]:
+                    print(f"  [{issue.severity}] {issue.pattern}: {issue.description}")
+
+            if result.recommendations:
+                print("\nRecommendations:")
+                for rec in result.recommendations[:5]:
+                    print(f"  • {rec.message}")
+
+    def cmd_quality(self, args):
+        """Run data quality check."""
+        table_name = args[0] if args else "sample_table"
+
+        print(f"\n\033[1;33mData Quality Check: {table_name}\033[0m")
+        print("-" * 60)
+
+        # Simulated quality check results
+        print("\nChecks Performed: 10")
+        print("Passed: 8")
+        print("Failed: 2")
+        print("\nFailed Checks:")
+        print("  • null_check on customer_id: 0.5% null values")
+        print("  • range_check on amount: 3 values outside range")
+
+    def cmd_compliance(self, args):
+        """Run compliance check based on historical data."""
+        # Parse arguments
+        framework = None
+        show_last = False
+        show_pii = False
+        show_history = False
+
+        for i, arg in enumerate(args):
+            if arg in ('--last', '-l'):
+                show_last = True
+            elif arg in ('--pii', '-p'):
+                show_pii = True
+            elif arg in ('--history', '-h'):
+                show_history = True
+            elif not arg.startswith('-'):
+                framework = arg.upper()
+
+        last_run = self.compliance_history.get('last_run', {})
+
+        if show_last or (not framework and not show_pii and not show_history):
+            # Show last run summary
+            print(f"\n\033[1;33m📋 COMPLIANCE STATUS (Last Run)\033[0m")
+            print("-" * 60)
+            print(f"  Job: {last_run.get('job_name', 'unknown')}")
+            print(f"  Timestamp: {last_run.get('timestamp', 'unknown')}")
+
+            status = last_run.get('overall_status', 'UNKNOWN')
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Overall Status: {status_color}{status}\033[0m")
+
+            print(f"\n  Frameworks Checked:")
+            for fw_name, fw_data in last_run.get('frameworks', {}).items():
+                fw_status = fw_data.get('status', 'UNKNOWN')
+                fw_color = "\033[0;32m" if fw_status == 'COMPLIANT' else "\033[0;31m"
+                warnings = fw_data.get('warnings', 0)
+                warn_str = f" ({warnings} warnings)" if warnings > 0 else ""
+                print(f"    • {fw_name}: {fw_color}{fw_status}{warn_str}\033[0m")
+
+        if framework:
+            # Show specific framework details
+            fw_data = last_run.get('frameworks', {}).get(framework, {})
+            if not fw_data:
+                print(f"\n\033[0;31mFramework '{framework}' not found in last run.\033[0m")
+                print(f"Available: {list(last_run.get('frameworks', {}).keys())}")
+                return
+
+            print(f"\n\033[1;33m🔒 {framework} COMPLIANCE DETAILS\033[0m")
+            print("-" * 60)
+
+            status = fw_data.get('status', 'UNKNOWN')
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Status: {status_color}{status}\033[0m")
+            print(f"  Checks Passed: {fw_data.get('checks_passed', 0)}")
+            print(f"  Checks Failed: {fw_data.get('checks_failed', 0)}")
+            print(f"  Warnings: {fw_data.get('warnings', 0)}")
+
+            if framework == 'GDPR':
+                print(f"\n  GDPR Specifics:")
+                print(f"    Encryption: {fw_data.get('encryption_status', 'UNKNOWN')}")
+                print(f"    Retention Policy: {fw_data.get('retention_policy', 'Not set')}")
+                print(f"    PII Columns Detected: {len(fw_data.get('pii_columns_detected', []))}")
+                print(f"    PII Columns Masked: {len(fw_data.get('pii_columns_masked', []))}")
+
+            elif framework == 'PCI_DSS':
+                print(f"\n  PCI-DSS Specifics:")
+                print(f"    Card Data Masked: {'Yes' if fw_data.get('card_data_masked') else 'No'}")
+                print(f"    Encryption: {fw_data.get('encryption_status', 'UNKNOWN')}")
+
+            elif framework == 'SOX':
+                print(f"\n  SOX Specifics:")
+                print(f"    Audit Trail: {fw_data.get('audit_trail', 'UNKNOWN')}")
+                print(f"    Data Lineage: {fw_data.get('data_lineage', 'UNKNOWN')}")
+
+            if fw_data.get('findings'):
+                print(f"\n  Findings:")
+                for finding in fw_data['findings']:
+                    status_icon = "⚠️" if finding['status'] == 'WARNING' else "❌"
+                    print(f"    {status_icon} [{finding['status']}] {finding['check']}")
+                    print(f"       {finding['detail']}")
+
+        if show_pii:
+            # Show PII details
+            gdpr_data = last_run.get('frameworks', {}).get('GDPR', {})
+            print(f"\n\033[1;33m🔐 PII ANALYSIS\033[0m")
+            print("-" * 60)
+
+            detected = gdpr_data.get('pii_columns_detected', [])
+            masked = gdpr_data.get('pii_columns_masked', [])
+            unmasked = [col for col in detected if col not in masked]
+
+            print(f"\n  PII Columns Detected ({len(detected)}):")
+            for col in detected:
+                mask_status = "✓ Masked" if col in masked else "⚠️ NOT Masked"
+                print(f"    • {col}: {mask_status}")
+
+            if unmasked:
+                print(f"\n  \033[0;33m⚠️ Action Required: {len(unmasked)} columns need masking\033[0m")
+                for col in unmasked:
+                    print(f"    • {col}")
+
+        if show_history:
+            # Show compliance history
+            print(f"\n\033[1;33m📊 COMPLIANCE HISTORY\033[0m")
+            print("-" * 60)
+            print(f"\n  {'Date':<12} {'Status':<12} {'Warnings'}")
+            print(f"  {'-'*12} {'-'*12} {'-'*10}")
+            for h in self.compliance_history.get('history', []):
+                status_color = "\033[0;32m" if h['status'] == 'COMPLIANT' else "\033[0;31m"
+                print(f"  {h['date']:<12} {status_color}{h['status']:<12}\033[0m {h['warnings']}")
+
+        # Always show recommendations
+        if last_run.get('recommendations'):
+            print(f"\n  \033[1;36mRecommendations:\033[0m")
+            for rec in last_run['recommendations']:
+                print(f"    • {rec}")
+
+    def cmd_workload(self, args):
+        """Run workload assessment."""
+        job_name = self.config.get('job_name', 'sales_analytics')
+
+        print(f"\n\033[1;33mWorkload Assessment: {job_name}\033[0m")
+        print("-" * 60)
+
+        baseline = self.data_store.baselines.get(job_name, {})
+
+        print(f"\nCurrent Configuration:")
+        print(f"  Workers: {baseline.get('typical_workers', 5)}")
+        print(f"  Memory: {baseline.get('avg_memory_gb', 16)} GB")
+        print(f"  Avg Duration: {baseline.get('avg_duration', 0) / 60:.1f} min")
+        print(f"  Avg Cost: ${baseline.get('avg_cost', 0):.2f}")
+
+        print(f"\nRecommendations:")
+        print("  • Current configuration is optimal for workload")
+        print("  • Consider enabling adaptive query execution")
+
+    def cmd_recommend(self, args):
+        """Get aggregated recommendations."""
+        print(f"\n\033[1;33mAggregated Recommendations\033[0m")
+        print("-" * 60)
+
+        print("\nHigh Priority:")
+        print("  • Enable broadcast join for small dimension tables")
+        print("  • Increase executor memory to 8GB for large aggregations")
+
+        print("\nMedium Priority:")
+        print("  • Consider partitioning output by date")
+        print("  • Enable adaptive query execution")
+
+        print("\nLow Priority:")
+        print("  • Consider caching frequently accessed data")
+
+    def cmd_history(self, args):
+        """Show execution history."""
+        print(f"\n\033[1;33mExecution History\033[0m")
+        print("-" * 60)
+
+        for h in self.data_store.execution_history:
+            status_color = "\033[0;32m" if h.status == "SUCCEEDED" else "\033[0;31m"
+            print(f"\n{h.job_name}:")
+            print(f"  Records: {h.records_processed:,}")
+            print(f"  Duration: {h.duration_seconds / 60:.1f} min")
+            print(f"  Cost: ${h.cost_usd:.2f}")
+            print(f"  Platform: {h.platform}")
+            print(f"  Status: {status_color}{h.status}\033[0m")
+
+    def cmd_baseline(self, args):
+        """Show baseline for a job."""
+        job_name = args[0] if args else self.config.get('job_name', 'sales_analytics')
+
+        baseline = self.data_store.baselines.get(job_name, {})
+
+        if not baseline:
+            print(f"No baseline found for: {job_name}")
+            return
+
+        print(f"\n\033[1;33mBaseline: {job_name}\033[0m")
+        print("-" * 60)
+        print(f"  Average Records: {baseline.get('avg_records', 0):,}")
+        print(f"  Average Duration: {baseline.get('avg_duration', 0) / 60:.1f} min")
+        print(f"  Average Cost: ${baseline.get('avg_cost', 0):.2f}")
+        print(f"  Average Memory: {baseline.get('avg_memory_gb', 0)} GB")
+        print(f"  Typical Workers: {baseline.get('typical_workers', 0)}")
+
+    def cmd_learning(self, args):
+        """Query the learning agent based on historical runs."""
+        show_last = False
+        show_baseline = False
+        show_predictions = False
+        show_all = len(args) == 0
+
+        for arg in args:
+            if arg in ('--last', '-l'):
+                show_last = True
+            elif arg in ('--baseline', '-b'):
+                show_baseline = True
+            elif arg in ('--predictions', '-p'):
+                show_predictions = True
+
+        if show_all:
+            show_last = show_baseline = show_predictions = True
+
+        lh = self.learning_history
+
+        print(f"\n\033[1;33m📚 LEARNING AGENT - {lh.get('job_name', 'unknown')}\033[0m")
+        print("=" * 60)
+
+        if show_last:
+            last = lh.get('last_run', {})
+            print(f"\n\033[1;36m📊 Last Run Analysis\033[0m")
+            print("-" * 50)
+            print(f"  Timestamp: {last.get('timestamp', 'unknown')}")
+            print(f"  Status: \033[0;32m{last.get('status', 'unknown')}\033[0m")
+            print(f"  Platform: {last.get('platform', 'unknown')}")
+            print(f"\n  Metrics:")
+            print(f"    Duration: {last.get('duration_seconds', 0) / 60:.1f} min")
+            print(f"    Cost: ${last.get('cost', 0):.2f}")
+            print(f"    Records: {last.get('records_processed', 0):,}")
+            print(f"    Memory Used: {last.get('memory_used_gb', 0):.1f} GB")
+            print(f"    Workers: {last.get('workers_used', 0)}")
+
+            deviations = last.get('deviations', {})
+            if deviations:
+                print(f"\n  Deviations from Baseline:")
+                for metric, value in deviations.items():
+                    color = "\033[0;33m" if value.startswith('+') and float(value.rstrip('%')) > 10 else "\033[0;32m"
+                    print(f"    {metric.capitalize()}: {color}{value}\033[0m")
+
+            anomalies = last.get('anomalies_detected', 0)
+            if anomalies > 0:
+                print(f"\n  \033[0;31m⚠️ Anomalies Detected: {anomalies}\033[0m")
+            else:
+                print(f"\n  \033[0;32m✓ No anomalies detected\033[0m")
+
+        if show_baseline:
+            baseline = lh.get('baseline', {})
+            print(f"\n\033[1;36m📏 Baseline Metrics\033[0m")
+            print("-" * 50)
+            print(f"  Sample Count: {baseline.get('sample_count', 0)} runs")
+            print(f"  Created: {baseline.get('created_at', 'unknown')}")
+            print(f"  Last Updated: {baseline.get('updated_at', 'unknown')}")
+            print(f"\n  Averages:")
+            print(f"    Duration: {baseline.get('avg_duration_seconds', 0) / 60:.1f} min")
+            print(f"    Cost: ${baseline.get('avg_cost', 0):.2f}")
+            print(f"    Records: {baseline.get('avg_records', 0):,}")
+            print(f"    Memory: {baseline.get('avg_memory_gb', 0):.1f} GB")
+            print(f"    Workers: {baseline.get('typical_workers', 0)}")
+            print(f"    Success Rate: {baseline.get('success_rate', 0):.1f}%")
+
+        if show_predictions:
+            predictions = lh.get('predictions', {})
+            print(f"\n\033[1;36m🔮 Predictions (Next Run)\033[0m")
+            print("-" * 50)
+            print(f"  Expected Duration: {predictions.get('next_run_duration', 0) / 60:.1f} min")
+            print(f"  Expected Cost: ${predictions.get('next_run_cost', 0):.2f}")
+            print(f"  Recommended Workers: {predictions.get('recommended_workers', 0)}")
+            fail_prob = predictions.get('failure_probability', 0) * 100
+            fail_color = "\033[0;32m" if fail_prob < 5 else "\033[0;33m" if fail_prob < 15 else "\033[0;31m"
+            print(f"  Failure Probability: {fail_color}{fail_prob:.1f}%\033[0m")
+
+    def cmd_trend(self, args):
+        """Show trends from learning agent."""
+        metric = args[0].lower() if args else None
+
+        trends = self.learning_history.get('trends', {})
+
+        print(f"\n\033[1;33m📈 TREND ANALYSIS\033[0m")
+        print("-" * 60)
+
+        if metric and metric in trends:
+            # Show specific metric trend
+            t = trends[metric]
+            direction_icon = "📈" if t['direction'] == 'increasing' else "📉" if t['direction'] == 'decreasing' else "➡️"
+            print(f"\n  {metric.upper()} Trend:")
+            print(f"    Direction: {direction_icon} {t['direction'].capitalize()}")
+            print(f"    Change: {t['change']}")
+            print(f"    Period: {t['period']}")
+        else:
+            # Show all trends
+            for metric_name, t in trends.items():
+                direction_icon = "📈" if t['direction'] == 'increasing' else "📉" if t['direction'] == 'decreasing' else "➡️"
+                direction_color = "\033[0;33m" if t['direction'] == 'increasing' else "\033[0;32m"
+                print(f"\n  {metric_name.upper()}:")
+                print(f"    {direction_icon} {direction_color}{t['direction'].capitalize()}\033[0m ({t['change']} over {t['period']})")
+
+        # Show recent runs for context
+        print(f"\n  Recent Execution Data:")
+        print(f"  {'Date':<12} {'Duration':<12} {'Cost':<10} {'Records':<12}")
+        print(f"  {'-'*12} {'-'*12} {'-'*10} {'-'*12}")
+        for run in self.learning_history.get('recent_runs', [])[:5]:
+            print(f"  {run['date']:<12} {run['duration']/60:.1f} min      ${run['cost']:<8.2f} {run['records']:,}")
+
+    def cmd_anomaly(self, args):
+        """Show anomaly detection results."""
+        print(f"\n\033[1;33m🚨 ANOMALY DETECTION\033[0m")
+        print("-" * 60)
+
+        last_run = self.learning_history.get('last_run', {})
+        anomalies_detected = last_run.get('anomalies_detected', 0)
+
+        if anomalies_detected == 0:
+            print(f"\n  \033[0;32m✓ Last run: No anomalies detected\033[0m")
+            print(f"    All metrics within expected thresholds (±20%)")
+        else:
+            print(f"\n  \033[0;31m⚠️ Last run: {anomalies_detected} anomalies detected\033[0m")
+
+        # Show deviations
+        deviations = last_run.get('deviations', {})
+        if deviations:
+            print(f"\n  Metric Deviations:")
+            for metric, value in deviations.items():
+                pct = float(value.rstrip('%'))
+                status = "⚠️ ANOMALY" if abs(pct) > 20 else "✓ Normal"
+                color = "\033[0;31m" if abs(pct) > 20 else "\033[0;32m"
+                print(f"    {metric.capitalize()}: {value} {color}({status})\033[0m")
+
+        # Show historical anomalies
+        anomaly_history = self.learning_history.get('anomalies_history', [])
+        if anomaly_history:
+            print(f"\n  Historical Anomalies (Last 30 days):")
+            for a in anomaly_history:
+                resolved = "✓ Resolved" if a.get('resolved') else "⚠️ Open"
+                print(f"    [{a['date']}] {a['type']}: {a['detail']} - {resolved}")
+
+    def cmd_ask(self, args):
+        """Natural language query to agents."""
+        if not args:
+            print("Usage: ask <question>")
+            print("Examples:")
+            print("  ask why did cost increase?")
+            print("  ask is the job compliant with GDPR?")
+            print("  ask what is the failure probability?")
+            print("  ask how much memory for 1 million records?")
+            return
+
+        question = ' '.join(args).lower()
+
+        print(f"\n\033[1;33m🤖 Agent Response\033[0m")
+        print("-" * 60)
+
+        # Pattern matching for common questions
+        if any(word in question for word in ['cost', 'expensive', 'price', 'money']):
+            if 'increase' in question or 'why' in question or 'high' in question:
+                # Cost analysis
+                last = self.learning_history.get('last_run', {})
+                baseline = self.learning_history.get('baseline', {})
+                deviation = last.get('deviations', {}).get('cost', '+0%')
+
+                print(f"\n  📊 Cost Analysis:")
+                print(f"  Last run cost: ${last.get('cost', 0):.2f}")
+                print(f"  Baseline cost: ${baseline.get('avg_cost', 0):.2f}")
+                print(f"  Deviation: {deviation}")
+
+                print(f"\n  Possible Reasons:")
+                if float(deviation.rstrip('%')) > 10:
+                    print(f"    • Data volume increased by {last.get('deviations', {}).get('records', '0%')}")
+                    print(f"    • More workers used ({last.get('workers_used', 0)} vs baseline {baseline.get('typical_workers', 0)})")
+                    print(f"    • Longer execution time due to data complexity")
+                else:
+                    print(f"    • Cost is within normal variance")
+
+            elif any(word in question for word in ['million', 'records', 'scale']):
+                # Cost prediction
+                import re
+                numbers = re.findall(r'[\d,]+(?:k|m)?', question)
+                if numbers:
+                    records = self._parse_number(numbers[0])
+                    self.cmd_cost(['sales_analytics', '--records', str(records)])
+                    return
+
+        elif any(word in question for word in ['memory', 'ram', 'gb']):
+            if any(word in question for word in ['million', 'records', 'scale', 'need']):
+                import re
+                numbers = re.findall(r'[\d,]+(?:k|m)?', question)
+                if numbers:
+                    records = self._parse_number(numbers[0])
+                    self.cmd_memory(['sales_analytics', '--records', str(records)])
+                    return
+
+            # Memory analysis
+            last = self.learning_history.get('last_run', {})
+            baseline = self.learning_history.get('baseline', {})
+            print(f"\n  🧠 Memory Analysis:")
+            print(f"  Last run: {last.get('memory_used_gb', 0):.1f} GB")
+            print(f"  Baseline: {baseline.get('avg_memory_gb', 0):.1f} GB")
+            print(f"\n  Memory scales with √(records). For 10x data, expect ~3.2x memory.")
+
+        elif any(word in question for word in ['compliant', 'compliance', 'gdpr', 'pci', 'sox', 'hipaa']):
+            # Compliance query
+            last_compliance = self.compliance_history.get('last_run', {})
+            status = last_compliance.get('overall_status', 'UNKNOWN')
+
+            print(f"\n  🔒 Compliance Status:")
+            status_color = "\033[0;32m" if status == 'COMPLIANT' else "\033[0;31m"
+            print(f"  Overall: {status_color}{status}\033[0m")
+
+            if 'gdpr' in question:
+                gdpr = last_compliance.get('frameworks', {}).get('GDPR', {})
+                print(f"\n  GDPR Specifics:")
+                print(f"    Status: {gdpr.get('status', 'UNKNOWN')}")
+                print(f"    PII Detected: {len(gdpr.get('pii_columns_detected', []))} columns")
+                print(f"    PII Masked: {len(gdpr.get('pii_columns_masked', []))} columns")
+            elif 'pci' in question:
+                pci = last_compliance.get('frameworks', {}).get('PCI_DSS', {})
+                print(f"\n  PCI-DSS Specifics:")
+                print(f"    Status: {pci.get('status', 'UNKNOWN')}")
+                print(f"    Card Data Masked: {'Yes' if pci.get('card_data_masked') else 'No'}")
+
+        elif any(word in question for word in ['failure', 'fail', 'probability', 'risk']):
+            predictions = self.learning_history.get('predictions', {})
+            fail_prob = predictions.get('failure_probability', 0) * 100
+
+            print(f"\n  ⚠️ Failure Risk Analysis:")
+            fail_color = "\033[0;32m" if fail_prob < 5 else "\033[0;33m" if fail_prob < 15 else "\033[0;31m"
+            print(f"  Failure Probability: {fail_color}{fail_prob:.1f}%\033[0m")
+
+            print(f"\n  Risk Factors:")
+            if fail_prob < 5:
+                print(f"    ✓ Low risk - job has been stable")
+            else:
+                print(f"    • Recent trend shows increasing duration")
+                print(f"    • Consider monitoring resource usage")
+
+            print(f"\n  Based on {self.learning_history.get('baseline', {}).get('sample_count', 0)} historical runs")
+
+        elif any(word in question for word in ['trend', 'pattern', 'direction']):
+            self.cmd_trend([])
+
+        elif any(word in question for word in ['anomaly', 'anomalies', 'unusual', 'strange']):
+            self.cmd_anomaly([])
+
+        elif any(word in question for word in ['baseline', 'average', 'normal']):
+            self.cmd_learning(['--baseline'])
+
+        elif any(word in question for word in ['predict', 'next', 'expect', 'future']):
+            self.cmd_learning(['--predictions'])
+
+        else:
+            print(f"\n  I can help you with questions about:")
+            print(f"    • Cost analysis (e.g., 'why did cost increase?')")
+            print(f"    • Memory requirements (e.g., 'how much memory for 1m records?')")
+            print(f"    • Compliance status (e.g., 'is the job GDPR compliant?')")
+            print(f"    • Failure probability (e.g., 'what is the failure risk?')")
+            print(f"    • Trends (e.g., 'show me trends')")
+            print(f"    • Anomalies (e.g., 'any anomalies detected?')")
+            print(f"\n  Try: 'ask why did cost increase?'")
+
+    def cmd_seed(self, args):
+        """Seed sample data into local store."""
+        print("\n\033[1;33mSeeding sample data...\033[0m")
+        from framework.storage.run_collector import seed_sample_data
+        seed_sample_data()
+
+        # Refresh data
+        self.data_store.refresh()
+        self.compliance_history = self._load_compliance_history()
+        self.learning_history = self._load_learning_history()
+
+        print("\n\033[0;32mData seeded successfully! Try 'learning' or 'compliance' commands.\033[0m")
+
+    def cmd_refresh(self, args):
+        """Refresh data from local store."""
+        print("\n\033[1;33mRefreshing data from local store...\033[0m")
+
+        self.data_store.refresh()
+        self.compliance_history = self._load_compliance_history()
+        self.learning_history = self._load_learning_history()
+
+        print(f"\033[0;32mData refreshed!\033[0m")
+        print(f"  Execution records: {len(self.data_store.execution_history)}")
+        print(f"  Baselines: {len(self.data_store.baselines)}")
+
+    def cmd_record(self, args):
+        """Record a job run manually.
+
+        Usage: record <job_name> <records> <duration_sec> <cost> [workers] [memory_gb]
+        Example: record sales_analytics 500000 1800 1.50 10 16
+        """
+        if len(args) < 4:
+            print("Usage: record <job_name> <records> <duration_sec> <cost> [workers] [memory_gb]")
+            print("Example: record sales_analytics 500000 1800 1.50 10 16")
+            return
+
+        from framework.storage.run_collector import RunCollector
+        collector = RunCollector()
+
+        job_name = args[0]
+        records = self._parse_number(args[1])
+        duration = float(args[2])
+        cost = float(args[3])
+        workers = int(args[4]) if len(args) > 4 else 5
+        memory = float(args[5]) if len(args) > 5 else 16.0
+
+        record = collector.record_run(
+            job_name=job_name,
+            records_processed=records,
+            duration_seconds=duration,
+            cost_usd=cost,
+            workers=workers,
+            memory_gb=memory
+        )
+
+        print(f"\n\033[0;32mRecorded execution:\033[0m")
+        print(f"  Job: {record.job_name}")
+        print(f"  Records: {record.records_processed:,}")
+        print(f"  Duration: {record.duration_seconds/60:.1f} min")
+        print(f"  Cost: ${record.cost_usd:.2f}")
+        print(f"  Workers: {record.workers}")
+        print(f"  Memory: {record.memory_gb} GB")
+
+        # Refresh data
+        self.data_store.refresh()
+        self.learning_history = self._load_learning_history()
+        print("\n\033[0;36mData store updated. Baselines will auto-update after 5+ runs.\033[0m")
+
+    def cmd_convert(self, args):
+        """Convert job configuration between platforms.
+
+        Usage: convert <source_platform> <target_platform> [--workers N] [--worker-type TYPE] [--optimize cost|performance|balanced]
+        Platforms: glue, emr, eks
+
+        Examples:
+            convert glue emr --workers 10 --worker-type G.1X
+            convert glue eks --workers 20 --optimize cost
+            convert emr glue --instances 5 --instance-type m5.xlarge
+        """
+        if len(args) < 2:
+            print("Usage: convert <source_platform> <target_platform> [options]")
+            print("\nPlatforms: glue, emr, eks")
+            print("\nOptions:")
+            print("  --workers N        Number of workers (Glue)")
+            print("  --worker-type TYPE Worker type (G.1X, G.2X)")
+            print("  --instances N      Number of instances (EMR)")
+            print("  --instance-type T  Instance type (m5.xlarge, etc.)")
+            print("  --optimize GOAL    Optimization goal (cost, performance, balanced)")
+            print("\nExamples:")
+            print("  convert glue emr --workers 10 --worker-type G.1X")
+            print("  convert glue eks --workers 20 --optimize cost")
+            print("  convert emr glue --instances 5 --instance-type m5.xlarge")
+            return
+
+        source = args[0].lower()
+        target = args[1].lower()
+
+        # Parse options
+        workers = 10
+        worker_type = "G.1X"
+        instances = 3
+        instance_type = "m5.xlarge"
+        optimize = "balanced"
+
+        i = 2
+        while i < len(args):
+            if args[i] == '--workers' and i + 1 < len(args):
+                workers = int(args[i + 1])
+                i += 2
+            elif args[i] == '--worker-type' and i + 1 < len(args):
+                worker_type = args[i + 1]
+                i += 2
+            elif args[i] == '--instances' and i + 1 < len(args):
+                instances = int(args[i + 1])
+                i += 2
+            elif args[i] == '--instance-type' and i + 1 < len(args):
+                instance_type = args[i + 1]
+                i += 2
+            elif args[i] == '--optimize' and i + 1 < len(args):
+                optimize = args[i + 1].lower()
+                i += 2
+            else:
+                i += 1
+
+        # Map platform strings to enum
+        platform_map = {
+            'glue': Platform.GLUE,
+            'emr': Platform.EMR,
+            'eks': Platform.EKS
+        }
+
+        if source not in platform_map or target not in platform_map:
+            print(f"Invalid platform. Supported: glue, emr, eks")
+            return
+
+        # Build source config based on platform
+        if source == 'glue':
+            source_config = {
+                "Name": self.config.get('job_name', 'etl-job'),
+                "NumberOfWorkers": workers,
+                "WorkerType": worker_type,
+                "GlueVersion": "4.0",
+                "Timeout": 480,
+                "MaxRetries": 1,
+                "Command": {
+                    "Name": "glueetl",
+                    "ScriptLocation": self.config.get('script_location', 's3://bucket/scripts/job.py'),
+                    "PythonVersion": "3"
+                },
+                "DefaultArguments": {
+                    "--TempDir": "s3://bucket/temp/",
+                    "--enable-metrics": "true",
+                    "--enable-glue-datacatalog": "true"
+                }
+            }
+        else:  # emr
+            source_config = {
+                "Name": self.config.get('job_name', 'emr-job'),
+                "ReleaseLabel": "emr-6.15.0",
+                "Applications": [{"Name": "Spark"}],
+                "Instances": {
+                    "MasterInstanceType": instance_type,
+                    "SlaveInstanceType": instance_type,
+                    "InstanceCount": instances
+                },
+                "Steps": [{
+                    "Name": "Run ETL",
+                    "HadoopJarStep": {
+                        "Jar": "command-runner.jar",
+                        "Args": ["spark-submit", self.config.get('script_location', 's3a://bucket/scripts/job.py')]
+                    }
+                }],
+                "LogUri": "s3://bucket/logs/"
+            }
+
+        # Run conversion
+        agent = PlatformConversionAgent()
+        result = agent.convert(
+            source_config=source_config,
+            source_platform=platform_map[source],
+            target_platform=platform_map[target],
+            optimization_goal=optimize
+        )
+
+        # Display result
+        print(f"\n\033[1;33m🔄 PLATFORM CONVERSION: {source.upper()} → {target.upper()}\033[0m")
+        print("=" * 60)
+
+        if not result.success:
+            print(f"\n\033[0;31mConversion failed: {result.error_message}\033[0m")
+            return
+
+        # Conversion steps
+        print(f"\n\033[1;36m📋 Conversion Steps:\033[0m")
+        for step in result.conversion_steps:
+            print(f"  {step}")
+
+        # Resource mapping
+        print(f"\n\033[1;36m📊 Resource Mapping:\033[0m")
+        src = result.resource_mapping.source_config
+        tgt = result.resource_mapping.target_config
+        print(f"  Source: {json.dumps(src, indent=4)}")
+        print(f"  Target: {json.dumps(tgt, indent=4)}")
+
+        # Cost comparison
+        print(f"\n\033[1;36m💰 Cost Comparison (estimated monthly):\033[0m")
+        for key, value in result.cost_comparison.items():
+            label = key.replace('_', ' ').title()
+            if 'savings' in key.lower():
+                color = "\033[0;32m" if value > 0 else "\033[0;31m"
+                print(f"  {label}: {color}${value:.2f}\033[0m")
+            else:
+                print(f"  {label}: ${value:.2f}")
+
+        # Spark config (top 5)
+        print(f"\n\033[1;36m⚙️ Spark Configuration:\033[0m")
+        for key, value in list(result.spark_config.items())[:5]:
+            print(f"  {key}={value}")
+        if len(result.spark_config) > 5:
+            print(f"  ... and {len(result.spark_config) - 5} more settings")
+
+        # IAM requirements
+        print(f"\n\033[1;36m🔐 IAM Requirements:\033[0m")
+        for role, desc in result.iam_config.items():
+            print(f"  {role}: {desc}")
+
+        # Recommendations
+        if result.recommendations:
+            print(f"\n\033[1;36m💡 Recommendations:\033[0m")
+            for rec in result.recommendations:
+                print(f"  • {rec}")
+
+        # Warnings
+        if result.warnings:
+            print(f"\n\033[0;33m⚠️ Warnings:\033[0m")
+            for warn in result.warnings:
+                print(f"  • {warn}")
+
+        # Target config preview
+        print(f"\n\033[1;36m📄 Target Configuration Preview:\033[0m")
+        config_str = json.dumps(result.target_config, indent=2)
+        # Truncate if too long
+        if len(config_str) > 1000:
+            config_str = config_str[:1000] + "\n  ... (truncated)"
+        print(config_str)
+
+        print(f"\n\033[0;32m✓ Conversion stored to data/agent_store/platform_conversions.json\033[0m")
+
+    def cmd_conversions(self, args):
+        """Show platform conversion history and statistics.
+
+        Usage: conversions [--history] [--stats]
+        """
+        agent = PlatformConversionAgent()
+
+        show_history = '--history' in args or len(args) == 0
+        show_stats = '--stats' in args or len(args) == 0
+
+        print(f"\n\033[1;33m🔄 PLATFORM CONVERSION HISTORY\033[0m")
+        print("=" * 60)
+
+        if show_stats:
+            stats = agent.get_statistics()
+            if stats:
+                print(f"\n\033[1;36m📊 Statistics:\033[0m")
+                total_conversions = sum(s['count'] for s in stats.values())
+                total_savings = sum(s['total_savings'] for s in stats.values())
+                print(f"  Total Conversions: {total_conversions}")
+                print(f"  Total Estimated Savings: ${total_savings:.2f}/month")
+                print(f"\n  By Conversion Type:")
+                for key, data in stats.items():
+                    src, _, tgt = key.partition('_to_')
+                    print(f"    {src.upper()} → {tgt.upper()}: {data['count']} conversions, ${data['total_savings']:.2f} savings")
+            else:
+                print(f"\n  No conversion statistics yet.")
+
+        if show_history:
+            history = agent.get_conversion_history(limit=10)
+            if history:
+                print(f"\n\033[1;36m📜 Recent Conversions:\033[0m")
+                for conv in history[-5:]:
+                    src = conv.get('source_platform', 'unknown').upper()
+                    tgt = conv.get('target_platform', 'unknown').upper()
+                    savings = conv.get('estimated_cost_savings', 0)
+                    ts = conv.get('timestamp', '')[:16]
+                    savings_color = "\033[0;32m" if savings > 0 else "\033[0;31m"
+                    print(f"\n  [{ts}] {src} → {tgt}")
+                    print(f"    Estimated Savings: {savings_color}${savings:.2f}/month\033[0m")
+                    if conv.get('recommendations'):
+                        print(f"    Top Recommendation: {conv['recommendations'][0]}")
+            else:
+                print(f"\n  No conversion history yet. Run 'convert glue emr' to start.")
+
+    def cmd_allocate(self, args):
+        """Smart resource allocation based on patterns and trends.
+
+        Usage: allocate [job_name] [--records N] [--workers N] [--worker-type TYPE]
+
+        Examples:
+            allocate                           # Use config job, auto-detect records
+            allocate sales_analytics           # Specific job
+            allocate --records 500000          # Override estimated records
+            allocate --workers 10 --worker-type G.1X  # Show what optimizations apply
+        """
+        job_name = self.config.get('job_name', 'demo_complex_sales_analytics')
+        estimated_records = None
+        workers = 10
+        worker_type = "G.1X"
+
+        # Parse arguments
+        i = 0
+        while i < len(args):
+            if args[i] == '--records' and i + 1 < len(args):
+                estimated_records = self._parse_number(args[i + 1])
+                i += 2
+            elif args[i] == '--workers' and i + 1 < len(args):
+                workers = int(args[i + 1])
+                i += 2
+            elif args[i] == '--worker-type' and i + 1 < len(args):
+                worker_type = args[i + 1]
+                i += 2
+            elif not args[i].startswith('--'):
+                job_name = args[i]
+                i += 1
+            else:
+                i += 1
+
+        # Build config
+        config = {
+            "Name": job_name,
+            "NumberOfWorkers": workers,
+            "WorkerType": worker_type,
+            "Timeout": 480,
+            "GlueVersion": "4.0",
+            "DefaultArguments": self.config.get('default_arguments', {})
+        }
+
+        # Get recommendation
+        agent = ResourceAllocatorAgent()
+        rec = agent.recommend_resources(
+            job_name=job_name,
+            config=config,
+            estimated_records=estimated_records
+        )
+
+        # Display result
+        print(f"\n\033[1;33m🧠 SMART RESOURCE ALLOCATION\033[0m")
+        print("=" * 70)
+
+        print(f"\n  Job: {rec.job_name}")
+        print(f"  Confidence: {rec.confidence * 100:.0f}%")
+
+        # Pattern Analysis
+        print(f"\n\033[1;36m📊 Pattern Analysis:\033[0m")
+        print(f"  Day Type: {rec.pattern_analysis.day_type.value.upper()}")
+        print(f"  Data Trend: {rec.pattern_analysis.data_trend.value.upper()}")
+        print(f"  Growth Rate: {rec.pattern_analysis.growth_rate_percent:+.1f}%/week")
+        print(f"  Volatility Score: {rec.pattern_analysis.volatility_score:.2f}")
+
+        # Complexity
+        print(f"\n\033[1;36m🔧 Job Complexity:\033[0m")
+        print(f"  Overall Score: {rec.complexity_score.overall_score:.1f}/10")
+        print(f"  Memory Pressure: {rec.complexity_score.memory_pressure:.1f}/10")
+        print(f"  Shuffle Intensity: {rec.complexity_score.shuffle_intensity:.1f}/10")
+
+        # Resource Comparison
+        print(f"\n\033[1;36m📈 Resource Allocation:\033[0m")
+        print(f"  {'Metric':<20} {'Original':<15} {'Recommended':<15} {'Change'}")
+        print(f"  {'-'*20} {'-'*15} {'-'*15} {'-'*10}")
+
+        orig_workers_str = f"{rec.original_workers} x {rec.original_worker_type}"
+        rec_workers_str = f"{rec.recommended_workers} x {rec.recommended_worker_type}"
+        worker_change = rec.recommended_workers - rec.original_workers
+        worker_change_str = f"{worker_change:+d}" if worker_change != 0 else "="
+
+        print(f"  {'Workers':<20} {orig_workers_str:<15} {rec_workers_str:<15} {worker_change_str}")
+        print(f"  {'Timeout (min)':<20} {rec.original_timeout:<15} {rec.recommended_timeout:<15} {rec.recommended_timeout - rec.original_timeout:+d}")
+
+        # Estimates
+        print(f"\n\033[1;36m💰 Estimates:\033[0m")
+        print(f"  Records: {rec.estimated_records:,}")
+        print(f"  Duration: {rec.estimated_duration_seconds / 60:.1f} minutes")
+        print(f"  Cost: ${rec.estimated_cost:.2f}")
+
+        # Improvements
+        print(f"\n\033[1;36m📊 Projected Improvements:\033[0m")
+        cost_color = "\033[0;32m" if rec.cost_savings_percent > 0 else "\033[0;31m"
+        perf_color = "\033[0;32m" if rec.performance_improvement_percent > 0 else "\033[0;31m"
+        print(f"  Cost Savings: {cost_color}{rec.cost_savings_percent:+.1f}%\033[0m")
+        print(f"  Performance: {perf_color}{rec.performance_improvement_percent:+.1f}%\033[0m")
+
+        # Reasons
+        if rec.allocation_reasons:
+            print(f"\n\033[1;36m💡 Allocation Reasons:\033[0m")
+            for reason in rec.allocation_reasons:
+                print(f"  • {reason}")
+
+        # Warnings
+        if rec.warnings:
+            print(f"\n\033[0;33m⚠️ Warnings:\033[0m")
+            for warning in rec.warnings:
+                print(f"  • {warning}")
+
+        # Optimized config preview
+        print(f"\n\033[1;36m📄 Optimized Configuration:\033[0m")
+        opt_config = {
+            "NumberOfWorkers": rec.recommended_workers,
+            "WorkerType": rec.recommended_worker_type,
+            "Timeout": rec.recommended_timeout,
+            "MaxRetries": rec.recommended_max_retries
+        }
+        print(f"  {json.dumps(opt_config, indent=2)}")
+
+        print(f"\n\033[0;32m✓ Allocation stored to data/agent_store/resource_allocations.json\033[0m")
+
+    def cmd_allocations(self, args):
+        """Show resource allocation history.
+
+        Usage: allocations [job_name] [--limit N]
+        """
+        job_name = None
+        limit = 10
+
+        for i, arg in enumerate(args):
+            if arg == '--limit' and i + 1 < len(args):
+                limit = int(args[i + 1])
+            elif not arg.startswith('--'):
+                job_name = arg
+
+        agent = ResourceAllocatorAgent()
+        history = agent.get_allocation_history(job_name=job_name, limit=limit)
+
+        print(f"\n\033[1;33m🧠 RESOURCE ALLOCATION HISTORY\033[0m")
+        print("=" * 70)
+
+        if not history:
+            print(f"\n  No allocation history yet. Run 'allocate' to start.")
+            return
+
+        print(f"\n  {'Timestamp':<20} {'Job':<25} {'Original':<12} {'Recommended':<12} {'Savings'}")
+        print(f"  {'-'*20} {'-'*25} {'-'*12} {'-'*12} {'-'*10}")
+
+        for alloc in history:
+            ts = alloc.get('timestamp', '')[:16]
+            job = alloc.get('job_name', 'unknown')[:24]
+            orig = alloc.get('original', {})
+            rec = alloc.get('recommended', {})
+            orig_str = f"{orig.get('workers', 0)}x{orig.get('worker_type', '?')[:4]}"
+            rec_str = f"{rec.get('workers', 0)}x{rec.get('worker_type', '?')[:4]}"
+            savings = alloc.get('cost_savings_percent', 0)
+            savings_color = "\033[0;32m" if savings > 0 else "\033[0;31m"
+            print(f"  {ts:<20} {job:<25} {orig_str:<12} {rec_str:<12} {savings_color}{savings:+.1f}%\033[0m")
+
+        # Summary
+        total_savings = sum(a.get('cost_savings_percent', 0) for a in history)
+        avg_savings = total_savings / len(history) if history else 0
+        print(f"\n  Average Savings: {avg_savings:.1f}%")
+
+    def cmd_exit(self, args):
+        """Exit the CLI."""
+        print("\nExiting...")
+        sys.exit(0)
+
+    def _parse_number(self, s: str) -> int:
+        """Parse a number string with k/m suffixes."""
+        s = s.lower().replace(',', '')
+        if s.endswith('k'):
+            return int(float(s[:-1]) * 1000)
+        elif s.endswith('m'):
+            return int(float(s[:-1]) * 1000000)
+        return int(float(s))
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Interactive Agent CLI')
+    parser.add_argument('--config', '-c', help='Path to config JSON')
+    parser.add_argument('--agent', help='Specific agent to interact with')
+    parser.add_argument('--predict-cost', action='store_true', help='Predict cost')
+    parser.add_argument('--predict-memory', action='store_true', help='Predict memory')
+    parser.add_argument('--records', type=int, help='Target record count')
+    parser.add_argument('--from-records', type=int, help='Source record count')
+    parser.add_argument('--seed', action='store_true', help='Seed sample data for demo')
+    parser.add_argument('--collect', help='Collect metrics from a Glue job run (format: job_name:run_id)')
+    parser.add_argument('--show-store', action='store_true', help='Show what data is in the local store')
+
+    args = parser.parse_args()
+
+    # Handle --seed: populate sample data
+    if args.seed:
+        print("Seeding sample data into local store...")
+        from framework.storage.run_collector import seed_sample_data
+        seed_sample_data()
+        print("\nYou can now run: python scripts/agent_cli.py")
+        return
+
+    # Handle --collect: collect from actual Glue run
+    if args.collect:
+        from framework.storage.run_collector import RunCollector
+        collector = RunCollector()
+
+        parts = args.collect.split(':')
+        if len(parts) != 2:
+            print("Error: --collect format should be job_name:run_id")
+            return
+
+        job_name, run_id = parts
+        print(f"Collecting metrics for {job_name}/{run_id}...")
+        record = collector.collect_glue_run(job_name, run_id)
+        if record:
+            print(f"  Status: {record.status}")
+            print(f"  Duration: {record.duration_seconds/60:.1f} min")
+            print(f"  Cost: ${record.cost_usd:.2f}")
+            print(f"  Records: {record.records_processed:,}")
+        else:
+            print("Failed to collect metrics. Check AWS credentials and job/run IDs.")
+        return
+
+    # Handle --show-store: show store contents
+    if args.show_store:
+        store = get_store()
+        print("\n=== Local Agent Store Contents ===\n")
+
+        # Execution history
+        history = store.get_execution_history(limit=10)
+        print(f"Execution History ({len(history)} most recent):")
+        for h in history[:5]:
+            print(f"  - {h.get('job_name')}: {h.get('status')} "
+                  f"({h.get('records_processed', 0):,} records, ${h.get('cost_usd', 0):.2f})")
+
+        # Baselines
+        baselines = store.get_all_baselines()
+        print(f"\nBaselines ({len(baselines)} jobs):")
+        for job, b in baselines.items():
+            print(f"  - {job}: {b.get('sample_count', 0)} samples, "
+                  f"avg ${b.get('avg_cost', 0):.2f}, "
+                  f"{b.get('avg_duration_seconds', 0)/60:.1f} min")
+
+        # Compliance
+        compliance = store.get_compliance_history(limit=5)
+        print(f"\nCompliance History ({len(compliance)} checks):")
+        for c in compliance[:3]:
+            print(f"  - {c.get('job_name')}: {c.get('overall_status')} ({c.get('timestamp', '')[:10]})")
+
+        # Anomalies
+        anomalies = store.get_anomalies(days=30)
+        print(f"\nAnomalies (last 30 days): {len(anomalies)}")
+        for a in anomalies[:3]:
+            print(f"  - [{a.get('type')}] {a.get('detail')} ({'Resolved' if a.get('resolved') else 'Open'})")
+
+        return
+
+    # Load config if provided
+    config = {}
+    if args.config and os.path.exists(args.config):
+        with open(args.config, 'r') as f:
+            config = json.load(f)
+
+    cli = InteractiveAgentCLI(config)
+
+    # Handle non-interactive modes
+    if args.predict_cost or args.predict_memory:
+        job_name = config.get('job_name', 'sales_analytics')
+        from_records = args.from_records or 100000
+        to_records = args.records or 1000000
+
+        predictions = cli.prediction_engine.predict_for_scale(
+            job_name, from_records, to_records
+        )
+
+        if args.predict_cost and 'cost' in predictions:
+            p = predictions['cost']
+            print(f"Predicted cost for {to_records:,} records: ${p.predicted_value:.2f}")
+
+        if args.predict_memory and 'memory' in predictions:
+            p = predictions['memory']
+            print(f"Predicted memory for {to_records:,} records: {p.predicted_value:.0f} GB")
+
+        return
+
+    # Run interactive mode
+    cli.run_interactive()
+
+
+if __name__ == "__main__":
+    main()

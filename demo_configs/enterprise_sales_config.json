@@ -1,0 +1,473 @@
+{
+  "_description": "Complex Enterprise Sales Analytics - Multi-Domain Insurance/Finance Pipeline",
+  "_framework": "Strands SDK Multi-Agent ETL Framework",
+  "_use_case": "21 source tables across insurance, finance, marketing, claims - joins to single target",
+  "_target": "bd_work.pps_jss_test",
+
+  "job_name": "complex_enterprise_sales",
+  "job_description": "Enterprise sales analytics joining 21 source tables across insurance, finance, marketing, claims domains",
+
+  "script": {
+    "path": "s3://etl-framework-scripts/pyspark/complex_enterprise_sales.py",
+    "local_path": "scripts/pyspark/complex_enterprise_sales.py",
+    "type": "pyspark"
+  },
+
+  "job_arguments": {
+    "--source_database": "multiple",
+    "--target_database": "bd_work",
+    "--target_table": "pps_jss_test",
+    "--run_mode": "full",
+    "--partition_date": "{{ ds }}"
+  },
+
+  "storage": {
+    "primary_backend": "s3",
+    "fallback_backend": "local",
+    "s3_bucket": "enterprise-etl-data",
+    "s3_prefix": "etl-data/",
+    "local_base_path": "data/agent_store",
+    "dynamo_table_prefix": "etl_",
+    "dynamo_region": "us-east-1"
+  },
+
+  "athena": {
+    "output_location": "s3://enterprise-etl-data/athena-results/",
+    "workgroup": "primary"
+  },
+
+  "agents": {
+    "sizing_agent": { "enabled": "Y" },
+    "compliance_agent": { "enabled": "Y" },
+    "code_analysis_agent": { "enabled": "Y" },
+    "resource_allocator_agent": { "enabled": "Y" },
+    "data_quality_agent": { "enabled": "Y" },
+    "healing_agent": { "enabled": "Y" },
+    "platform_conversion_agent": { "enabled": "N" },
+    "code_conversion_agent": { "enabled": "N" },
+    "execution_agent": { "enabled": "Y" },
+    "learning_agent": { "enabled": "Y" },
+    "recommendation_agent": { "enabled": "Y" }
+  },
+
+  "source_sizing": {
+    "mode": "auto_detect",
+    "estimated_size_gb": 150,
+    "delta_mode": {
+      "enabled": "Y",
+      "partition_column": "process_date"
+    }
+  },
+
+  "smart_allocation": {
+    "enabled": "Y",
+    "force_from_config": "N",
+    "weekend_scale_factor": 0.6,
+    "month_end_scale_factor": 1.5,
+    "quarter_end_scale_factor": 2.0,
+    "complexity_factors": {
+      "join_count_weight": 1.5,
+      "window_function_weight": 2.0,
+      "aggregation_weight": 1.2
+    }
+  },
+
+  "glue_config": {
+    "glue_version": "4.0",
+    "worker_type": "G.2X",
+    "number_of_workers": 20,
+    "timeout_minutes": 360,
+    "max_retries": 2,
+    "spark_configs": {
+      "spark.sql.adaptive.enabled": "true",
+      "spark.sql.adaptive.coalescePartitions.enabled": "true",
+      "spark.sql.adaptive.skewJoin.enabled": "true",
+      "spark.sql.shuffle.partitions": "400",
+      "spark.sql.broadcastTimeout": "600",
+      "spark.dynamicAllocation.enabled": "true"
+    }
+  },
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr", "eks"],
+    "auto_convert": {
+      "enabled": "N",
+      "convert_to_emr_threshold_gb": 100,
+      "convert_to_eks_threshold_gb": 500
+    }
+  },
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_critical": "Y",
+    "athena_workgroup": "primary",
+    "athena_output_location": "s3://enterprise-etl-data/athena-dq-results/",
+    "query_timeout_seconds": 300,
+
+    "pre_load_rules": [
+      {
+        "table": "life_insurance_base.life_policy",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 1000000, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "modal_premium", "threshold": 100, "severity": "warning" },
+          { "type": "completeness", "column": "product_line", "threshold": 0.95, "severity": "warning" },
+          { "type": "positive", "column": "modal_premium", "threshold": 0, "severity": "critical" }
+        ]
+      },
+      {
+        "table": "finance_accounting_master.autopay_products_master",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 1000, "severity": "warning" },
+          { "type": "not_null", "column": "product_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "product_name", "threshold": 0.99, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "customer_master.customer_product_profile_history_master",
+        "rules": [
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "email", "threshold": 0.90, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "insurance_master.auto_policy_driver_master",
+        "rules": [
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "driver_id", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "license_number", "threshold": 0.95, "severity": "warning" }
+        ]
+      },
+      {
+        "table": "claims_master.enterprise_claims_master",
+        "rules": [
+          { "type": "not_null", "column": "claim_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "positive", "column": "claim_amount", "threshold": 0, "severity": "critical" }
+        ]
+      },
+      {
+        "table": "membership_master.membership_sales_master",
+        "rules": [
+          { "type": "not_null", "column": "membership_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" }
+        ]
+      }
+    ],
+
+    "post_load_rules": [
+      {
+        "table": "bd_work.pps_jss_test",
+        "rules": [
+          { "type": "row_count_check", "min_rows": 500000, "severity": "critical" },
+          { "type": "not_null", "column": "customer_id", "threshold": 0, "severity": "critical" },
+          { "type": "not_null", "column": "policy_number", "threshold": 0, "severity": "critical" },
+          { "type": "completeness", "column": "premium_amount", "threshold": 0.99, "severity": "warning" },
+          { "type": "completeness", "column": "effective_date", "threshold": 0.99, "severity": "warning" }
+        ]
+      }
+    ],
+
+    "sql_rules": [
+      {
+        "id": "SQL_ORPHAN_POLICIES",
+        "description": "Policies without matching customer",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE customer_id IS NULL OR customer_id = ''",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_FUTURE_EFFECTIVE_DATE",
+        "description": "No policies with future effective dates",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE effective_date > CURRENT_DATE",
+        "threshold": 100,
+        "severity": "warning"
+      },
+      {
+        "id": "SQL_NEGATIVE_PREMIUM",
+        "description": "No negative premium amounts",
+        "sql": "SELECT COUNT(*) FROM bd_work.pps_jss_test WHERE premium_amount < 0",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_DUPLICATE_POLICIES",
+        "description": "Check for duplicate policy records",
+        "sql": "SELECT COUNT(*) - COUNT(DISTINCT policy_number) FROM bd_work.pps_jss_test WHERE policy_number IS NOT NULL",
+        "threshold": 100,
+        "severity": "warning"
+      }
+    ]
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"],
+
+    "pii_patterns": {
+      "name": ["first_name", "last_name", "full_name", "customer_name", "driver_name", "insured_name"],
+      "email": ["email", "email_address", "contact_email"],
+      "phone": ["phone", "phone_number", "mobile", "cell", "contact_phone"],
+      "address": ["address", "street", "city", "state", "zip", "postal", "mailing_address"],
+      "ssn": ["ssn", "social_security", "tax_id", "tin"],
+      "financial": ["credit_card", "card_number", "account_number", "routing", "bank_account"],
+      "id": ["customer_id", "member_id", "policy_number", "driver_license", "license_number"],
+      "health": ["diagnosis", "prescription", "medical", "health", "condition"],
+      "dob": ["date_of_birth", "dob", "birth_date", "birthdate"]
+    },
+
+    "table_scans": [
+      {
+        "table": "life_insurance_base.life_policy",
+        "check_pii": true,
+        "frameworks": ["HIPAA", "SOX"]
+      },
+      {
+        "table": "customer_master.customer_product_profile_history_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS"]
+      },
+      {
+        "table": "insurance_master.auto_policy_driver_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "SOX"]
+      },
+      {
+        "table": "claims_master.enterprise_claims_master",
+        "check_pii": true,
+        "frameworks": ["HIPAA", "SOX"]
+      },
+      {
+        "table": "membership_master.membership_sales_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS"]
+      },
+      {
+        "table": "bd_work.pps_jss_test",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"]
+      }
+    ]
+  },
+
+  "learning": {
+    "enabled": "Y",
+    "min_training_records": 5,
+    "models_dir": "data/models",
+    "max_history_records": 500
+  },
+
+  "source_tables": [
+    {
+      "_domain": "LIFE INSURANCE",
+      "database": "life_insurance_base",
+      "table": "life_policy",
+      "format": "parquet",
+      "location": "s3://enterprise-data/life_insurance_base/life_policy/",
+      "partition_column": "process_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "FINANCE",
+      "database": "finance_accounting_master",
+      "table": "autopay_products_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/finance_accounting_master/autopay_products_master/",
+      "auto_detect_size": "Y",
+      "broadcast": true
+    },
+    {
+      "database": "financial_services_datalake",
+      "table": "batch_prescreen_output",
+      "format": "parquet",
+      "location": "s3://enterprise-data/financial_services_datalake/batch_prescreen_output/",
+      "partition_column": "process_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "DIGITAL/CLICKSTREAM",
+      "database": "digital_master",
+      "table": "clickstream_hits_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/digital_master/clickstream_hits_master/",
+      "partition_column": "hit_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "CUSTOMER",
+      "database": "customer_master",
+      "table": "customer_product_profile_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/customer_master/customer_product_profile_history_master/",
+      "partition_column": "snapshot_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "customer_staging",
+      "table": "cpm_drv_tbl",
+      "format": "parquet",
+      "location": "s3://enterprise-data/customer_staging/cpm_drv_tbl/",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "customer_staging",
+      "table": "disaster_zipcodes",
+      "format": "parquet",
+      "location": "s3://enterprise-data/customer_staging/disaster_zipcodes/",
+      "auto_detect_size": "Y",
+      "broadcast": true
+    },
+    {
+      "_domain": "DISCOUNTS",
+      "database": "discounts_master",
+      "table": "discounts_transactions",
+      "format": "parquet",
+      "location": "s3://enterprise-data/discounts_master/discounts_transactions/",
+      "partition_column": "transaction_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "MARKETING",
+      "database": "marketing_master",
+      "table": "email_transactions",
+      "format": "parquet",
+      "location": "s3://enterprise-data/marketing_master/email_transactions/",
+      "partition_column": "send_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "marketing_master",
+      "table": "marketing_product_profile_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/marketing_master/marketing_product_profile_history_master/",
+      "partition_column": "snapshot_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "CLAIMS",
+      "database": "claims_master",
+      "table": "enterprise_claims_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/claims_master/enterprise_claims_master/",
+      "partition_column": "claim_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "GIS/REFERENCE",
+      "database": "ace_common",
+      "table": "gis_lodge_name_assigned_zips",
+      "format": "parquet",
+      "location": "s3://enterprise-data/ace_common/gis_lodge_name_assigned_zips/",
+      "auto_detect_size": "Y",
+      "broadcast": true
+    },
+    {
+      "database": "ace_common",
+      "table": "gis_national_zip_codes",
+      "format": "parquet",
+      "location": "s3://enterprise-data/ace_common/gis_national_zip_codes/",
+      "auto_detect_size": "Y",
+      "broadcast": true
+    },
+    {
+      "_domain": "INSURANCE - AUTO",
+      "database": "insurance_master",
+      "table": "auto_policy_driver_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/insurance_master/auto_policy_driver_master/",
+      "partition_column": "effective_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "insurance_master",
+      "table": "auto_policy_vehicle_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/insurance_master/auto_policy_vehicle_master/",
+      "partition_column": "effective_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "insurance_master",
+      "table": "policy_term_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/insurance_master/policy_term_master/",
+      "auto_detect_size": "Y",
+      "broadcast": true
+    },
+    {
+      "_domain": "INSURANCE - HOME",
+      "database": "insurance_master",
+      "table": "home_policy_property_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/insurance_master/home_policy_property_master/",
+      "partition_column": "effective_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "LIFE INSURANCE",
+      "database": "life_insurance_master",
+      "table": "life_party_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/life_insurance_master/life_party_history_master/",
+      "partition_column": "snapshot_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "life_insurance_master",
+      "table": "life_policy_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/life_insurance_master/life_policy_history_master/",
+      "partition_column": "snapshot_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "database": "life_insurance_master",
+      "table": "policy_transaction_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/life_insurance_master/policy_transaction_history_master/",
+      "partition_column": "transaction_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "CRM",
+      "database": "crm_master",
+      "table": "lead_history_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/crm_master/lead_history_master/",
+      "partition_column": "lead_date",
+      "auto_detect_size": "Y"
+    },
+    {
+      "_domain": "MEMBERSHIP",
+      "database": "membership_master",
+      "table": "membership_sales_master",
+      "format": "parquet",
+      "location": "s3://enterprise-data/membership_master/membership_sales_master/",
+      "partition_column": "sale_date",
+      "auto_detect_size": "Y"
+    }
+  ],
+
+  "target_tables": [
+    {
+      "database": "bd_work",
+      "table": "pps_jss_test",
+      "format": "parquet",
+      "location": "s3://enterprise-data/bd_work/pps_jss_test/",
+      "partition_by": ["process_year", "process_month"],
+      "write_mode": "overwrite_partitions",
+      "enable_statistics": true
+    }
+  ],
+
+  "dry_run": false,
+
+  "schedule": {
+    "enabled": "Y",
+    "cron_expression": "0 5 * * *",
+    "timezone": "America/New_York",
+    "retry_on_failure": "Y",
+    "max_retries": 2
+  }
+}

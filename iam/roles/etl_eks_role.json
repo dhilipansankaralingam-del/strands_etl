@@ -1,0 +1,17 @@
+{
+    "RoleName": "etl-eks-cluster-role",
+    "Description": "IAM role for EKS cluster with EC2, Auto Scaling, and networking access",
+    "TrustPolicy": "eks_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+        "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
+    ],
+    "CustomPolicies": [
+        "eks_etl_policy.json"
+    ],
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

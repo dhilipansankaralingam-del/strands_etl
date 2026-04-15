@@ -1,0 +1,455 @@
+{
+  "job_name": "glue_sales_analytics_pipeline",
+  "description": "Complex Glue ETL: Multi-table joins from catalog, aggregations, DQ checks, all agents enabled",
+
+  "etl_script": {
+    "path": "s3://your-scripts-bucket/glue_scripts/sales_analytics_pipeline.py",
+    "local_path": "glue_scripts/sales_analytics_pipeline.py",
+    "type": "pyspark",
+    "glue_version": "4.0",
+    "python_version": "3",
+    "dependencies": [
+      "framework/glue_wrapper.py",
+      "agents/data_quality_nl_agent.py",
+      "agents/pyspark_code_analysis_agent.py"
+    ],
+    "extra_py_files": [
+      "s3://your-scripts-bucket/libs/custom_utils.py"
+    ]
+  },
+
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role"
+  },
+
+  "source": {
+    "type": "multi_source",
+    "tables": [
+      {
+        "name": "transactions",
+        "database": "sales_db",
+        "table": "transactions",
+        "push_down_predicate": "transaction_date >= '${START_DATE}' AND transaction_date < '${END_DATE}'"
+      },
+      {
+        "name": "customers",
+        "database": "crm_db",
+        "table": "customers"
+      },
+      {
+        "name": "products",
+        "database": "master_db",
+        "table": "products"
+      },
+      {
+        "name": "stores",
+        "database": "master_db",
+        "table": "stores"
+      },
+      {
+        "name": "promotions",
+        "database": "marketing_db",
+        "table": "promotions",
+        "push_down_predicate": "is_active = true"
+      }
+    ]
+  },
+
+  "target": {
+    "primary": {
+      "type": "glue_catalog",
+      "database": "analytics_db",
+      "table": "sales_facts",
+      "mode": "overwrite",
+      "partition_by": ["year", "month", "region"],
+      "format": "parquet",
+      "enable_update_catalog": true
+    },
+    "secondary": [
+      {
+        "name": "daily_summary",
+        "type": "glue_catalog",
+        "database": "analytics_db",
+        "table": "sales_daily_summary",
+        "mode": "overwrite"
+      },
+      {
+        "name": "customer_metrics",
+        "type": "glue_catalog",
+        "database": "analytics_db",
+        "table": "customer_sales_metrics",
+        "mode": "overwrite"
+      }
+    ]
+  },
+
+  "platform": {
+    "type": "glue",
+    "auto_scaling": true,
+    "fallback": "emr"
+  },
+
+  "transformations": [
+    {
+      "name": "join_transactions_customers",
+      "type": "join",
+      "left": "transactions",
+      "right": "customers",
+      "on": ["customer_id"],
+      "how": "left",
+      "broadcast_right": true,
+      "comment": "Customers table is small - broadcast join"
+    },
+    {
+      "name": "join_products",
+      "type": "join",
+      "left": "_result",
+      "right": "products",
+      "on": ["product_id"],
+      "how": "left",
+      "broadcast_right": true
+    },
+    {
+      "name": "join_stores",
+      "type": "join",
+      "left": "_result",
+      "right": "stores",
+      "on": ["store_id"],
+      "how": "left",
+      "broadcast_right": true
+    },
+    {
+      "name": "join_promotions",
+      "type": "join",
+      "left": "_result",
+      "right": "promotions",
+      "on": ["promotion_id"],
+      "how": "left",
+      "broadcast_right": true
+    },
+    {
+      "name": "filter_valid_transactions",
+      "type": "filter",
+      "condition": "transaction_status IN ('COMPLETED', 'REFUNDED') AND quantity > 0 AND unit_price > 0"
+    },
+    {
+      "name": "calculate_metrics",
+      "type": "add_columns",
+      "columns": {
+        "gross_amount": "quantity * unit_price",
+        "discount_amount": "COALESCE(quantity * unit_price * promotion_discount_pct / 100, 0)",
+        "net_amount": "quantity * unit_price - COALESCE(quantity * unit_price * promotion_discount_pct / 100, 0)",
+        "tax_amount": "net_amount * tax_rate",
+        "total_amount": "net_amount + (net_amount * tax_rate)",
+        "year": "YEAR(transaction_date)",
+        "month": "MONTH(transaction_date)",
+        "day": "DAY(transaction_date)",
+        "day_of_week": "DAYOFWEEK(transaction_date)",
+        "is_weekend": "CASE WHEN DAYOFWEEK(transaction_date) IN (1, 7) THEN true ELSE false END",
+        "region": "COALESCE(store_region, 'UNKNOWN')",
+        "customer_tenure_days": "DATEDIFF(transaction_date, customer_registration_date)",
+        "etl_load_timestamp": "CURRENT_TIMESTAMP()"
+      }
+    },
+    {
+      "name": "aggregate_daily_summary",
+      "type": "aggregate",
+      "output": "daily_summary",
+      "group_by": ["year", "month", "day", "region", "product_category"],
+      "aggregations": {
+        "total_transactions": "COUNT(*)",
+        "total_quantity": "SUM(quantity)",
+        "gross_revenue": "SUM(gross_amount)",
+        "total_discounts": "SUM(discount_amount)",
+        "net_revenue": "SUM(net_amount)",
+        "total_tax": "SUM(tax_amount)",
+        "total_revenue": "SUM(total_amount)",
+        "unique_customers": "COUNT(DISTINCT customer_id)",
+        "unique_products": "COUNT(DISTINCT product_id)",
+        "avg_transaction_value": "AVG(total_amount)",
+        "max_transaction_value": "MAX(total_amount)"
+      }
+    },
+    {
+      "name": "aggregate_customer_metrics",
+      "type": "aggregate",
+      "output": "customer_metrics",
+      "group_by": ["customer_id", "customer_name", "customer_email", "customer_segment"],
+      "aggregations": {
+        "total_transactions": "COUNT(*)",
+        "total_spent": "SUM(total_amount)",
+        "avg_transaction_value": "AVG(total_amount)",
+        "first_transaction_date": "MIN(transaction_date)",
+        "last_transaction_date": "MAX(transaction_date)",
+        "unique_products_purchased": "COUNT(DISTINCT product_id)",
+        "unique_stores_visited": "COUNT(DISTINCT store_id)",
+        "total_discounts_received": "SUM(discount_amount)"
+      }
+    },
+    {
+      "name": "add_rfm_scores",
+      "type": "window",
+      "on": "customer_metrics",
+      "columns": {
+        "recency_score": {
+          "function": "NTILE",
+          "args": [5],
+          "partition_by": [],
+          "order_by": ["last_transaction_date DESC"]
+        },
+        "frequency_score": {
+          "function": "NTILE",
+          "args": [5],
+          "partition_by": [],
+          "order_by": ["total_transactions"]
+        },
+        "monetary_score": {
+          "function": "NTILE",
+          "args": [5],
+          "partition_by": [],
+          "order_by": ["total_spent"]
+        }
+      }
+    },
+    {
+      "name": "add_rfm_segment",
+      "type": "add_columns",
+      "on": "customer_metrics",
+      "columns": {
+        "rfm_score": "recency_score + frequency_score + monetary_score",
+        "customer_segment_rfm": "CASE WHEN recency_score + frequency_score + monetary_score >= 13 THEN 'Champions' WHEN recency_score + frequency_score + monetary_score >= 10 THEN 'Loyal' WHEN recency_score + frequency_score + monetary_score >= 7 THEN 'Potential' WHEN recency_score + frequency_score + monetary_score >= 4 THEN 'At Risk' ELSE 'Lost' END"
+      }
+    }
+  ],
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "quarantine_path": "s3://your-bucket/quarantine/${job_name}/${run_id}/",
+    "agent": "data_quality_nl_agent",
+
+    "natural_language_rules": [
+      "transaction_id should not be null",
+      "transaction_id should be unique",
+      "customer_id should not be null",
+      "product_id should not be null",
+      "quantity must be between 1 and 10000",
+      "unit_price must be between 0 and 100000",
+      "transaction_date should not be in the future",
+      "customer_email should be a valid email"
+    ],
+
+    "sql_rules": [
+      {
+        "name": "net_amount_calculation",
+        "expression": "ABS(net_amount - (gross_amount - discount_amount)) < 0.01",
+        "description": "Net amount must equal gross - discount"
+      },
+      {
+        "name": "total_amount_calculation",
+        "expression": "ABS(total_amount - (net_amount + tax_amount)) < 0.01",
+        "description": "Total must equal net + tax"
+      },
+      {
+        "name": "valid_transaction_status",
+        "expression": "transaction_status IN ('COMPLETED', 'REFUNDED', 'PENDING', 'CANCELLED')",
+        "description": "Transaction status must be valid"
+      },
+      {
+        "name": "customer_has_email_or_phone",
+        "expression": "customer_email IS NOT NULL OR customer_phone IS NOT NULL",
+        "description": "Customer must have at least one contact method"
+      }
+    ],
+
+    "template_rules": [
+      {
+        "template": "not_null",
+        "column": "store_id"
+      },
+      {
+        "template": "range",
+        "column": "tax_rate",
+        "min": 0,
+        "max": 0.25
+      },
+      {
+        "template": "freshness",
+        "column": "transaction_date",
+        "days": 365
+      },
+      {
+        "template": "allowed_values",
+        "column": "region",
+        "values": ["NORTH", "SOUTH", "EAST", "WEST", "CENTRAL", "UNKNOWN"]
+      }
+    ],
+
+    "thresholds": {
+      "overall_pass_rate": 0.95,
+      "critical_rules_must_pass": [
+        "transaction_id should not be null",
+        "net_amount_calculation",
+        "total_amount_calculation"
+      ]
+    }
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "frameworks": ["GDPR", "PCI-DSS"],
+    "pii_columns": [
+      "customer_email",
+      "customer_phone",
+      "customer_address",
+      "payment_card_last4"
+    ],
+    "mask_pii": "Y",
+    "masking_rules": {
+      "customer_email": "SHA256",
+      "customer_phone": "PARTIAL",
+      "customer_address": "REDACT",
+      "payment_card_last4": "KEEP"
+    },
+    "audit_access": "Y",
+    "data_retention_days": 2555
+  },
+
+  "notifications": {
+    "enabled": "Y",
+    "slack": {
+      "enabled": "Y",
+      "webhook_secret": "etl/notifications/slack-webhook",
+      "channel": "#data-platform-alerts",
+      "mention_on_failure": ["@data-oncall"]
+    },
+    "teams": {
+      "enabled": "Y",
+      "webhook_secret": "etl/notifications/teams-webhook",
+      "channel": "Data Platform"
+    },
+    "email": {
+      "enabled": "Y",
+      "sender": "data-platform@company.com",
+      "recipients": [
+        "data-engineering@company.com",
+        "data-quality@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+    "preferences": {
+      "on_start": "Y",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "Y",
+      "on_dq_failure": "Y",
+      "on_cost_alert": "Y",
+      "on_recommendations": "Y",
+      "dq_score_threshold": 0.90,
+      "cost_alert_threshold_usd": 50.0,
+      "duration_alert_minutes": 60
+    }
+  },
+
+  "resources": {
+    "glue": {
+      "worker_type": "G.2X",
+      "number_of_workers": 20,
+      "timeout_minutes": 180,
+      "max_retries": 2,
+      "max_concurrent_runs": 1
+    }
+  },
+
+  "spark_configs": {
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.sql.adaptive.skewJoin.enabled": "true",
+    "spark.sql.shuffle.partitions": "400",
+    "spark.sql.broadcastTimeout": "600",
+    "spark.sql.autoBroadcastJoinThreshold": "52428800",
+    "spark.dynamicAllocation.enabled": "true",
+    "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
+  },
+
+  "scheduling": {
+    "enabled": "Y",
+    "cron": "0 2 * * *",
+    "timezone": "America/New_York",
+    "depends_on": [
+      "raw_transactions_ingestion",
+      "customer_data_sync"
+    ],
+    "retry_on_failure": 3,
+    "retry_delay_minutes": 30
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamodb_tables": {
+      "run_audit": "etl_run_audit",
+      "dq_audit": "etl_dq_audit",
+      "recommendations_audit": "etl_recommendations_audit"
+    },
+    "store_lineage": "Y",
+    "store_metrics": "Y",
+    "store_recommendations": "Y",
+    "retention_days": 90
+  },
+
+  "agents": {
+    "code_analysis": {
+      "enabled": "Y",
+      "analyze_before_run": "Y",
+      "fail_on_critical": "N",
+      "optimization_categories": [
+        "join",
+        "shuffle",
+        "caching",
+        "memory",
+        "catalyst",
+        "partition",
+        "udf"
+      ]
+    },
+    "workload_assessment": {
+      "enabled": "Y",
+      "compare_platforms": ["glue", "emr", "eks"],
+      "recommend_resources": "Y"
+    },
+    "aws_recommendations": {
+      "enabled": "Y",
+      "cost_optimization": "Y",
+      "performance_optimization": "Y",
+      "cost_alert_threshold_usd": 50.0
+    },
+    "auto_healing": {
+      "enabled": "Y",
+      "retry_on_memory_error": "Y",
+      "retry_on_shuffle_error": "Y",
+      "retry_on_timeout": "Y",
+      "auto_scale_on_failure": "Y",
+      "max_auto_retries": 2
+    },
+    "compliance": {
+      "enabled": "Y",
+      "frameworks": ["GDPR", "PCI-DSS"],
+      "scan_for_pii": "Y"
+    },
+    "eks_optimizer": {
+      "enabled": "N",
+      "comment": "Enable if migrating to EKS"
+    }
+  },
+
+  "estimated_data_volume_gb": 500,
+  "complexity": "high",
+
+  "metadata": {
+    "owner": "data-engineering-team",
+    "business_domain": "sales_analytics",
+    "data_classification": "confidential",
+    "sla_minutes": 120,
+    "documentation": "https://wiki.company.com/sales-analytics-pipeline"
+  }
+}

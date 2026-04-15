@@ -1,0 +1,410 @@
+{
+  "_comment": "=== STRANDS ETL FRAMEWORK - FULL SAMPLE CONFIG ===",
+
+  "job_name": "enterprise_sales_daily_etl",
+  "job_description": "Daily sales data ETL with DQ validation and compliance checks",
+
+  "_section_storage": "=== STORAGE CONFIGURATION ===",
+  "storage": {
+    "primary_backend": "s3",
+    "s3_bucket": "my-etl-bucket",
+    "s3_prefix": "strands-etl/",
+    "local_base_path": "data",
+    "fallback_to_local": true
+  },
+
+  "_section_athena": "=== ATHENA CONFIGURATION (for DQ queries) ===",
+  "athena": {
+    "output_location": "s3://my-etl-bucket/athena-results/",
+    "workgroup": "primary"
+  },
+
+  "_section_source_tables": "=== SOURCE TABLES (inputs to ETL) ===",
+  "source_tables": [
+    {
+      "database": "raw_zone",
+      "table": "sales_transactions",
+      "partition_column": "process_date",
+      "format": "parquet"
+    },
+    {
+      "database": "raw_zone",
+      "table": "customer_master",
+      "format": "parquet"
+    },
+    {
+      "database": "raw_zone",
+      "table": "product_catalog",
+      "format": "parquet"
+    }
+  ],
+
+  "_section_target_tables": "=== TARGET TABLES (ETL outputs) ===",
+  "target_tables": [
+    {
+      "database": "curated_zone",
+      "table": "fact_sales",
+      "format": "parquet",
+      "partition_column": "sale_date"
+    },
+    {
+      "database": "curated_zone",
+      "table": "dim_customer",
+      "format": "parquet"
+    }
+  ],
+
+  "_section_agents": "=== AGENT ENABLE/DISABLE FLAGS ===",
+  "agents": {
+    "sizing_agent": {
+      "enabled": "Y"
+    },
+    "compliance_agent": {
+      "enabled": "Y"
+    },
+    "data_quality_agent": {
+      "enabled": "Y"
+    },
+    "resource_allocator_agent": {
+      "enabled": "Y"
+    },
+    "platform_conversion_agent": {
+      "enabled": "N",
+      "_comment": "Set to Y if you want auto-conversion to EMR/EKS"
+    },
+    "execution_agent": {
+      "enabled": "Y"
+    },
+    "learning_agent": {
+      "enabled": "Y"
+    },
+    "recommendation_agent": {
+      "enabled": "Y"
+    }
+  },
+
+  "_section_sizing": "=== SIZING AGENT CONFIG ===",
+  "source_sizing": {
+    "mode": "auto_detect",
+    "_mode_options": "auto_detect | hybrid | config_only",
+    "_mode_auto_detect": "Glue Catalog -> S3 scan -> config fallback -> smart estimate",
+    "_mode_hybrid": "Uses config + adjusts based on Glue/S3 metadata",
+    "_mode_config_only": "Only uses estimated_size_gb from config",
+
+    "estimated_size_gb": 150,
+    "_estimated_size_gb": "Fallback if auto-detect fails",
+
+    "delta_mode": {
+      "enabled": "Y",
+      "partition_column": "process_date",
+      "_comment": "Only size the specific partition, not full table"
+    }
+  },
+
+  "_section_smart_allocation": "=== RESOURCE ALLOCATOR CONFIG ===",
+  "smart_allocation": {
+    "enabled": "Y",
+
+    "force_from_config": "N",
+    "_force_from_config": "Y = always use glue_config values; N = agent decides",
+
+    "weekend_scale_factor": 0.6,
+    "_weekend_scale_factor": "Reduce workers on weekends (0.6 = 60%)",
+
+    "month_end_scale_factor": 1.5,
+    "_month_end_scale_factor": "Increase workers for month-end loads",
+
+    "quarter_end_scale_factor": 2.0,
+    "_quarter_end_scale_factor": "Increase workers for quarter-end loads",
+
+    "_section_complexity": "=== COMPLEXITY FACTOR WEIGHTS ===",
+    "_complexity_how_it_works": [
+      "Base factor = 1.0",
+      "Multiplied by source table count factor:",
+      "  >15 tables: x1.5, >10 tables: x1.3, >5 tables: x1.1",
+      "Multiplied by code analysis factors (if code_analysis_agent runs):",
+      "  join_count >10: x join_count_weight, >5: x1.2",
+      "  window_function_count >3: x window_function_weight, >0: x1.3",
+      "  aggregation_count >5: x aggregation_weight",
+      "Final factor capped at 3.0"
+    ],
+
+    "complexity_factors": {
+      "join_count_weight": 1.5,
+      "_join_count_weight": "Multiplier when >10 JOINs in script",
+
+      "window_function_weight": 2.0,
+      "_window_function_weight": "Multiplier when >3 window functions",
+
+      "aggregation_weight": 1.2,
+      "_aggregation_weight": "Multiplier when >5 GROUP BY / DISTINCT"
+    }
+  },
+
+  "_section_glue": "=== GLUE JOB CONFIG ===",
+  "glue_config": {
+    "number_of_workers": 10,
+    "_number_of_workers": "Default workers (may be overridden by resource_allocator)",
+
+    "worker_type": "G.2X",
+    "_worker_type_options": "G.1X (16GB), G.2X (32GB), G.4X (64GB), G.8X (128GB)",
+
+    "timeout_minutes": 480,
+    "glue_version": "4.0",
+    "python_version": "3",
+
+    "job_arguments": {
+      "--enable-metrics": "true",
+      "--enable-continuous-cloudwatch-log": "true",
+      "--enable-spark-ui": "true",
+      "--spark-event-logs-path": "s3://my-etl-bucket/spark-logs/"
+    }
+  },
+
+  "_section_data_quality": "=== DATA QUALITY AGENT CONFIG ===",
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_critical": "Y",
+    "_fail_on_critical": "Y = halt pipeline if critical rule fails",
+
+    "athena_workgroup": "primary",
+    "athena_output_location": "s3://my-etl-bucket/athena-dq-results/",
+    "query_timeout_seconds": 300,
+
+    "_section_pre_load": "=== PRE-LOAD RULES (run BEFORE ETL on source tables) ===",
+    "pre_load_rules": [
+      {
+        "table": "raw_zone.sales_transactions",
+        "rules": [
+          {
+            "type": "row_count_check",
+            "min_rows": 1000000,
+            "severity": "critical",
+            "_comment": "Fail if source has < 1M rows"
+          },
+          {
+            "type": "not_null",
+            "column": "transaction_id",
+            "threshold": 0,
+            "severity": "critical",
+            "_comment": "0 nulls allowed in PK"
+          },
+          {
+            "type": "not_null",
+            "column": "customer_id",
+            "threshold": 100,
+            "severity": "warning",
+            "_comment": "Allow up to 100 nulls"
+          },
+          {
+            "type": "completeness",
+            "column": "sale_amount",
+            "threshold": 0.95,
+            "severity": "warning",
+            "_comment": "95% of rows must have sale_amount"
+          },
+          {
+            "type": "positive",
+            "column": "sale_amount",
+            "threshold": 0,
+            "severity": "critical",
+            "_comment": "No negative sale amounts"
+          },
+          {
+            "type": "unique",
+            "column": "transaction_id",
+            "threshold": 0,
+            "severity": "critical",
+            "_comment": "No duplicate transaction IDs"
+          }
+        ]
+      },
+      {
+        "table": "raw_zone.customer_master",
+        "rules": [
+          {
+            "type": "row_count_check",
+            "min_rows": 10000,
+            "severity": "warning"
+          },
+          {
+            "type": "completeness",
+            "column": "email",
+            "threshold": 0.90,
+            "severity": "warning"
+          }
+        ]
+      }
+    ],
+
+    "_section_post_load": "=== POST-LOAD RULES (run AFTER ETL on target tables) ===",
+    "post_load_rules": [
+      {
+        "table": "curated_zone.fact_sales",
+        "rules": [
+          {
+            "type": "row_count_check",
+            "min_rows": 900000,
+            "severity": "critical",
+            "_comment": "Target should have at least 90% of source rows"
+          },
+          {
+            "type": "not_null",
+            "column": "fact_key",
+            "threshold": 0,
+            "severity": "critical"
+          },
+          {
+            "type": "completeness",
+            "column": "customer_key",
+            "threshold": 0.99,
+            "severity": "warning"
+          }
+        ]
+      }
+    ],
+
+    "_section_sql_rules": "=== CUSTOM SQL RULES (for complex validations) ===",
+    "sql_rules": [
+      {
+        "id": "SQL_001",
+        "description": "Check for orphan sales (no matching customer)",
+        "sql": "SELECT COUNT(*) FROM curated_zone.fact_sales f LEFT JOIN curated_zone.dim_customer c ON f.customer_key = c.customer_key WHERE c.customer_key IS NULL",
+        "threshold": 100,
+        "severity": "warning"
+      },
+      {
+        "id": "SQL_002",
+        "description": "Check for future-dated transactions",
+        "sql": "SELECT COUNT(*) FROM curated_zone.fact_sales WHERE sale_date > CURRENT_DATE",
+        "threshold": 0,
+        "severity": "critical"
+      }
+    ],
+
+    "_rule_types_reference": {
+      "row_count_check": "Checks COUNT(*) >= min_rows",
+      "not_null": "Counts NULLs in column; passes if <= threshold",
+      "completeness": "Calculates (1 - null_count/total); passes if >= threshold (0.0-1.0)",
+      "positive": "Counts values <= 0; passes if <= threshold",
+      "unique": "Counts duplicates; passes if <= threshold",
+      "greater_than": "Counts values <= specified value; passes if <= threshold",
+      "less_than": "Counts values >= specified value; passes if <= threshold"
+    }
+  },
+
+  "_section_compliance": "=== COMPLIANCE AGENT CONFIG ===",
+  "compliance": {
+    "enabled": "Y",
+
+    "frameworks": ["GDPR", "PCI_DSS", "SOX", "HIPAA"],
+    "_frameworks": "Compliance frameworks to check against",
+
+    "pii_patterns": {
+      "name": ["first_name", "last_name", "full_name", "customer_name"],
+      "email": ["email", "email_address", "contact_email"],
+      "phone": ["phone", "phone_number", "mobile", "cell"],
+      "address": ["address", "street", "city", "zip", "postal"],
+      "ssn": ["ssn", "social_security", "tax_id"],
+      "financial": ["credit_card", "card_number", "account_number", "routing"],
+      "id": ["customer_id", "user_id", "member_id", "employee_id"],
+      "health": ["diagnosis", "prescription", "medical", "health"],
+      "dob": ["date_of_birth", "dob", "birth_date"]
+    },
+    "_pii_patterns": "Column name patterns to flag as PII",
+
+    "table_scans": [
+      {
+        "table": "raw_zone.customer_master",
+        "check_pii": true,
+        "frameworks": ["GDPR", "PCI_DSS"]
+      },
+      {
+        "table": "raw_zone.sales_transactions",
+        "check_pii": true,
+        "frameworks": ["SOX"]
+      }
+    ]
+  },
+
+  "_section_learning": "=== LEARNING AGENT CONFIG ===",
+  "learning": {
+    "enabled": "Y",
+
+    "min_training_records": 5,
+    "_min_training_records": "Minimum historical runs before training models",
+
+    "models_dir": "data/models",
+    "_models_dir": "Where job-specific models are stored",
+
+    "max_history_records": 500,
+    "_max_history_records": "Cap on execution history per job",
+
+    "_how_it_works": [
+      "Each job gets its own directory: data/models/<job_name>/",
+      "After min_training_records runs, trains 3 models:",
+      "  - resource_predictor: predicts optimal worker count",
+      "  - runtime_estimator: predicts job duration",
+      "  - cost_predictor: predicts execution cost",
+      "Confidence scales from 0% (5 runs) to 90% (50+ runs)",
+      "Resource allocator blends learning predictions with formula"
+    ]
+  },
+
+  "_section_platform_conversion": "=== PLATFORM CONVERSION AGENT CONFIG ===",
+  "platform": {
+    "auto_convert": {
+      "enabled": "N",
+      "_comment": "Set to Y to enable automatic EMR/EKS conversion"
+    },
+
+    "conversion_rules": {
+      "size_threshold_gb": 500,
+      "_size_threshold_gb": "Convert to EMR/EKS if data > this size",
+
+      "prefer_eks_for_streaming": true,
+      "prefer_emr_for_batch": true
+    },
+
+    "emr_config": {
+      "cluster_id": "",
+      "instance_type": "m5.2xlarge",
+      "instance_count": 10
+    },
+
+    "eks_config": {
+      "cluster_name": "",
+      "namespace": "spark-jobs",
+      "service_account": "spark"
+    }
+  },
+
+  "_section_execution": "=== EXECUTION AGENT CONFIG ===",
+  "dry_run": false,
+  "_dry_run": "Set to true to simulate execution without running actual Glue job",
+
+  "_section_run_audit": "=== RUN AUDIT CONFIG ===",
+  "_run_audit_output": [
+    "Per-run JSONL: data/run_audit/<job_name>/<execution_id>.jsonl",
+    "Per-run HTML:  data/run_audit/<job_name>/<execution_id>.html",
+    "S3 upload:     s3://<bucket>/run-audit/<job_name>/<date>/<execution_id>.*"
+  ],
+
+  "_section_example_athena_ddl": "=== ATHENA TABLE FOR RUN SUMMARY ===",
+  "_athena_ddl": [
+    "CREATE EXTERNAL TABLE run_summary (",
+    "  event_id string, event_type string, timestamp string,",
+    "  job_name string, execution_id string, run_date string,",
+    "  kpi struct<overall_status:string, total_duration_ms:double, ...>,",
+    "  sizing struct<total_size_gb:double, ...>,",
+    "  resource_allocation struct<recommended_workers:int, ...>,",
+    "  execution struct<status:string, cost_usd:double, ...>,",
+    "  data_quality struct<pre_load:struct<...>, post_load:struct<...>>,",
+    "  compliance struct<total_pii_columns:int, ...>,",
+    "  learning struct<models_trained:int, ...>,",
+    "  recommendations array<struct<agent:string, recommendation:string>>",
+    ")",
+    "ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'",
+    "LOCATION 's3://<bucket>/run-audit/';"
+  ]
+}

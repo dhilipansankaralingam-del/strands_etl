@@ -1,0 +1,20 @@
+{
+    "RoleName": "etl-eks-node-role",
+    "Description": "IAM role for EKS worker nodes with ECR, S3, and logging access",
+    "TrustPolicy": "ec2_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+        "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+        "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+    ],
+    "CustomPolicies": [
+        "s3_datalake_policy.json",
+        "dynamodb_etl_policy.json"
+    ],
+    "InstanceProfile": "etl-eks-node-instance-profile",
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

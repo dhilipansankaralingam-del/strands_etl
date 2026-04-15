@@ -1,0 +1,53 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "DynamoDBETLAuditAccess",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:BatchGetItem"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:*:*:table/etl_run_audit",
+                "arn:aws:dynamodb:*:*:table/etl_run_audit/index/*",
+                "arn:aws:dynamodb:*:*:table/etl_dq_audit",
+                "arn:aws:dynamodb:*:*:table/etl_dq_audit/index/*",
+                "arn:aws:dynamodb:*:*:table/etl_recommendations_audit",
+                "arn:aws:dynamodb:*:*:table/etl_recommendations_audit/index/*",
+                "arn:aws:dynamodb:*:*:table/etl_agent_results",
+                "arn:aws:dynamodb:*:*:table/etl_agent_results/index/*"
+            ]
+        },
+        {
+            "Sid": "DynamoDBDescribeTables",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:DescribeTable",
+                "dynamodb:DescribeTimeToLive",
+                "dynamodb:ListTables"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "DynamoDBStreams",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:DescribeStream",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:ListStreams"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:*:*:table/etl_run_audit/stream/*",
+                "arn:aws:dynamodb:*:*:table/etl_dq_audit/stream/*"
+            ]
+        }
+    ]
+}

@@ -1,0 +1,56 @@
+{
+  "job_name": "inventory_sync",
+  "description": "Simple inventory sync job - Teams notifications only",
+
+  "source": {
+    "type": "jdbc",
+    "connection_name": "warehouse-postgres",
+    "table": "inventory_levels"
+  },
+
+  "target": {
+    "type": "glue_catalog",
+    "database": "warehouse_db",
+    "table": "inventory_snapshot",
+    "mode": "overwrite"
+  },
+
+  "platform": "glue",
+
+  "transformations": [
+    {
+      "type": "add_columns",
+      "columns": {
+        "snapshot_date": "CURRENT_DATE()",
+        "snapshot_hour": "HOUR(CURRENT_TIMESTAMP())"
+      }
+    }
+  ],
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "N"
+    },
+
+    "teams": {
+      "enabled": "Y",
+      "webhook_url": "https://company.webhook.office.com/webhookb2/your-webhook-url",
+      "channel": "Warehouse Ops"
+    },
+
+    "email": {
+      "enabled": "N"
+    },
+
+    "preferences": {
+      "on_start": "N",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "N",
+      "on_dq_failure": "N",
+      "on_cost_alert": "N"
+    }
+  }
+}

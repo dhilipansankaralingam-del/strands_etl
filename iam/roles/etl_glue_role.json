@@ -1,0 +1,20 @@
+{
+    "RoleName": "etl-glue-execution-role",
+    "Description": "IAM role for AWS Glue ETL jobs with S3, Glue Catalog, and CloudWatch access",
+    "TrustPolicy": "glue_trust_policy.json",
+    "ManagedPolicies": [
+        "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+    ],
+    "CustomPolicies": [
+        "glue_etl_policy.json",
+        "s3_datalake_policy.json",
+        "dynamodb_etl_policy.json",
+        "slack_integration_policy.json",
+        "teams_integration_policy.json"
+    ],
+    "Tags": {
+        "Project": "ETL-Framework",
+        "Environment": "Production",
+        "ManagedBy": "IAM-Provisioning"
+    }
+}

@@ -1,0 +1,140 @@
+{
+  "job_name": "simple_customer_etl",
+  "description": "Simple ETL job to process customer data with basic transformations",
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr"],
+    "force_platform": null,
+    "auto_fallback_on_error": "Y"
+  },
+
+  "auto_healing": {
+    "enabled": "Y",
+    "correct_code": "Y",
+    "auto_rerun": "Y",
+    "max_retries": 3,
+    "heal_memory_errors": "Y",
+    "heal_shuffle_errors": "Y",
+    "heal_timeout_errors": "Y",
+    "heal_connection_errors": "Y",
+    "heal_data_skew": "N",
+    "heal_partition_errors": "Y"
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "check_sources": "Y",
+    "check_targets": "Y",
+    "frameworks": ["GDPR"],
+    "pii_columns": ["email", "phone", "address"],
+    "mask_pii": "Y"
+  },
+
+  "data_quality": {
+    "enabled": "Y",
+    "natural_language_rules": [
+      "customer_id should not be null",
+      "email should be valid email",
+      "customer_name is required"
+    ],
+    "sql_rules": [
+      {
+        "id": "SQL_001",
+        "description": "No duplicate customer IDs",
+        "sql": "SELECT COUNT(*) - COUNT(DISTINCT customer_id) as duplicates FROM {table}",
+        "threshold": 0
+      }
+    ],
+    "template_rules": [
+      {
+        "template": "range_check",
+        "parameters": {"column": "age", "min": 0, "max": 150},
+        "threshold": 0.99
+      }
+    ]
+  },
+
+  "workload_assessment": {
+    "enabled": "Y",
+    "analyze_input_size": "Y",
+    "consider_weekday_weekend": "Y",
+    "use_historical_trends": "Y",
+    "monitor_cpu_load": "Y",
+    "monitor_memory_profile": "Y",
+    "detect_data_skew": "Y"
+  },
+
+  "code_analysis": {
+    "enabled": "Y",
+    "check_anti_patterns": "Y",
+    "check_join_optimizations": "Y",
+    "recommend_aws_tools": "Y",
+    "recommend_delta_optimizations": "N"
+  },
+
+  "integrations": {
+    "slack_enabled": "Y",
+    "slack_channel": "#etl-simple-jobs",
+    "slack_voice_enabled": "N",
+    "slack_etl_trigger_enabled": "N",
+    "teams_enabled": "N",
+    "email_enabled": "Y",
+    "email_recipients": ["etl-team@company.com"],
+    "streamlit_enabled": "N"
+  },
+
+  "dashboard": {
+    "cloudwatch_enabled": "Y",
+    "cloudwatch_namespace": "ETLFramework",
+    "cloudwatch_log_group": "/etl-framework/simple-jobs",
+    "enterprise_summary_enabled": "N",
+    "predict_failures": "N"
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "audit_on_start": "Y",
+    "audit_on_read": "Y",
+    "audit_on_transform": "N",
+    "audit_on_write": "Y",
+    "audit_on_complete": "Y",
+    "dynamodb_table": "etl_audit_log"
+  },
+
+  "sources": [
+    {
+      "name": "raw_customers",
+      "type": "glue_catalog",
+      "database": "raw_data",
+      "table": "customers",
+      "format": "parquet"
+    }
+  ],
+
+  "target": {
+    "name": "processed_customers",
+    "type": "glue_catalog",
+    "database": "processed_data",
+    "table": "customers_cleaned",
+    "format": "parquet",
+    "partition_keys": ["load_date"],
+    "write_mode": "overwrite"
+  },
+
+  "spark_config": {
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.executor.memory": "4g",
+    "spark.executor.cores": "2"
+  },
+
+  "glue_config": {
+    "worker_type": "G.1X",
+    "number_of_workers": 5,
+    "timeout_minutes": 60,
+    "job_bookmark_option": "job-bookmark-enable"
+  },
+
+  "script_path": "scripts/pyspark/simple_customer_etl.py"
+}

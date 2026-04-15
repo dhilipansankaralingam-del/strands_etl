@@ -1,0 +1,177 @@
+{
+  "_description": "Simple ETL Demo - Customer Data Cleansing with Core Agents",
+  "_use_case": "Read raw customer data, clean it, apply DQ rules, write to processed layer",
+
+  "job_name": "demo_simple_customer_etl",
+  "job_description": "Simple customer data cleansing pipeline with data quality checks",
+
+  "script": {
+    "path": "s3://etl-framework-scripts/pyspark/simple_customer_etl.py",
+    "local_path": "scripts/pyspark/simple_customer_etl.py",
+    "type": "pyspark"
+  },
+
+  "job_arguments": {
+    "--source_database": "raw_data",
+    "--source_table": "customers",
+    "--target_database": "processed_data",
+    "--target_table": "customers_cleaned"
+  },
+
+  "platform": {
+    "primary": "glue",
+    "fallback_chain": ["emr"],
+    "force_platform": null,
+    "auto_fallback_on_error": "Y",
+    "_comment": "Start with Glue, fallback to EMR if Glue fails"
+  },
+
+  "glue_config": {
+    "glue_version": "4.0",
+    "worker_type": "G.1X",
+    "number_of_workers": 5,
+    "timeout_minutes": 60
+  },
+
+  "auto_healing": {
+    "enabled": "Y",
+    "correct_code": "Y",
+    "auto_rerun": "Y",
+    "max_retries": 2,
+    "heal_memory_errors": "Y",
+    "heal_shuffle_errors": "Y",
+    "heal_timeout_errors": "Y",
+    "heal_connection_errors": "Y",
+    "heal_data_skew": "N",
+    "heal_partition_errors": "N"
+  },
+
+  "code_analysis": {
+    "enabled": "Y",
+    "check_anti_patterns": "Y",
+    "check_join_optimizations": "Y",
+    "recommend_aws_tools": "Y",
+    "recommend_delta_optimizations": "N"
+  },
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_critical": "Y",
+    "natural_language_rules": [
+      "customer_id should not be null",
+      "customer_name should not be empty",
+      "email should be valid email",
+      "age should be between 0 and 120",
+      "status should not be null"
+    ],
+    "sql_rules": [
+      {
+        "id": "SQL_UNIQUE_CUSTOMER",
+        "description": "Customer ID must be unique",
+        "sql": "SELECT COUNT(*) - COUNT(DISTINCT customer_id) as duplicates FROM {table}",
+        "threshold": 0,
+        "severity": "critical"
+      },
+      {
+        "id": "SQL_VALID_STATUS",
+        "description": "Status must be active or inactive",
+        "sql": "SELECT COUNT(*) FROM {table} WHERE status NOT IN ('active', 'inactive', 'pending')",
+        "threshold": 0,
+        "severity": "warning"
+      }
+    ],
+    "template_rules": [
+      {
+        "template": "completeness_check",
+        "parameters": {"column": "email"},
+        "threshold": 0.95
+      }
+    ]
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "check_sources": "Y",
+    "check_targets": "Y",
+    "frameworks": ["GDPR"],
+    "pii_columns": ["email", "phone", "address"],
+    "mask_pii": "Y",
+    "audit_data_access": "Y"
+  },
+
+  "workload_assessment": {
+    "enabled": "Y",
+    "analyze_input_size": "Y",
+    "consider_weekday_weekend": "N",
+    "use_historical_trends": "N",
+    "monitor_cpu_load": "Y",
+    "monitor_memory_profile": "Y",
+    "detect_data_skew": "N",
+    "track_cost": "Y"
+  },
+
+  "learning": {
+    "enabled": "Y",
+    "store_history": "Y",
+    "detect_anomalies": "Y",
+    "predict_failures": "N",
+    "update_baseline": "Y"
+  },
+
+  "integrations": {
+    "slack_enabled": "N",
+    "slack_channel": "#etl-alerts",
+    "slack_voice_enabled": "N",
+    "slack_etl_trigger_enabled": "N",
+
+    "teams_enabled": "N",
+    "teams_webhook_url": "",
+
+    "email_enabled": "Y",
+    "email_sender": "etl-notifications@company.com",
+    "email_recipients": ["data-team@company.com"],
+    "email_on_success": "Y",
+    "email_on_failure": "Y",
+
+    "streamlit_enabled": "N"
+  },
+
+  "dashboard": {
+    "cloudwatch_enabled": "Y",
+    "cloudwatch_namespace": "ETL/SimpleDemo",
+    "enterprise_summary_enabled": "N",
+    "html_reports_enabled": "Y",
+    "report_output_path": "s3://etl-framework-reports/simple-demo/"
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamo_table": "etl_audit_log",
+    "audit_on_start": "Y",
+    "audit_on_read": "Y",
+    "audit_on_transform": "Y",
+    "audit_on_write": "Y",
+    "audit_on_dq": "Y",
+    "audit_on_complete": "Y"
+  },
+
+  "source_tables": [
+    {
+      "database": "raw_data",
+      "table": "customers",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/raw/customers/"
+    }
+  ],
+
+  "target_tables": [
+    {
+      "database": "processed_data",
+      "table": "customers_cleaned",
+      "format": "parquet",
+      "location": "s3://etl-framework-data/processed/customers/",
+      "partition_by": ["country"],
+      "write_mode": "overwrite"
+    }
+  ]
+}

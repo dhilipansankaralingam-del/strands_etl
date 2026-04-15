@@ -1,0 +1,261 @@
+{
+  "job_name": "enterprise_sales_pipeline",
+  "description": "Complex multi-source sales pipeline with full notifications and DQ",
+
+  "etl_script": {
+    "path": "s3://etl-scripts-bucket/etl_scripts/complex/multi_source_analytics.py",
+    "local_path": "etl_scripts/complex/multi_source_analytics.py",
+    "type": "pyspark",
+    "entry_point": "main",
+    "dependencies": [
+      "etl_scripts/simple/customer_transform.py",
+      "agents/data_quality_nl_agent.py"
+    ]
+  },
+
+  "iam": {
+    "glue_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-glue-execution-role",
+    "emr_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-execution-role",
+    "emr_ec2_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-emr-ec2-role",
+    "eks_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-eks-cluster-role",
+    "lambda_role": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/etl-lambda-notification-role"
+  },
+
+  "source": {
+    "type": "multi_source",
+    "sources": [
+      {
+        "name": "transactions",
+        "type": "glue_catalog",
+        "database": "sales_db",
+        "table": "transactions"
+      },
+      {
+        "name": "customers",
+        "type": "glue_catalog",
+        "database": "crm_db",
+        "table": "customers"
+      },
+      {
+        "name": "products",
+        "type": "s3",
+        "path": "s3://master-data/products/",
+        "format": "parquet"
+      }
+    ]
+  },
+
+  "target": {
+    "type": "iceberg",
+    "catalog": "glue_catalog",
+    "database": "analytics_db",
+    "table": "sales_facts",
+    "mode": "merge",
+    "merge_keys": ["transaction_id"],
+    "partition_by": ["year", "month", "region"]
+  },
+
+  "platform": {
+    "primary": "emr",
+    "fallback": ["glue", "eks"],
+    "auto_heal": true
+  },
+
+  "transformations": [
+    {
+      "type": "join",
+      "left": "transactions",
+      "right": "customers",
+      "on": ["customer_id"],
+      "how": "left"
+    },
+    {
+      "type": "join",
+      "left": "_result",
+      "right": "products",
+      "on": ["product_id"],
+      "how": "left"
+    },
+    {
+      "type": "filter",
+      "condition": "transaction_status = 'COMPLETED' AND amount > 0"
+    },
+    {
+      "type": "add_columns",
+      "columns": {
+        "year": "YEAR(transaction_date)",
+        "month": "MONTH(transaction_date)",
+        "region": "COALESCE(customer_region, 'UNKNOWN')",
+        "revenue": "quantity * unit_price * (1 - discount_pct)"
+      }
+    },
+    {
+      "type": "aggregate",
+      "group_by": ["year", "month", "region", "product_category"],
+      "aggregations": {
+        "total_revenue": "SUM(revenue)",
+        "transaction_count": "COUNT(*)",
+        "unique_customers": "COUNT(DISTINCT customer_id)"
+      }
+    }
+  ],
+
+  "data_quality": {
+    "enabled": "Y",
+    "fail_on_error": "N",
+    "agent": "data_quality_nl_agent",
+    "quarantine_path": "s3://etl-quarantine-bucket/failed_records/",
+
+    "natural_language_rules": [
+      "transaction_id should not be null",
+      "customer_id should not be null",
+      "amount must be between 0 and 1000000",
+      "transaction_date should not be in the future",
+      "customer_email should be a valid email",
+      "transaction_id should be unique"
+    ],
+
+    "sql_rules": [
+      {
+        "name": "valid_region_code",
+        "expression": "region IS NULL OR region RLIKE '^[A-Z]{2,3}$'",
+        "description": "Region code must be 2-3 uppercase letters"
+      },
+      {
+        "name": "revenue_positive",
+        "expression": "revenue >= 0 OR revenue IS NULL",
+        "description": "Revenue cannot be negative"
+      },
+      {
+        "name": "customer_exists_for_transaction",
+        "expression": "customer_id IS NULL OR customer_name IS NOT NULL",
+        "description": "All customer IDs must have corresponding customer records"
+      }
+    ],
+
+    "template_rules": [
+      {
+        "template": "not_null",
+        "column": "product_id"
+      },
+      {
+        "template": "range",
+        "column": "quantity",
+        "min": 1,
+        "max": 10000
+      },
+      {
+        "template": "freshness",
+        "column": "updated_at",
+        "days": 30
+      },
+      {
+        "template": "allowed_values",
+        "column": "transaction_status",
+        "values": ["PENDING", "COMPLETED", "CANCELLED", "REFUNDED"]
+      }
+    ],
+
+    "thresholds": {
+      "overall_pass_rate": 0.95,
+      "critical_rules_must_pass": ["no_null_transaction_id", "valid_amount"]
+    }
+  },
+
+  "compliance": {
+    "enabled": "Y",
+    "frameworks": ["GDPR", "PCI-DSS"],
+    "pii_columns": ["customer_email", "customer_phone", "credit_card_last4"],
+    "mask_pii": "Y",
+    "audit_access": "Y"
+  },
+
+  "notifications": {
+    "enabled": "Y",
+
+    "slack": {
+      "enabled": "Y",
+      "webhook_secret": "etl/notifications/slack-webhook",
+      "channel": "#data-platform-alerts",
+      "bot_token_secret": "etl/notifications/slack-bot-token"
+    },
+
+    "teams": {
+      "enabled": "Y",
+      "webhook_secret": "etl/notifications/teams-webhook",
+      "channel": "Data Platform"
+    },
+
+    "email": {
+      "enabled": "Y",
+      "sender": "data-platform@company.com",
+      "recipients": [
+        "data-engineering@company.com",
+        "data-quality@company.com",
+        "oncall@company.com"
+      ],
+      "ses_region": "us-east-1"
+    },
+
+    "preferences": {
+      "on_start": "Y",
+      "on_success": "Y",
+      "on_failure": "Y",
+      "on_warning": "Y",
+      "on_dq_failure": "Y",
+      "on_cost_alert": "Y",
+      "on_recommendations": "Y",
+
+      "dq_score_threshold": 0.85,
+      "cost_alert_threshold_usd": 50.0,
+      "duration_alert_minutes": 30,
+
+      "mention_users_on_failure": [
+        "oncall-lead@company.com"
+      ]
+    }
+  },
+
+  "scheduling": {
+    "enabled": "Y",
+    "cron": "0 6 * * *",
+    "timezone": "America/New_York",
+    "retry_on_failure": 3,
+    "retry_delay_minutes": 15
+  },
+
+  "resources": {
+    "glue": {
+      "worker_type": "G.2X",
+      "number_of_workers": 10,
+      "timeout_minutes": 120
+    },
+    "emr": {
+      "cluster_type": "transient",
+      "master_instance_type": "m5.xlarge",
+      "core_instance_type": "r5.2xlarge",
+      "core_instance_count": 5,
+      "use_spot": "Y",
+      "spot_bid_percentage": 60
+    },
+    "eks": {
+      "use_karpenter": "Y",
+      "use_spot": "Y",
+      "use_graviton": "Y",
+      "node_pool": "spark-workloads"
+    }
+  },
+
+  "audit": {
+    "enabled": "Y",
+    "dynamodb_tables": {
+      "run_audit": "etl_run_audit",
+      "dq_audit": "etl_dq_audit",
+      "recommendations_audit": "etl_recommendations_audit"
+    },
+    "store_lineage": "Y",
+    "store_metrics": "Y",
+    "store_recommendations": "Y",
+    "retention_days": 90
+  }
+}

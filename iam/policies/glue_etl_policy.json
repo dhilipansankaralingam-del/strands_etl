@@ -1,0 +1,137 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "GlueJobManagement",
+            "Effect": "Allow",
+            "Action": [
+                "glue:CreateJob",
+                "glue:DeleteJob",
+                "glue:GetJob",
+                "glue:GetJobs",
+                "glue:UpdateJob",
+                "glue:StartJobRun",
+                "glue:GetJobRun",
+                "glue:GetJobRuns",
+                "glue:BatchStopJobRun"
+            ],
+            "Resource": [
+                "arn:aws:glue:*:*:job/etl-*"
+            ]
+        },
+        {
+            "Sid": "GlueCatalogAccess",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:CreateDatabase",
+                "glue:UpdateDatabase",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:CreateTable",
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:GetPartition",
+                "glue:GetPartitions",
+                "glue:CreatePartition",
+                "glue:BatchCreatePartition",
+                "glue:UpdatePartition",
+                "glue:DeletePartition"
+            ],
+            "Resource": [
+                "arn:aws:glue:*:*:catalog",
+                "arn:aws:glue:*:*:database/etl_*",
+                "arn:aws:glue:*:*:table/etl_*/*"
+            ]
+        },
+        {
+            "Sid": "GlueCrawlerManagement",
+            "Effect": "Allow",
+            "Action": [
+                "glue:CreateCrawler",
+                "glue:DeleteCrawler",
+                "glue:GetCrawler",
+                "glue:GetCrawlers",
+                "glue:UpdateCrawler",
+                "glue:StartCrawler",
+                "glue:StopCrawler"
+            ],
+            "Resource": [
+                "arn:aws:glue:*:*:crawler/etl-*"
+            ]
+        },
+        {
+            "Sid": "GlueConnectionAccess",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetConnection",
+                "glue:GetConnections",
+                "glue:CreateConnection",
+                "glue:UpdateConnection",
+                "glue:DeleteConnection"
+            ],
+            "Resource": [
+                "arn:aws:glue:*:*:connection/etl-*",
+                "arn:aws:glue:*:*:catalog"
+            ]
+        },
+        {
+            "Sid": "GlueDataQuality",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDataQualityRuleset",
+                "glue:CreateDataQualityRuleset",
+                "glue:UpdateDataQualityRuleset",
+                "glue:StartDataQualityRulesetEvaluationRun",
+                "glue:GetDataQualityResult"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "GlueServiceRole",
+            "Effect": "Allow",
+            "Action": [
+                "iam:PassRole"
+            ],
+            "Resource": [
+                "arn:aws:iam::*:role/AWSGlueServiceRole*",
+                "arn:aws:iam::*:role/etl-glue-*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "glue.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "S3AccessForGlue",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": [
+                "arn:aws:s3:::etl-*",
+                "arn:aws:s3:::etl-*/*",
+                "arn:aws:s3:::aws-glue-*"
+            ]
+        },
+        {
+            "Sid": "CloudWatchLogsForGlue",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:GetLogEvents"
+            ],
+            "Resource": [
+                "arn:aws:logs:*:*:log-group:/aws-glue/*"
+            ]
+        }
+    ]
+}
