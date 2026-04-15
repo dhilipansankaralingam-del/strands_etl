@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Batch Insights Processor - Loops through configs from S3 and uploads results.
+Batch Insights Processor - Loops through configs and uploads results.
 
 Usage:
+    # Local paths
+    python scripts/batch_insights.py \
+        --source ./demo_configs/ \
+        --dest ./results/
+
+    # S3 paths
     python scripts/batch_insights.py \
         --source s3://bucket/configs/ \
         --dest s3://bucket/results/ \
@@ -10,7 +16,6 @@ Usage:
 """
 
 import argparse
-import boto3
 import json
 import os
 import sys
@@ -27,10 +32,21 @@ from scripts.agent_cli import InteractiveAgentCLI, AgentDataStore, PredictionEng
 class BatchInsightsProcessor:
     """Process multiple job configs and generate insights."""
 
-    def __init__(self, source_s3: str, dest_s3: str):
-        self.s3 = boto3.client('s3')
-        self.source_bucket, self.source_prefix = self._parse_s3_path(source_s3)
-        self.dest_bucket, self.dest_prefix = self._parse_s3_path(dest_s3)
+    def __init__(self, source: str, dest: str):
+        self.source = source
+        self.dest = dest
+        self.is_s3 = source.startswith('s3://')
+
+        if self.is_s3:
+            import boto3
+            self.s3 = boto3.client('s3')
+            self.source_bucket, self.source_prefix = self._parse_s3_path(source)
+            self.dest_bucket, self.dest_prefix = self._parse_s3_path(dest)
+        else:
+            self.source_path = Path(source)
+            self.dest_path = Path(dest)
+            self.dest_path.mkdir(parents=True, exist_ok=True)
+
         self.data_store = AgentDataStore()
         self.prediction_engine = PredictionEngine(self.data_store)
 
@@ -41,19 +57,26 @@ class BatchInsightsProcessor:
         return parts[0], parts[1] if len(parts) > 1 else ''
 
     def list_configs(self) -> List[str]:
-        """List all config files from S3 source."""
-        configs = []
-        paginator = self.s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=self.source_bucket, Prefix=self.source_prefix):
-            for obj in page.get('Contents', []):
-                if obj['Key'].endswith('.json'):
-                    configs.append(obj['Key'])
-        return configs
+        """List all config files from source."""
+        if self.is_s3:
+            configs = []
+            paginator = self.s3.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=self.source_bucket, Prefix=self.source_prefix):
+                for obj in page.get('Contents', []):
+                    if obj['Key'].endswith('.json'):
+                        configs.append(obj['Key'])
+            return configs
+        else:
+            return [str(p) for p in self.source_path.glob('*.json')]
 
     def download_config(self, key: str) -> Dict:
-        """Download and parse config from S3."""
-        resp = self.s3.get_object(Bucket=self.source_bucket, Key=key)
-        return json.loads(resp['Body'].read().decode('utf-8'))
+        """Load config from source."""
+        if self.is_s3:
+            resp = self.s3.get_object(Bucket=self.source_bucket, Key=key)
+            return json.loads(resp['Body'].read().decode('utf-8'))
+        else:
+            with open(key, 'r') as f:
+                return json.load(f)
 
     def process_config(self, config: Dict) -> Dict[str, Any]:
         """Run insights on a single config, return detailed results."""
@@ -157,28 +180,34 @@ h1, h2 { color: #333; }
         return html
 
     def upload_results(self, results: List[Dict], html: str):
-        """Upload JSON and HTML results to S3."""
+        """Save JSON and HTML results to dest (local or S3)."""
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
 
-        # Upload detailed JSON
-        json_key = f"{self.dest_prefix}insights_{ts}.json"
-        self.s3.put_object(
-            Bucket=self.dest_bucket,
-            Key=json_key,
-            Body=json.dumps(results, indent=2, default=str),
-            ContentType='application/json'
-        )
-        print(f"  Uploaded: s3://{self.dest_bucket}/{json_key}")
+        if self.is_s3:
+            json_key = f"{self.dest_prefix}insights_{ts}.json"
+            self.s3.put_object(
+                Bucket=self.dest_bucket, Key=json_key,
+                Body=json.dumps(results, indent=2, default=str),
+                ContentType='application/json'
+            )
+            print(f"  Uploaded: s3://{self.dest_bucket}/{json_key}")
 
-        # Upload HTML summary
-        html_key = f"{self.dest_prefix}summary_{ts}.html"
-        self.s3.put_object(
-            Bucket=self.dest_bucket,
-            Key=html_key,
-            Body=html,
-            ContentType='text/html'
-        )
-        print(f"  Uploaded: s3://{self.dest_bucket}/{html_key}")
+            html_key = f"{self.dest_prefix}summary_{ts}.html"
+            self.s3.put_object(
+                Bucket=self.dest_bucket, Key=html_key,
+                Body=html, ContentType='text/html'
+            )
+            print(f"  Uploaded: s3://{self.dest_bucket}/{html_key}")
+        else:
+            json_file = self.dest_path / f"insights_{ts}.json"
+            with open(json_file, 'w') as f:
+                json.dump(results, f, indent=2, default=str)
+            print(f"  Saved: {json_file}")
+
+            html_file = self.dest_path / f"summary_{ts}.html"
+            with open(html_file, 'w') as f:
+                f.write(html)
+            print(f"  Saved: {html_file}")
 
     def run_once(self) -> int:
         """Run one batch of processing. Returns count of configs processed."""
