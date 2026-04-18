@@ -1,0 +1,287 @@
+{
+  "orchestrator": {
+    "name": "strands_etl_orchestrator",
+    "description": "ETL Orchestration: S3 Stale Detection -> Glue Trigger -> Validation -> Audit & Dashboard Email",
+    "version": "1.1.0",
+    "run_mode": "full_pipeline",
+    "run_mode_options_doc": "full_pipeline = stale check + glue trigger + validations | validation_only = skip stale check & glue, run validations directly | summary = run summary queries with chart generation"
+  },
+  "s3_monitoring": {
+    "defaults": {
+      "stale_subfolder_count_threshold": 3,
+      "stale_subfolder_hours_threshold": 3,
+      "no_subfolder_hours_threshold": 5
+    },
+    "sources": [
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_ADDRESS_TB__ct/",
+        "label": "MACP Address Table",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_address_tb.json",
+          "archive_s3_path": "archive/MACP.Mac_ADDRESS_TB__ct/",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUST_ADDRESS__ct/",
+        "label": "MACP Customer Address",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_cust_address.json",
+          "archive_s3_path": "archive/MACP.Mac_CUST_ADDRESS__ct/",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUSTOMER__ct/",
+        "label": "MACP Customer",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_customer.json",
+          "archive_s3_path": "archive/MACP.Mac_CUSTOMER__ct/",
+          "workers": 15,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/",
+        "label": "MACP Cust Comm Preference Channel",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/macp_cust_comm_pref.json",
+          "archive_s3_path": "archive/MACP.Mac_CUST_CMMCT_PRFNC_CHNNL__ct/",
+          "workers": 10,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MRDP.MRD_MBR_INFO__ct/",
+        "label": "MRD Member Info",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/mrd_mbr_info.json",
+          "archive_s3_path": "archive/MRDP.MRD_MBR_INFO__ct/",
+          "workers": 20,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      },
+      {
+        "bucket": "cust-landing-us-west-2-xxxx",
+        "prefix": "landing/MRDP.MRD_MBR_PRD_DTL__ct/",
+        "label": "MRD Member Product Detail",
+        "glue_trigger": {
+          "job_name": "trigger_glue_job",
+          "config_file_bucket": "strands-etl-configs",
+          "config_file_key": "configs/mrd_mbr_prd_dtl.json",
+          "archive_s3_path": "archive/MRDP.MRD_MBR_PRD_DTL__ct/",
+          "workers": 20,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      }
+    ]
+  },
+  "validations": {
+    "execution_mode": "parallel",
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "query_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "landing_row_count_check",
+        "description": "Verify rows were loaded into the landing table",
+        "database": "landing_db",
+        "query": "SELECT COUNT(*) as cnt FROM landing_db.{table_name} WHERE load_date = current_date",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "duplicate_check",
+        "description": "Check for duplicate primary keys in landing",
+        "database": "landing_db",
+        "query": "SELECT primary_key, COUNT(*) as dup_cnt FROM landing_db.{table_name} GROUP BY primary_key HAVING COUNT(*) > 1 LIMIT 10",
+        "check_type": "no_rows",
+        "condition": "row_count == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "null_key_check",
+        "description": "Verify no NULL primary keys",
+        "database": "landing_db",
+        "query": "SELECT COUNT(*) as null_cnt FROM landing_db.{table_name} WHERE primary_key IS NULL",
+        "check_type": "threshold",
+        "condition": "null_cnt == 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "freshness_check",
+        "description": "Verify data freshness - latest load_timestamp within expected window",
+        "database": "landing_db",
+        "query": "SELECT MAX(load_timestamp) as latest_ts, date_diff('hour', MAX(load_timestamp), current_timestamp) as hours_since FROM landing_db.{table_name}",
+        "check_type": "threshold",
+        "condition": "hours_since < 24",
+        "abort_on_failure": false
+      }
+    ],
+    "comparison_checks": [
+      {
+        "name": "landing_vs_source_row_count",
+        "description": "Compare row count between landing table and source staging to verify complete data transfer",
+        "query_a": {
+          "label": "Landing Table",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Source Staging",
+          "database": "staging_db",
+          "query": "SELECT COUNT(*) AS cnt FROM staging_db.macp_address_tb_stg WHERE cast(load_date as date) = current_date"
+        },
+        "compare_column": "cnt",
+        "rule": "match",
+        "abort_on_failure": true
+      },
+      {
+        "name": "member_info_count_tolerance",
+        "description": "MRD Member Info row counts should be within 5% between landing and curated",
+        "query_a": {
+          "label": "Landing",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Curated",
+          "database": "curated_db",
+          "query": "SELECT COUNT(*) AS cnt FROM curated_db.mrd_mbr_info WHERE cast(update_date as date) = current_date"
+        },
+        "compare_column": "cnt",
+        "rule": "percentage_within",
+        "tolerance": 5,
+        "abort_on_failure": false
+      },
+      {
+        "name": "customer_non_zero_check",
+        "description": "Verify that the customer landing table has non-zero rows loaded today",
+        "query_a": {
+          "label": "Customer Landing",
+          "database": "landing_db",
+          "query": "SELECT COUNT(*) AS cnt FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Baseline (not used)",
+          "database": "landing_db",
+          "query": "SELECT 0 AS cnt"
+        },
+        "compare_column": "cnt",
+        "rule": "a_not_zero",
+        "abort_on_failure": true
+      },
+      {
+        "name": "delta_membership_diff",
+        "description": "Compare membership numbers between source delta and target delta to find missing or extra records",
+        "query_a": {
+          "label": "Source Delta",
+          "database": "landing_db",
+          "query": "SELECT membership_number, member_name, plan_code FROM landing_db.mbr_delta WHERE cast(load_timestamp as date) = current_date"
+        },
+        "query_b": {
+          "label": "Target Delta",
+          "database": "curated_db",
+          "query": "SELECT membership_number, member_name, plan_code FROM curated_db.mbr_delta WHERE cast(update_date as date) = current_date"
+        },
+        "rule": "data_diff",
+        "key_columns": ["membership_number"],
+        "compare_columns": ["member_name", "plan_code"],
+        "case_sensitive": false,
+        "max_diff_rows": 50,
+        "ignore_duplicates": false,
+        "abort_on_failure": false
+      }
+    ]
+  },
+  "summary": {
+    "max_parallel": 5,
+    "athena_output_bucket": "strands-etl-athena-results",
+    "athena_output_prefix": "summary_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "daily_load_summary",
+        "description": "Row counts loaded today per landing table",
+        "database": "landing_db",
+        "query": "SELECT 'macp_address_tb' AS table_name, COUNT(*) AS row_count FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_address', COUNT(*) FROM landing_db.macp_cust_address WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_customer', COUNT(*) FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_comm_pref', COUNT(*) FROM landing_db.macp_cust_comm_pref WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_info', COUNT(*) FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_prd_dtl', COUNT(*) FROM landing_db.mrd_mbr_prd_dtl WHERE cast(load_timestamp as date) = current_date",
+        "chart": {
+          "type": "bar",
+          "title": "Daily Load Row Counts by Table",
+          "x_column": "table_name",
+          "y_column": "row_count"
+        }
+      },
+      {
+        "name": "source_distribution",
+        "description": "Distribution of records across source systems",
+        "database": "landing_db",
+        "query": "SELECT CASE WHEN table_name LIKE 'macp%' THEN 'MACP' ELSE 'MRD' END AS source_system, SUM(cnt) AS total_rows FROM (SELECT 'macp_address_tb' AS table_name, COUNT(*) AS cnt FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_address', COUNT(*) FROM landing_db.macp_cust_address WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_customer', COUNT(*) FROM landing_db.macp_customer WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'macp_cust_comm_pref', COUNT(*) FROM landing_db.macp_cust_comm_pref WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_info', COUNT(*) FROM landing_db.mrd_mbr_info WHERE cast(load_timestamp as date) = current_date UNION ALL SELECT 'mrd_mbr_prd_dtl', COUNT(*) FROM landing_db.mrd_mbr_prd_dtl WHERE cast(load_timestamp as date) = current_date) GROUP BY 1",
+        "chart": {
+          "type": "pie",
+          "title": "Record Distribution by Source System",
+          "label_column": "source_system",
+          "value_column": "total_rows"
+        }
+      },
+      {
+        "name": "weekly_load_trend",
+        "description": "Daily row counts over the past 7 days across all landing tables",
+        "database": "landing_db",
+        "query": "SELECT cast(load_timestamp as date) AS load_date, COUNT(*) AS total_rows FROM landing_db.macp_address_tb WHERE cast(load_timestamp as date) >= date_add('day', -7, current_date) GROUP BY 1 ORDER BY 1",
+        "chart": {
+          "type": "trend",
+          "title": "Weekly Load Trend (MACP Address Table)",
+          "x_column": "load_date",
+          "y_column": "total_rows"
+        }
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/orchestrator/",
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands ETL Dashboard"
+  }
+}

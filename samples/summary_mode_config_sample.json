@@ -1,0 +1,122 @@
+{
+  "orchestrator": {
+    "run_mode": "summary",
+    "description": "Summary mode – Audit summary, Z-score analysis (7d vs 30d rolling), Trends charts (state-wise)"
+  },
+
+  "summary": {
+    "athena_output_bucket": "your-athena-results-bucket",
+    "athena_output_prefix": "summary_results/",
+    "athena_workgroup": "primary",
+    "max_parallel": 5,
+
+    "gif_urls": {
+      "header": "https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif",
+      "trend": "https://media.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif"
+    },
+
+    "zscore_queries": [
+      {
+        "name": "membership_zscore_7d",
+        "description": "Daily membership counts – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_count",
+        "avg_column": "avg_30d",
+        "stddev_column": "stddev_30d",
+        "query": "WITH daily_counts AS ( SELECT load_date, COUNT(*) AS daily_count FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_count AS today_count, ROUND(AVG(r.daily_count), 0) AS avg_30d, ROUND(STDDEV(r.daily_count), 2) AS stddev_30d FROM daily_counts d JOIN daily_counts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_count ) SELECT load_date, today_count, avg_30d, stddev_30d FROM rolling_stats ORDER BY load_date DESC"
+      },
+      {
+        "name": "transaction_zscore_7d",
+        "description": "Daily transaction counts – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_count",
+        "avg_column": "avg_30d",
+        "stddev_column": "stddev_30d",
+        "query": "WITH daily_counts AS ( SELECT load_date, COUNT(*) AS daily_count FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_count AS today_count, ROUND(AVG(r.daily_count), 0) AS avg_30d, ROUND(STDDEV(r.daily_count), 2) AS stddev_30d FROM daily_counts d JOIN daily_counts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_count ) SELECT load_date, today_count, avg_30d, stddev_30d FROM rolling_stats ORDER BY load_date DESC"
+      },
+      {
+        "name": "transaction_amount_zscore_7d",
+        "description": "Daily transaction amounts ($) – 7-day z-score vs 30-day rolling avg/stddev",
+        "database": "curated_db",
+        "count_column": "today_amount",
+        "avg_column": "avg_30d_amount",
+        "stddev_column": "stddev_30d_amount",
+        "query": "WITH daily_amounts AS ( SELECT load_date, ROUND(SUM(amount), 2) AS daily_amount FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -37, current_date) AS VARCHAR) GROUP BY load_date ), rolling_stats AS ( SELECT d.load_date, d.daily_amount AS today_amount, ROUND(AVG(r.daily_amount), 2) AS avg_30d_amount, ROUND(STDDEV(r.daily_amount), 2) AS stddev_30d_amount FROM daily_amounts d JOIN daily_amounts r ON r.load_date >= CAST(date_add('day', -30, CAST(d.load_date AS DATE)) AS VARCHAR) AND r.load_date < d.load_date WHERE d.load_date >= CAST(date_add('day', -7, current_date) AS VARCHAR) GROUP BY d.load_date, d.daily_amount ) SELECT load_date, today_amount, avg_30d_amount, stddev_30d_amount FROM rolling_stats ORDER BY load_date DESC"
+      }
+    ],
+
+    "queries": [
+      {
+        "name": "statewise_member_counts",
+        "description": "State-wise member count distribution – last 30 days aggregate",
+        "database": "curated_db",
+        "query": "SELECT state_code, COUNT(*) AS total_members, COUNT(DISTINCT club_id) AS clubs_active, COUNT(DISTINCT load_date) AS days_active FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY state_code ORDER BY total_members DESC",
+        "chart": {
+          "type": "pie",
+          "title": "State-wise Member Distribution (30 Days)",
+          "label_column": "state_code",
+          "value_column": "total_members"
+        }
+      },
+      {
+        "name": "statewise_transaction_counts",
+        "description": "State-wise transaction count and amount – last 30 days",
+        "database": "curated_db",
+        "query": "SELECT state_code, COUNT(*) AS txn_count, ROUND(SUM(amount), 2) AS total_amount, COUNT(DISTINCT product_code) AS products_active FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY state_code ORDER BY txn_count DESC",
+        "chart": {
+          "type": "bar",
+          "title": "State-wise Transaction Counts (30 Days)",
+          "x_column": "state_code",
+          "y_column": "txn_count"
+        }
+      },
+      {
+        "name": "club_wise_member_counts",
+        "description": "Club-wise member counts – last 30 days",
+        "database": "curated_db",
+        "query": "SELECT club_id, COUNT(*) AS total_members, COUNT(DISTINCT state_code) AS states_present, COUNT(DISTINCT bill_plan) AS plan_types FROM curated_db.membership WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY club_id ORDER BY total_members DESC",
+        "chart": {
+          "type": "bar",
+          "title": "Club-wise Member Counts (30 Days)",
+          "x_column": "club_id",
+          "y_column": "total_members"
+        }
+      },
+      {
+        "name": "daily_trend_30d",
+        "description": "30-day daily trend – total count and amount across all products/states",
+        "database": "curated_db",
+        "query": "SELECT load_date, COUNT(*) AS total_records, ROUND(SUM(amount), 2) AS total_amount, COUNT(DISTINCT state_code) AS active_states, COUNT(DISTINCT club_id) AS active_clubs FROM curated_db.transactions WHERE load_date >= CAST(date_add('day', -30, current_date) AS VARCHAR) GROUP BY load_date ORDER BY load_date",
+        "chart": {
+          "type": "trend",
+          "title": "30-Day Daily Trend – Total Records",
+          "x_column": "load_date",
+          "y_column": "total_records"
+        }
+      }
+    ]
+  },
+
+  "audit": {
+    "database": "audit_db",
+    "table": "etl_orchestrator_audit",
+    "s3_bucket": "your-audit-bucket",
+    "s3_prefix": "etl_audit/orchestrator"
+  },
+
+  "email": {
+    "sender": "etl-bot@yourcompany.com",
+    "recipients": ["team@yourcompany.com"],
+    "smtp_host": "mail.yourcompany.com",
+    "smtp_port": 25,
+    "subject_prefix": "ETL Summary Dashboard"
+  },
+
+  "_notes": {
+    "usage": "python etl_orchestrator.py --config summary_mode_config_sample.json",
+    "zscore": "Z-score queries run for last 7 days. z_score and z_flag (CRITICAL/WARNING/NORMAL) are computed in Python. |z|>=3 CRITICAL, |z|>=2 WARNING.",
+    "trends": "Trend queries show state/club-wise counts for last 30 days. Charts rendered as animated GIF (bar growing, pie expanding, trend drawing) if Pillow is installed, else static PNG.",
+    "gifs": "Two decorative GIFs embedded via gif_urls: 'header' (top of email) and 'trend' (before trend charts). Replace with your own S3-hosted GIFs for production.",
+    "table_names": "Replace curated_db.membership and curated_db.transactions with your actual table/column names."
+  }
+}

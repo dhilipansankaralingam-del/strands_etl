@@ -1,0 +1,224 @@
+{
+  "orchestrator": {
+    "name": "etl_orchestrator",
+    "description": "ETL Orchestration: S3 Stale Detection -> Glue Trigger -> Validation -> Audit & Dashboard Email",
+    "version": "1.0.0",
+    "run_mode": "validation_only",
+    "run_mode_options_doc": "full_pipeline = stale check + glue trigger + validations | validation_only = skip stale check & glue, run validations directly"
+  },
+  "s3_monitoring": {
+    "defaults": {
+      "stale_subfolder_count_threshold": 3,
+      "stale_subfolder_hours_threshold": 3,
+      "no_subfolder_hours_threshold": 5
+    },
+    "sources": [
+      {
+        "bucket": "bucket",
+        "prefix": "t1mrd_mbr_info__ct/",
+        "label": "MBR INFO Table",
+        "glue_trigger": {
+          "job_name": "trigger-glue",
+          "config_file_bucket": "bucket",
+          "config_file_key": "config/membership_mrd_mbr_info__ct.json",
+          "archive_s3_path": "archive/mrd_mbr_info__ct/",
+          "workers": 5,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "bucket",
+        "prefix": "t1mrd_mbrshp_household__ct/",
+        "label": "MRD Household",
+        "glue_trigger": {
+          "job_name": "ace-da-membership-trigger-glue",
+          "config_file_bucket": "bucket",
+          "config_file_key": "config/mrd_mbrshp_household__ct.json",
+          "archive_s3_path": "archive/mrd_mbrshp_household__ct/",
+          "workers": 5,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      },
+      {
+        "bucket": "bucket",
+        "prefix": "t1mrd_prd_dtl__ct/",
+        "label": "MRD PRD Detail",
+        "glue_trigger": {
+          "job_name": "t1",
+          "config_file_bucket": "bucket",
+          "config_file_key": "config/membership_mrd_prd_dtl__ct.json",
+          "archive_s3_path": "archive/mrd_prd_dtl__ct/",
+          "workers": 5,
+          "worker_type": "G.2X",
+          "timeout_minutes": 180
+        }
+      },
+      {
+        "bucket": "bucket",
+        "prefix": "t1mrd_prd_dtl_hist__ct/",
+        "label": "MRD PRD detail Hist",
+        "glue_trigger": {
+          "job_name": "t1",
+          "config_file_bucket": "bucket",
+          "config_file_key": "config/membership_mrd_prd_dtl_Hist___ct.json",
+          "archive_s3_path": "archive/mrd_prd_dtl_hist__ct/",
+          "workers": 5,
+          "worker_type": "G.1X",
+          "timeout_minutes": 120
+        }
+      }
+    ]
+  },
+  "validations": {
+    "execution_mode": "parallel",
+    "max_parallel": 5,
+    "athena_output_bucket": "bucket",
+    "athena_output_prefix": "query_results/",
+    "athena_workgroup": "primary",
+    "queries": [
+      {
+        "name": "row_count_check",
+        "description": "Verify rows were loaded into the product detail table for today",
+        "database": "membership_master_prod",
+        "query": "select count(*) as cnt  from membership_master_prod.member_product_master  where substring(cast(load_timestamp as varchar), 1, 10) = cast(date_add('day', -1, current_date) AS varchar)",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": true
+      },
+      {
+        "name": "mrd_mbr_prd_dtl_vs_member_product_detail_base_reconciliation",
+        "description": "Validate that all member product detail records from mrd_mbr_prd_dtl (yesterday) exist in member_product_detail_base using a normalized business key comparison",
+        "database": "membership_master_prod",
+        "query": "WITH t1_raw AS (SELECT * FROM membership_base_prod.member_product_detail_base WHERE substring(cast(load_timestamp AS varchar),1,10) >= cast(date_add('day',-1,current_date) AS varchar)), t1 AS (SELECT *, concat_ws('^', coalesce(trim(member_number),''), coalesce(trim(club_code),''), coalesce(trim(product_code),''), coalesce(trim(role_code),''), coalesce(trim(member_effective_date),''), coalesce(cast(try_cast(record_effective_date AS date) AS varchar),''), coalesce(trim(transaction_timestamp),''), coalesce(cast(customer_id  AS varchar),'')) AS concat_key FROM t1_raw), t2_raw AS (SELECT * FROM membership_master_prod.member_product_master WHERE substring(cast(load_timestamp AS varchar),1,10) >= cast(date_add('day',-2, current_date) AS varchar)), t2 AS (SELECT *, concat_ws('^', coalesce(trim(membership_number),''), coalesce(trim(membership_club_code),''), coalesce(trim(product_code),''), coalesce(trim(role_code),''), coalesce(trim(member_effective_date),''), coalesce(cast(try_cast(record_effective_date AS date) AS varchar),''), coalesce(trim(transaction_timestamp),''),  coalesce(cast(try_cast(customer_id AS bigint) AS varchar),'')    ) AS concat_key FROM t2_raw)  SELECT *   FROM t1 LEFT JOIN t2  ON t1.concat_key = t2.concat_key WHERE t2.concat_key IS NULL ",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_daily_duplicate_check",
+        "description": "Detect duplicate member product detail records in member_product_detail_base for yesterday based on full business key",
+        "database": "membership_master_prod",
+        "query": "SELECT COUNT(*) AS cnt FROM (SELECT 1 FROM membership_master_prod.member_product_master WHERE substring(cast(load_timestamp AS varchar),1,10) = cast(date_add('day',-1,current_date) AS varchar) GROUP BY club_code, member_number, customer_id, role_code, product_code, term_effective_date, term_expiration_date, member_effective_date, record_effective_date, transaction_timestamp, paid_flag HAVING COUNT(*) > 1) dup",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_daily_completeness_check",
+        "description": "Validate completeness of mandatory fields in member_product_master for today's load; fails if any required field is NULL",
+        "database": "membership_master_prod",
+        "query": "SELECT COUNT(*) AS cnt FROM membership_master_prod.member_product_master WHERE substring(cast(load_timestamp AS varchar),1,10) = cast(current_date AS varchar) AND (club_code IS NULL OR member_number IS NULL OR role_code IS NULL OR customer_id IS NULL OR product_code IS NULL OR term_effective_date IS NULL OR term_expiration_date IS NULL)",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_daily_minmax_year_validation",
+        "description": "Validate tenure and join year fields are populated and within acceptable range (1900-2100) for today's loaded or updated records in member_product_detail_base",
+        "database": "membership_master_prod",
+        "query": "WITH params AS (SELECT '1900' AS min_year, '2100' AS max_year)  SELECT COUNT(*) AS cnt FROM membership_master_prod.member_product_master t CROSS JOIN params WHERE (substring(cast(load_timestamp AS varchar),1,10) = cast(current_date AS varchar) OR substring(cast(update_timestamp AS varchar),1,10) = cast(current_date AS varchar)) AND (tenure_aaa_year IS NULL OR club_join_year IS NULL OR club_join_year < params.min_year OR club_join_year > params.max_year OR aaa_join_year IS NULL OR aaa_join_year < params.min_year OR aaa_join_year > params.max_year)",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_invalid_club_code",
+        "description": "Validate club_code is present and within approved values for today's load",
+        "database": "membership_master_prod",
+        "query": "SELECT COUNT(*) AS cnt FROM membership_master_prod.member_product_master WHERE substring(cast(load_timestamp AS varchar),1,10) = cast(current_date AS varchar) AND (club_code IS NULL OR club_code NOT IN ('001','004','601','018','036','065','252','258','215'))",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_invalid_role_code",
+        "description": "Validate role_code is present and within approved values for today's load or update",
+        "database": "membership_master_prod",
+        "query": "SELECT COUNT(*) AS cnt FROM membership_master_prod.member_product_master WHERE (substring(cast(load_timestamp AS varchar),1,10) = cast(current_date AS varchar) OR substring(cast(update_timestamp AS varchar),1,10) = cast(current_date AS varchar)) AND (role_code IS NULL OR role_code NOT IN ('00','01','02','03','04','05','06'))",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_invalid_product_code",
+        "description": "Validate product_code is present and within approved values for today's load",
+        "database": "membership_base_prod",
+        "query": "SELECT COUNT(*) AS cnt FROM membership_master_prod.member_product_master WHERE substring(cast(load_timestamp AS varchar),1,10) = cast(current_date AS varchar) AND (product_code IS NULL OR product_code NOT IN ('10','01','11','12','14','15','80','20','90'))",
+        "check_type": "row_count",
+        "condition": "cnt > 0",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_business_type_code_quality",
+        "description": "Validate business_type_code quality using percentage threshold (20%) over records loaded 5 days ago",
+        "database": "membership_master_prod",
+        "query": "WITH params AS (SELECT 0.20 AS pass_threshold), today_rows AS (SELECT * FROM membership_master_prod.member_product_master WHERE substr(cast(load_timestamp AS varchar),1,10) = cast(date_add('day',-5,current_date) AS varchar)), counts AS (SELECT COUNT(*) AS total_today, SUM(CASE WHEN business_type_code IS NULL OR business_type_code NOT IN ('RAC','REN','NEW','RAH','MYA','REI') THEN 1 ELSE 0 END) AS invalid_count FROM today_rows), result AS (SELECT total_today, invalid_count, CASE WHEN total_today = 0 THEN 0.0 ELSE ROUND(100.0 * invalid_count / total_today,2) END AS invalid_pct, CASE WHEN total_today = 0 THEN 'NO_DATA' WHEN (CAST(invalid_count AS double)/total_today) <= pass_threshold THEN 'PASS' ELSE 'FAIL' END AS status FROM counts CROSS JOIN params) SELECT * FROM result",
+        "check_type": "percentage_threshold",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_reason_type_code_quality",
+        "description": "Validate reason_type_code quality using percentage threshold (20%) over records loaded 5 days ago",
+        "database": "membership_master_prod",
+        "query": "WITH params AS (SELECT 0.20 AS pass_threshold), today_rows AS (SELECT * FROM membership_master_prod.member_product_master WHERE substr(cast(load_timestamp AS varchar),1,10) = cast(date_add('day',-5,current_date) AS varchar)), counts AS (SELECT COUNT(*) AS total_today, SUM(CASE WHEN reason_type_code IS NULL OR reason_type_code NOT IN ('509','501','504','508','080','054','500') THEN 1 ELSE 0 END) AS invalid_count FROM today_rows), result AS (SELECT total_today, invalid_count, CASE WHEN total_today = 0 THEN 0.0 ELSE ROUND(100.0 * invalid_count / total_today,2) END AS invalid_pct, CASE WHEN total_today = 0 THEN 'NO_DATA' WHEN (CAST(invalid_count AS double)/total_today) <= pass_threshold THEN 'PASS' ELSE 'FAIL' END AS status FROM counts CROSS JOIN params) SELECT * FROM result",
+        "check_type": "percentage_threshold",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_monthly_cost_anomaly",
+        "description": "Detect abnormal change in daily product cost compared to 30-day rolling average",
+        "database": "membership_master_prod",
+        "query": "WITH params AS ( SELECT date_add('day',-1,current_date) AS target_date, 30 AS lookback_days, 0.20 AS pct_threshold ), normalized AS ( SELECT TRY_CAST(product_cost_amount AS double) AS product_cost_amount_d, date(load_timestamp) AS load_dt, date(transaction_timestamp) AS txn_dt, COALESCE(date(load_timestamp),date(transaction_timestamp)) AS event_date FROM membership_master_prod.member_product_master WHERE paid_flag='Y' AND valid_flag='Y' AND product_code='01' ), today_sum AS ( SELECT COALESCE(SUM(product_cost_amount_d),0.0) AS today_sum FROM normalized, params WHERE event_date = params.target_date ), prior_n_sum AS ( SELECT COALESCE(SUM(product_cost_amount_d),0.0) AS prior_sum FROM normalized, params WHERE event_date BETWEEN date_add('day',-params.lookback_days,params.target_date) AND date_add('day',-1,params.target_date) ), result AS ( SELECT p.target_date, t.today_sum, pn.prior_sum, CAST(pn.prior_sum AS double)/p.lookback_days AS rolling_avg_60, CASE WHEN CAST(pn.prior_sum AS double)/p.lookback_days = 0 THEN CASE WHEN t.today_sum = 0 THEN 0.0 ELSE 100.0 END ELSE ROUND(100.0*(t.today_sum-(CAST(pn.prior_sum AS double)/p.lookback_days))/(CAST(pn.prior_sum AS double)/p.lookback_days),2) END AS pct_difference, CASE WHEN CAST(pn.prior_sum AS double)/p.lookback_days = 0 AND t.today_sum > 0 THEN 'FAIL' WHEN ABS(CASE WHEN CAST(pn.prior_sum AS double)/p.lookback_days = 0 THEN CASE WHEN t.today_sum = 0 THEN 0.0 ELSE 100.0 END ELSE 100.0*(t.today_sum-(CAST(pn.prior_sum AS double)/p.lookback_days))/(CAST(pn.prior_sum AS double)/p.lookback_days) END) > (p.pct_threshold*100) THEN 'FAIL' ELSE 'PASS' END AS status FROM params p CROSS JOIN today_sum t CROSS JOIN prior_n_sum pn ) SELECT * FROM result",
+        "check_type": "rolling_average",
+        "tolerance": "15",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_term_effective_date_validation",
+        "description": "Validate term_effective_date is parsable, not a sentinel value, and within the allowed date window (2 years back to 6 months forward) for yesterday's records",
+        "database": "membership_master_prod",
+        "query": "WITH params AS (SELECT date_add('year', -2, current_date) AS min_allowed_date, date_add('month', 6, current_date) AS max_allowed_date, DATE '0001-01-01' AS sentinel_min, DATE '9999-12-31' AS sentinel_max, 0.0 AS invalid_threshold), today_rows AS (SELECT * FROM membership_master.member_product_master WHERE substr(cast(load_timestamp AS varchar),1,10) = cast(date_add('day',-1,current_date) AS varchar)), normalized AS (SELECT *, TRY_CAST(term_effective_date AS date) AS term_eff_dt FROM today_rows), invalid_rows AS (SELECT CASE WHEN term_eff_dt IS NULL THEN 'UNPARSABLE' ELSE NULL END AS reason_unparsable, CASE WHEN term_eff_dt = params.sentinel_min OR term_eff_dt = params.sentinel_max THEN 'SENTINEL_DATE' ELSE NULL END AS reason_sentinel, CASE WHEN term_eff_dt IS NOT NULL AND (term_eff_dt < params.min_allowed_date OR term_eff_dt > params.max_allowed_date) THEN 'OUT_OF_WINDOW' ELSE NULL END AS reason_out_of_window FROM normalized CROSS JOIN params WHERE term_eff_dt IS NULL OR term_eff_dt = params.sentinel_min OR term_eff_dt = params.sentinel_max OR term_eff_dt < params.min_allowed_date OR term_eff_dt > params.max_allowed_date), summary AS (SELECT (SELECT COUNT(*) FROM normalized) AS total_today, (SELECT COUNT(*) FROM invalid_rows) AS invalid_count, CASE WHEN (SELECT COUNT(*) FROM normalized) = 0 THEN 0.0 ELSE CAST((SELECT COUNT(*) FROM invalid_rows) AS double) / (SELECT COUNT(*) FROM normalized) END AS invalid_fraction FROM params), results as (SELECT s.total_today, s.invalid_count, ROUND(100.0 * s.invalid_fraction, 2) AS invalid_pct, CASE WHEN s.total_today = 0 THEN 'NO_DATA' WHEN s.invalid_fraction <= params.invalid_threshold THEN 'PASS' ELSE 'FAIL' END AS status, params.min_allowed_date, params.max_allowed_date, params.sentinel_min, params.sentinel_max FROM summary s CROSS JOIN params) select status from results ",
+        "check_type": "threshold",
+        "condition": "status == 'PASS'",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_detail_base_rolling_avg_60day_volume",
+        "description": "Validate yesterday's record volume against the 60-day rolling daily average; fails if deviation exceeds +/-15%",
+        "database": "membership_master_prod",
+        "query": "WITH t_today AS (SELECT * FROM membership_master_prod.member_product_master WHERE substr(cast(load_timestamp AS varchar),1,10) = cast(date_add('day',-1,current_date) AS varchar)), today_count AS(SELECT COUNT(*) AS cnt_today FROM t_today), daily_counts_60 AS (SELECT CAST(substr(cast(load_timestamp AS varchar),1,10) AS date) AS dt, COUNT(*) AS cnt FROM membership_master_prod.member_product_master WHERE CAST(substr(cast(load_timestamp AS varchar),1,10) AS date) BETWEEN date_add('day',-60,current_date) AND date_add('day',-1,current_date) GROUP BY 1), rolling_stats AS (SELECT COALESCE(SUM(cnt),0) AS total_in_60, COUNT(*) AS days_with_data, CAST(COALESCE(SUM(cnt),0) AS double) / 60.0 AS avg_per_day_in_60_full_window FROM daily_counts_60) SELECT tc.cnt_today AS today_count, rs.avg_per_day_in_60_full_window AS rolling_avg_60, CASE WHEN rs.avg_per_day_in_60_full_window = 0 THEN CASE WHEN tc.cnt_today = 0 THEN 0.0 ELSE 100.0 END ELSE ROUND(100.0 * (tc.cnt_today - rs.avg_per_day_in_60_full_window) / rs.avg_per_day_in_60_full_window, 2) END AS pct_difference, CASE WHEN rs.avg_per_day_in_60_full_window = 0 AND tc.cnt_today > 0 THEN 'FAIL' WHEN ABS(CASE WHEN rs.avg_per_day_in_60_full_window = 0 THEN CASE WHEN tc.cnt_today = 0 THEN 0.0 ELSE 100.0 END ELSE 100.0 * (tc.cnt_today - rs.avg_per_day_in_60_full_window) / rs.avg_per_day_in_60_full_window END) > 15.0 THEN 'FAIL' ELSE 'PASS' END AS status, rs.total_in_60, rs.days_with_data FROM today_count tc CROSS JOIN rolling_stats rs",
+        "check_type": "rolling_average",
+        "tolerance": "15",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_movement_master_transaction_date",
+        "description": "member_product_movement_master_transaction_date",
+        "database": "membership_master_prod",
+        "query": "WITH base AS ( SELECT CAST(load_date AS DATE) AS load_day, transaction_timestamp FROM membership_master_prod.member_product_movement_master WHERE CAST(load_date AS DATE) >= date_trunc('month', current_date) ), agg AS ( SELECT load_day, MAX(transaction_timestamp) AS max_ts_raw, MIN(transaction_timestamp) AS min_ts_raw FROM base GROUP BY load_day ), parsed AS ( SELECT load_day, max_ts_raw, min_ts_raw, from_iso8601_timestamp(regexp_replace(max_ts_raw,' ','T')) AS ts_parsed FROM agg ) SELECT load_day, max_ts_raw, min_ts_raw, ts_parsed, CASE WHEN date(ts_parsed) = date_add('day',-1,load_day) THEN 'Y' ELSE 'N' END AS is_prev_day, CASE WHEN hour(ts_parsed) >= 23 THEN 'Y' ELSE 'N' END AS is_after_11pm, CASE WHEN date(ts_parsed) = date_add('day',-1,load_day) AND hour(ts_parsed) >= 23 THEN 'PASS' ELSE 'FAIL' END AS status FROM parsed ORDER BY load_day DESC",
+        "check_type": "threshold",
+        "condition": "status == 'PASS'",
+        "abort_on_failure": false
+      },
+      {
+        "name": "member_product_movement_master_inactive_reason",
+        "description": "member_product_movement_master_inactive_reason",
+        "database": "membership_master_prod",
+        "query": "WITH base AS ( SELECT CAST(load_date AS DATE) AS load_date, inactive_reason, COUNT(*) AS cnt FROM membership_master_prod.member_product_movement_master  WHERE product_code = '01' AND inactive_reason IS NOT NULL GROUP BY load_date, inactive_reason ), with_stats AS ( SELECT load_date, inactive_reason, cnt, AVG(CAST(cnt AS DECIMAL(18,4))) OVER ( PARTITION BY inactive_reason ORDER BY load_date ROWS BETWEEN 60 PRECEDING AND 1 PRECEDING ) AS rolling_avg_60, STDDEV_SAMP(CAST(cnt AS DECIMAL(18,4))) OVER ( PARTITION BY inactive_reason ORDER BY load_date ROWS BETWEEN 60 PRECEDING AND 1 PRECEDING ) AS rolling_stddev_60 FROM base ) SELECT inactive_reason, ROUND(rolling_avg_60,2) AS rolling_avg_60, ROUND(rolling_stddev_60,2) AS rolling_stddev_60, cnt AS current_day_count, ROUND((CAST(cnt AS DECIMAL(18,6)) - CAST(rolling_avg_60 AS DECIMAL(18,6))) / NULLIF(CAST(rolling_stddev_60 AS DECIMAL(18,6)),0),3) AS z_score, CASE WHEN rolling_avg_60 IS NULL OR rolling_stddev_60 IS NULL OR rolling_stddev_60 = 0 THEN 'FAIL' WHEN ABS((CAST(cnt AS DECIMAL(18,6)) - CAST(rolling_avg_60 AS DECIMAL(18,6))) / NULLIF(CAST(rolling_stddev_60 AS DECIMAL(18,6)),0)) > 2 THEN 'FAIL' ELSE 'PASS' END AS status FROM with_stats WHERE load_date = date_add('day',-1,current_date) ORDER BY inactive_reason",
+        "check_type": "threshold",
+        "condition": "status == 'PASS'",
+        "abort_on_failure": false
+      }
+    ]
+  },
+  "audit": {
+    "s3_bucket": "bucket",
+    "s3_prefix": "",
+    "database": "aew_membership",
+    "table": "etl_orchestrator_audit1",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  }
+}
