@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Strands ETL Slack Integration
+  Two-Lambda architecture:
+    etl-slack-handler   – sync, verifies signature, fires async processor (<3s)
+    etl-slack-processor – async, runs the agent, posts Block Kit result to Slack
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type:    String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+
+  SlackSigningSecretArn:
+    Type:        String
+    Description: "Secrets Manager ARN for the Slack Signing Secret"
+
+  SlackBotTokenArn:
+    Type:        String
+    Description: "Secrets Manager ARN for the Slack Bot Token (xoxb-…)"
+
+  AgentAnalyzerConfigPath:
+    Type:    String
+    Default: "config/agent_analyzer_config.json"
+
+  LogAnalyzerConfigPath:
+    Type:    String
+    Default: "config/log_analyzer_config.json"
+
+  HolidayCalendarPath:
+    Type:    String
+    Default: "config/holiday_calendar.json"
+
+  LastReportBucket:
+    Type:    String
+    Default: "strands-etl-audit"
+
+  LastReportKey:
+    Type:    String
+    Default: "agent_analyzer/last_report.json"
+
+  AthenaOutputBucket:
+    Type:    String
+    Default: "strands-etl-athena-results"
+
+  LearningBucket:
+    Type:    String
+    Default: "strands-etl-learning"
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime:      python3.12
+    Architectures: [arm64]        # Graviton2 — cheaper + faster for Python
+    Layers:
+      - !Sub "arn:aws:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:7"
+    Environment:
+      Variables:
+        AWS_REGION_NAME: !Ref AWS::Region
+        ENVIRONMENT:     !Ref Environment
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ── API Gateway ──────────────────────────────────────────────────────────
+  SlackApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name:      !Sub "strands-etl-slack-api-${Environment}"
+      StageName: !Ref Environment
+      Auth:
+        DefaultAuthorizer: NONE
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod:   "*"
+          ThrottlingRateLimit:  100
+          ThrottlingBurstLimit: 50
+      Tags:
+        Project: strands-etl
+        Component: slack-integration
+
+  # ── IAM Role shared by both Lambdas ─────────────────────────────────────
+  SlackLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "strands-etl-slack-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SlackLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              # Invoke the processor Lambda
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SlackProcessorFunction.Arn
+
+              # Read Slack secrets from Secrets Manager
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref SlackSigningSecretArn
+                  - !Ref SlackBotTokenArn
+
+              # Bedrock — invoke models
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "arn:aws:bedrock:*::foundation-model/anthropic.*"
+
+              # S3 — read configs, write reports, read/write learning vectors
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${LastReportBucket}"
+                  - !Sub "arn:aws:s3:::${LastReportBucket}/*"
+                  - !Sub "arn:aws:s3:::${AthenaOutputBucket}"
+                  - !Sub "arn:aws:s3:::${AthenaOutputBucket}/*"
+                  - !Sub "arn:aws:s3:::${LearningBucket}"
+                  - !Sub "arn:aws:s3:::${LearningBucket}/*"
+                  - "arn:aws:s3:::strands-etl-configs"
+                  - "arn:aws:s3:::strands-etl-configs/*"
+
+              # Athena — run queries
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StopQueryExecution
+                Resource: "*"
+
+              # Glue Catalog — schema discovery for NL queries
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                Resource: "*"
+
+              # CloudWatch Logs — read log groups for log analyzer
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: "*"
+
+  # ── Handler Lambda (sync, <10s) ──────────────────────────────────────────
+  SlackHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "etl-slack-handler-${Environment}"
+      Description:  "Slack slash-command handler — verifies signature and fires async processor"
+      Handler:      slack.slack_handler.handler
+      CodeUri:      ../                          # project root (includes slack/ + config/)
+      MemorySize:   256
+      Timeout:      10
+      Role:         !GetAtt SlackLambdaRole.Arn
+      Environment:
+        Variables:
+          SLACK_SIGNING_SECRET:  !Sub "{{resolve:secretsmanager:${SlackSigningSecretArn}:SecretString}}"
+          PROCESSOR_LAMBDA_NAME: !Ref SlackProcessorFunction
+      Events:
+        SlackPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SlackApi
+            Path:      /slack/events
+            Method:    POST
+      Tags:
+        Project:   strands-etl
+        Component: slack-handler
+
+  # ── Processor Lambda (async, up to 15 min) ──────────────────────────────
+  SlackProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "etl-slack-processor-${Environment}"
+      Description:  "Async Slack processor — runs agent, posts Block Kit result back to Slack"
+      Handler:      slack.slack_processor.handler
+      CodeUri:      ../
+      MemorySize:   1024
+      Timeout:      900                          # 15 min — enough for large batch analysis
+      Role:         !GetAtt SlackLambdaRole.Arn
+      Environment:
+        Variables:
+          SLACK_BOT_TOKEN:        !Sub "{{resolve:secretsmanager:${SlackBotTokenArn}:SecretString}}"
+          AGENT_ANALYZER_CONFIG:  !Ref AgentAnalyzerConfigPath
+          LOG_ANALYZER_CONFIG:    !Ref LogAnalyzerConfigPath
+          HOLIDAY_CALENDAR_PATH:  !Ref HolidayCalendarPath
+          LAST_REPORT_BUCKET:     !Ref LastReportBucket
+          LAST_REPORT_KEY:        !Ref LastReportKey
+      # Reserve concurrency so heavy analysis jobs don't starve the handler
+      ReservedConcurrentExecutions: 5
+      Tags:
+        Project:   strands-etl
+        Component: slack-processor
+
+  # ── CloudWatch Alarms ────────────────────────────────────────────────────
+  HandlerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:          !Sub "etl-slack-handler-errors-${Environment}"
+      AlarmDescription:   "Handler Lambda error rate > 5 in 5 min"
+      MetricName:         Errors
+      Namespace:          AWS/Lambda
+      Dimensions:
+        - Name:  FunctionName
+          Value: !Ref SlackHandlerFunction
+      Statistic:          Sum
+      Period:             300
+      EvaluationPeriods:  1
+      Threshold:          5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData:   notBreaching
+
+  ProcessorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:          !Sub "etl-slack-processor-errors-${Environment}"
+      AlarmDescription:   "Processor Lambda error rate > 2 in 15 min"
+      MetricName:         Errors
+      Namespace:          AWS/Lambda
+      Dimensions:
+        - Name:  FunctionName
+          Value: !Ref SlackProcessorFunction
+      Statistic:          Sum
+      Period:             900
+      EvaluationPeriods:  1
+      Threshold:          2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData:   notBreaching
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  SlackApiUrl:
+    Description: "Paste this URL into every Slack Slash Command's Request URL"
+    Value: !Sub "https://${SlackApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/slack/events"
+
+  HandlerFunctionArn:
+    Description: "Handler Lambda ARN"
+    Value: !GetAtt SlackHandlerFunction.Arn
+
+  ProcessorFunctionArn:
+    Description: "Processor Lambda ARN"
+    Value: !GetAtt SlackProcessorFunction.Arn
+
+  SetupInstructions:
+    Description: "Next steps after deployment"
+    Value: !Sub |
+      1. Copy SlackApiUrl above into each Slash Command Request URL in api.slack.com/apps
+      2. Reinstall the Slack App to your workspace
+      3. Test: /etl-help in any channel

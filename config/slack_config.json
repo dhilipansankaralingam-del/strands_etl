@@ -1,0 +1,123 @@
+{
+  "_comment": "Strands ETL Slack App configuration. Secrets (signing_secret, bot_token) are stored in AWS Secrets Manager — never hardcode them here.",
+
+  "app": {
+    "name": "Strands ETL Agent",
+    "description": "Slack interface for the Strands ETL validation, log analysis, and NL query agents",
+    "version": "1.0.0"
+  },
+
+  "secrets": {
+    "signing_secret_arn": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:strands-etl/slack-signing-secret",
+    "bot_token_arn":      "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:strands-etl/slack-bot-token",
+    "_setup_note": "Create secrets via: aws secretsmanager create-secret --name strands-etl/slack-signing-secret --secret-string '<value>'"
+  },
+
+  "commands": {
+    "/etl-analyze": {
+      "description": "Run AI agent analyzer on recent audit_validation failures",
+      "usage": "/etl-analyze [pipeline=<name>] [hours=<N>] [severity=CRITICAL|HIGH] [run_id=<uuid>]",
+      "examples": [
+        "/etl-analyze",
+        "/etl-analyze pipeline=member_info_etl hours=48",
+        "/etl-analyze severity=CRITICAL hours=12"
+      ],
+      "timeout_seconds": 900,
+      "response_type": "in_channel"
+    },
+    "/etl-logs": {
+      "description": "Analyze Glue / Athena / Lambda / EMR logs for errors",
+      "usage": "/etl-logs [source=<s3://path or /aws/glue/job-name>] [hours=<N>]",
+      "examples": [
+        "/etl-logs",
+        "/etl-logs source=/aws/glue/jobs/trigger_glue_job hours=12",
+        "/etl-logs source=s3://strands-etl-audit/glue-logs/ hours=24"
+      ],
+      "timeout_seconds": 600,
+      "response_type": "in_channel"
+    },
+    "/etl-query": {
+      "description": "Ask any question about your data in plain English (NL → Athena)",
+      "usage": "/etl-query <natural language question>",
+      "examples": [
+        "/etl-query which clubs have the most failures this week?",
+        "/etl-query show me z-score anomalies for club CA-001 last 60 days",
+        "/etl-query count of failed records per pipeline today",
+        "/etl-query what is the average AI confidence score for true failures?"
+      ],
+      "timeout_seconds": 120,
+      "response_type": "in_channel"
+    },
+    "/etl-status": {
+      "description": "Show the last analyzer run summary",
+      "usage": "/etl-status",
+      "timeout_seconds": 10,
+      "response_type": "ephemeral"
+    },
+    "/etl-holiday": {
+      "description": "Check if a date is a known US holiday and see expected volume multipliers",
+      "usage": "/etl-holiday YYYY-MM-DD",
+      "examples": [
+        "/etl-holiday 2026-12-25",
+        "/etl-holiday 2026-11-26"
+      ],
+      "timeout_seconds": 5,
+      "response_type": "ephemeral"
+    },
+    "/etl-help": {
+      "description": "Show all available ETL agent commands",
+      "usage": "/etl-help",
+      "timeout_seconds": 5,
+      "response_type": "ephemeral"
+    }
+  },
+
+  "lambdas": {
+    "handler": {
+      "name":    "etl-slack-handler",
+      "runtime": "python3.12",
+      "memory":  256,
+      "timeout": 10,
+      "env_vars": {
+        "PROCESSOR_LAMBDA_NAME": "etl-slack-processor"
+      }
+    },
+    "processor": {
+      "name":    "etl-slack-processor",
+      "runtime": "python3.12",
+      "memory":  1024,
+      "timeout": 900,
+      "env_vars": {
+        "AGENT_ANALYZER_CONFIG": "config/agent_analyzer_config.json",
+        "LOG_ANALYZER_CONFIG":   "config/log_analyzer_config.json",
+        "HOLIDAY_CALENDAR_PATH": "config/holiday_calendar.json",
+        "LAST_REPORT_BUCKET":    "strands-etl-audit",
+        "LAST_REPORT_KEY":       "agent_analyzer/last_report.json"
+      }
+    }
+  },
+
+  "api_gateway": {
+    "stage":       "prod",
+    "path":        "/slack/events",
+    "method":      "POST",
+    "throttle": {
+      "rate_limit":  100,
+      "burst_limit": 50
+    }
+  },
+
+  "slack_app_setup_steps": [
+    "1. Go to https://api.slack.com/apps → Create New App → From Scratch",
+    "2. App Name: 'Strands ETL Agent'  |  Workspace: your workspace",
+    "3. Basic Information → Signing Secret → copy → store in Secrets Manager as strands-etl/slack-signing-secret",
+    "4. OAuth & Permissions → Bot Token Scopes → Add: chat:write, commands, app_mentions:read",
+    "5. OAuth & Permissions → Install to Workspace → copy Bot User OAuth Token → store as strands-etl/slack-bot-token",
+    "6. Slash Commands → Create New Command for each of the 6 commands above",
+    "   Request URL = https://<API_GW_ID>.execute-api.us-east-1.amazonaws.com/prod/slack/events",
+    "7. Deploy via SAM: cd slack && sam build && sam deploy --guided",
+    "8. Paste the API Gateway URL into each Slash Command's Request URL",
+    "9. Enable Event Subscriptions (optional) for @mentions: same API GW URL",
+    "10. Reinstall the app to your workspace after saving all settings"
+  ]
+}
