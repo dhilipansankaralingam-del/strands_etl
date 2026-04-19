@@ -67,7 +67,7 @@ logger = logging.getLogger("etl_agent_analyzer")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 CLASSIFICATION_COLORS = {
     "TRUE_FAILURE":         "#dc3545",
@@ -173,9 +173,23 @@ class AgentAnalyzer:
 
         self.s3 = boto3.client("s3", region_name=self.region)
 
-        # Lazy-import the Strands agent (avoids import errors when the validation
-        # package is not on the path at config-load time)
+        # Cost tracker — shared with the agent so all Bedrock calls roll up here
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+            from validation.cost_tracker import BedrockCostTracker
+            self.cost_tracker = BedrockCostTracker(run_id=self.run_id)
+        except ImportError:
+            self.cost_tracker = None
+
+        # Holiday calendar — loaded once, used to annotate Z-score anomalies
+        self.holiday_calendar = self._load_holiday_calendar(
+            config.get("holiday_calendar_path", "config/holiday_calendar.json")
+        )
+
+        # Lazy-import the Strands agent
         self._agent = None
+        # Per-step cost snapshots for the HTML report
+        self._step_costs: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -216,9 +230,11 @@ class AgentAnalyzer:
 
         # ── Step 3: AI enrichment (batched) ──────────────────────────────
         logger.info("Step 3: Running Strands AI enrichment …")
+        self._get_agent().set_step_label("Step 3 – AI enrichment")
         enriched, analysis_results = self._analyze_in_batches(
             records, analysis_cfg.get("batch_size", 50)
         )
+        self._snapshot_step_cost("Step 3 – AI enrichment (decision agent)")
 
         # ── Step 4: Write enriched records to S3 ─────────────────────────
         logger.info("Step 4: Writing enriched records to S3 …")
@@ -227,13 +243,17 @@ class AgentAnalyzer:
 
         # ── Step 5: Batch executive summary ──────────────────────────────
         logger.info("Step 5: Generating batch executive summary …")
+        self._get_agent().set_step_label("Step 5 – Batch summary")
         batch_summary = self._batch_summary(analysis_results)
+        self._snapshot_step_cost("Step 5 – Batch summary (batch agent)")
 
         # ── Step 6: (optional) Pattern extraction ─────────────────────────
         patterns: Dict[str, Any] = {}
         if analysis_cfg.get("extract_patterns", False):
             logger.info("Step 6: Extracting learning patterns …")
+            self._get_agent().set_step_label("Step 6 – Pattern extraction")
             patterns = self._extract_patterns()
+            self._snapshot_step_cost("Step 6 – Pattern extraction (learning agent)")
 
         # ── Step 7: Write audit log ───────────────────────────────────────
         logger.info("Step 7: Writing audit log …")
@@ -244,6 +264,10 @@ class AgentAnalyzer:
         logger.info("Step 8: Sending HTML email report …")
         self._maybe_send_email(report)
 
+        # ── Final cost summary ────────────────────────────────────────────
+        if self.cost_tracker:
+            logger.info("\n%s", self.cost_tracker.render_table())
+
         logger.info("=" * 70)
         logger.info("AgentAnalyzer COMPLETE  run_id=%s", self.run_id)
         logger.info("  analysed=%d  true_failures=%d  false_positives=%d  needs_investigation=%d",
@@ -252,6 +276,10 @@ class AgentAnalyzer:
                     sum(1 for r in enriched if r.get("ai_classification") == "FALSE_POSITIVE"),
                     sum(1 for r in enriched if r.get("ai_classification") == "NEEDS_INVESTIGATION"),
                     )
+        if self.cost_tracker:
+            cs = self.cost_tracker.get_summary()
+            logger.info("  total_tokens=%d  total_cost_usd=$%.6f",
+                        cs.get("total_tokens", 0), cs.get("total_cost_usd", 0.0))
         logger.info("=" * 70)
         return report
 
@@ -344,8 +372,59 @@ class AgentAnalyzer:
     # Step 3: AI enrichment
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Holiday calendar helpers
+    # ------------------------------------------------------------------
+
+    def _load_holiday_calendar(self, path: str) -> Dict[str, Any]:
+        """Load holiday_calendar.json from local path or S3."""
+        try:
+            if path.startswith("s3://"):
+                bucket, key = path[5:].split("/", 1)
+                body = self.s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+                return json.loads(body)
+            if os.path.exists(path):
+                with open(path) as fh:
+                    return json.load(fh)
+        except Exception as exc:
+            logger.warning("Could not load holiday calendar from %s: %s", path, exc)
+        return {}
+
+    def get_holiday_context(self, date_str: str) -> Optional[Dict[str, Any]]:
+        """
+        Return the holiday entry for a given YYYY-MM-DD date string, or None.
+        Checks the current year and previous year explicit_dates maps.
+        """
+        if not self.holiday_calendar or not date_str:
+            return None
+        date_part = str(date_str)[:10]
+        year = date_part[:4]
+        for year_key in (f"explicit_dates_{year}", f"explicit_dates_{int(year)-1}"):
+            entry = self.holiday_calendar.get(year_key, {}).get(date_part)
+            if entry:
+                return entry
+        return None
+
+    # ------------------------------------------------------------------
+    # Cost snapshot helper
+    # ------------------------------------------------------------------
+
+    def _snapshot_step_cost(self, label: str) -> None:
+        """Record a cumulative cost snapshot after each pipeline step."""
+        if not self.cost_tracker:
+            return
+        cs = self.cost_tracker.get_summary()
+        self._step_costs.append({
+            "step":           label,
+            "cumulative_cost_usd": cs.get("total_cost_usd", 0.0),
+            "cumulative_tokens":   cs.get("total_tokens", 0),
+            "calls_so_far":        cs.get("total_calls", 0),
+        })
+
+    # ------------------------------------------------------------------
+
     def _get_agent(self):
-        """Lazy-initialise the ValidationAnalysisAgent."""
+        """Lazy-initialise the ValidationAnalysisAgent, sharing the cost tracker."""
         if self._agent is None:
             try:
                 from validation.validation_agent import ValidationAnalysisAgent
@@ -358,6 +437,7 @@ class AgentAnalyzer:
                 learning_bucket = ai_cfg.get("learning_bucket", "strands-etl-learning"),
                 aws_region      = self.region,
                 model_id        = ai_cfg.get("model_id", "anthropic.claude-3-sonnet-20240229-v1:0"),
+                cost_tracker    = self.cost_tracker,
             )
         return self._agent
 
@@ -393,6 +473,16 @@ class AgentAnalyzer:
             )
             for raw_row in batch:
                 record = ValidationRecord.from_athena_row(raw_row)
+                # Inject holiday context so the agent can factor it into classification
+                holiday_ctx = self.get_holiday_context(
+                    str(raw_row.get("failure_timestamp", ""))[:10]
+                )
+                if holiday_ctx:
+                    record.additional_context["holiday"] = holiday_ctx
+                    logger.debug(
+                        "  Holiday context injected for %s: %s",
+                        raw_row.get("record_id", "?"), holiday_ctx.get("holiday", ""),
+                    )
                 try:
                     result = agent.analyze(record)
                     ai_cols = {
@@ -506,27 +596,31 @@ class AgentAnalyzer:
         needs_inv      = sum(1 for r in enriched if r.get("ai_classification") == "NEEDS_INVESTIGATION")
         analysed       = len(enriched)
 
+        cost_summary = self.cost_tracker.get_summary() if self.cost_tracker else {}
+
         report: Dict[str, Any] = {
-            "run_id":          self.run_id,
+            "run_id":           self.run_id,
             "analyzer_version": VERSION,
-            "run_start":       self.run_start.isoformat(),
-            "run_end":         datetime.utcnow().isoformat(),
+            "run_start":        self.run_start.isoformat(),
+            "run_end":          datetime.utcnow().isoformat(),
             "validation_summary": val_summary,
             "ai_analysis": {
-                "total_analysed":    analysed,
-                "true_failures":     true_failures,
-                "false_positives":   false_positives,
+                "total_analysed":      analysed,
+                "true_failures":       true_failures,
+                "false_positives":     false_positives,
                 "needs_investigation": needs_inv,
-                "avg_confidence":    (
+                "avg_confidence":      (
                     round(
                         sum(r.get("ai_confidence", 0.0) for r in enriched) / analysed, 4
                     ) if analysed else 0.0
                 ),
-                "executive_summary": batch_result,
+                "executive_summary":   batch_result,
             },
+            "cost_summary":     cost_summary,
+            "step_costs":       self._step_costs,
             "enriched_records": enriched,
-            "patterns":        patterns,
-            "timestamp":       datetime.utcnow().isoformat(),
+            "patterns":         patterns,
+            "timestamp":        datetime.utcnow().isoformat(),
         }
         return report
 
@@ -541,7 +635,8 @@ class AgentAnalyzer:
         prefix    = audit_cfg.get("s3_prefix", "audit_logs/agent_analyzer/").rstrip("/")
         today     = self.run_start.strftime("%Y-%m-%d")
 
-        ai = report.get("ai_analysis", {})
+        ai   = report.get("ai_analysis", {})
+        cost = report.get("cost_summary", {})
         fields = [
             self.run_id,
             self.run_start.strftime("%Y-%m-%d %H:%M:%S"),
@@ -550,9 +645,14 @@ class AgentAnalyzer:
             str(ai.get("false_positives", 0)),
             str(ai.get("needs_investigation", 0)),
             str(ai.get("avg_confidence", 0.0)),
+            str(cost.get("total_input_tokens", 0)),
+            str(cost.get("total_output_tokens", 0)),
+            str(cost.get("total_cost_usd", 0.0)),
             VERSION,
         ]
-        header = "run_id|run_start|total_analysed|true_failures|false_positives|needs_investigation|avg_confidence|version\n"
+        header = ("run_id|run_start|total_analysed|true_failures|false_positives"
+                  "|needs_investigation|avg_confidence"
+                  "|input_tokens|output_tokens|cost_usd|version\n")
         line   = "|".join(fields) + "\n"
 
         key = f"{prefix}/run_date={today}/{self.run_id}.txt"
@@ -682,7 +782,23 @@ class AgentAnalyzer:
         elif isinstance(exec_sum, str):
             exec_text = exec_sum
 
-        run_end = report.get("run_end", "")
+        run_end      = report.get("run_end", "")
+        cost_summary = report.get("cost_summary", {})
+        step_costs   = report.get("step_costs", [])
+
+        # ── Cost per step table ───────────────────────────────────────────
+        cost_rows_html = ""
+        by_step = cost_summary.get("by_step_labeled", {})
+        for label, data in by_step.items():
+            cost_rows_html += (
+                f"<tr><td>{label}</td>"
+                f"<td style='text-align:right'>{data['input_tokens']:,}</td>"
+                f"<td style='text-align:right'>{data['output_tokens']:,}</td>"
+                f"<td style='text-align:right'>${data['cost_usd']:.6f}</td></tr>"
+            )
+        total_tokens = cost_summary.get("total_tokens", 0)
+        total_cost   = cost_summary.get("total_cost_usd", 0.0)
+        total_calls  = cost_summary.get("total_calls", 0)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -728,11 +844,31 @@ class AgentAnalyzer:
     <div class="kpi"><div class="val green">{fp}</div><div class="lbl">False Positives</div></div>
     <div class="kpi"><div class="val yellow">{ni}</div><div class="lbl">Needs Investigation</div></div>
     <div class="kpi"><div class="val blue">{avg_conf:.0%}</div><div class="lbl">Avg Confidence</div></div>
+    <div class="kpi"><div class="val blue">{total_calls}</div><div class="lbl">Bedrock Calls</div></div>
+    <div class="kpi"><div class="val blue">${total_cost:.4f}</div><div class="lbl">Total AI Cost</div></div>
   </div>
   {chart_html}
 </div>
 
 {f'<div class="card"><h2>Executive Summary</h2><div class="exec-box">{exec_text}</div></div>' if exec_text else ''}
+
+<div class="card">
+  <h2>Bedrock Token Usage &amp; Cost by Step</h2>
+  <table>
+    <tr><th>Step / Agent</th><th style="text-align:right">Input Tokens</th><th style="text-align:right">Output Tokens</th><th style="text-align:right">Cost (USD)</th></tr>
+    {cost_rows_html}
+    <tr style="font-weight:700;background:#e9ecef;">
+      <td>TOTAL</td>
+      <td style="text-align:right">{cost_summary.get('total_input_tokens',0):,}</td>
+      <td style="text-align:right">{cost_summary.get('total_output_tokens',0):,}</td>
+      <td style="text-align:right">${total_cost:.6f}</td>
+    </tr>
+  </table>
+  <p style="font-size:11px;color:#888;margin-top:8px;">
+    Pricing: Claude 3 Sonnet — $3.00/1M input tokens, $15.00/1M output tokens (Bedrock on-demand, us-east-1).<br>
+    Total tokens this run: <b>{total_tokens:,}</b> &nbsp;|&nbsp; Bedrock API calls: <b>{total_calls}</b>
+  </p>
+</div>
 
 <div class="card">
   <h2>Analysed Records{' (top 50 by severity)' if len(enriched) > 50 else ''}</h2>
@@ -812,10 +948,13 @@ def main() -> int:
     report   = analyzer.run()
 
     print(json.dumps(
-        {k: v for k, v in report.items() if k != "enriched_records"},
+        {k: v for k, v in report.items() if k not in ("enriched_records", "cost_summary")},
         indent=2,
         default=str,
     ))
+
+    if analyzer.cost_tracker:
+        print("\n" + analyzer.cost_tracker.render_table())
 
     ai = report.get("ai_analysis", {})
     if ai.get("true_failures", 0) > 0:

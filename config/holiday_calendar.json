@@ -1,0 +1,256 @@
+{
+  "_comment": "US Holiday Calendar for the ETL Agent Analyzer. The agent reads this file to determine whether a volume anomaly is a FALSE_POSITIVE caused by a known holiday pattern. volume_multiplier is the expected fraction of normal daily volume (1.0 = normal, 0.15 = 15% of normal). post_holiday_surge_multiplier is for the next business day after the holiday. Add custom club-level overrides in club_overrides.",
+
+  "calendar_version": "2026.1",
+  "timezone": "US/Eastern",
+  "default_weekend_multiplier": 0.55,
+  "default_next_day_surge_multiplier": 1.35,
+
+  "federal_holidays": {
+    "_comment": "Fixed-date US Federal holidays. Floats are resolved at runtime by the agent.",
+
+    "new_years_day": {
+      "name": "New Year's Day",
+      "type": "fixed",
+      "month": 1, "day": 1,
+      "volume_multiplier": 0.10,
+      "post_holiday_surge_multiplier": 1.50,
+      "observed_monday_if_sunday": true,
+      "severity_override": "LOW",
+      "notes": "Lowest transaction day of the year. Near-zero counts are expected."
+    },
+    "new_years_eve": {
+      "name": "New Year's Eve",
+      "type": "fixed",
+      "month": 12, "day": 31,
+      "volume_multiplier": 0.40,
+      "post_holiday_surge_multiplier": 1.20,
+      "observed_monday_if_sunday": false,
+      "severity_override": "LOW",
+      "notes": "Partial business day — offices close early."
+    },
+    "mlk_day": {
+      "name": "Martin Luther King Jr. Day",
+      "type": "floating",
+      "month": 1, "week": 3, "weekday": "Monday",
+      "volume_multiplier": 0.30,
+      "post_holiday_surge_multiplier": 1.25,
+      "severity_override": "LOW",
+      "notes": "Federal holiday. Many AAA clubs operate reduced hours."
+    },
+    "presidents_day": {
+      "name": "Presidents' Day",
+      "type": "floating",
+      "month": 2, "week": 3, "weekday": "Monday",
+      "volume_multiplier": 0.45,
+      "post_holiday_surge_multiplier": 1.20,
+      "severity_override": "LOW"
+    },
+    "memorial_day": {
+      "name": "Memorial Day",
+      "type": "floating",
+      "month": 5, "week": -1, "weekday": "Monday",
+      "volume_multiplier": 0.20,
+      "post_holiday_surge_multiplier": 1.40,
+      "severity_override": "LOW",
+      "notes": "Long weekend — 3-day backlog often creates Tuesday surge."
+    },
+    "juneteenth": {
+      "name": "Juneteenth National Independence Day",
+      "type": "fixed",
+      "month": 6, "day": 19,
+      "volume_multiplier": 0.55,
+      "post_holiday_surge_multiplier": 1.15,
+      "observed_monday_if_sunday": true,
+      "severity_override": "LOW"
+    },
+    "independence_day": {
+      "name": "Independence Day",
+      "type": "fixed",
+      "month": 7, "day": 4,
+      "volume_multiplier": 0.15,
+      "post_holiday_surge_multiplier": 1.45,
+      "observed_monday_if_sunday": true,
+      "severity_override": "LOW",
+      "notes": "Very low volume. Extended weekend if July 4 falls on Thu or Fri."
+    },
+    "labor_day": {
+      "name": "Labor Day",
+      "type": "floating",
+      "month": 9, "week": 1, "weekday": "Monday",
+      "volume_multiplier": 0.20,
+      "post_holiday_surge_multiplier": 1.40,
+      "severity_override": "LOW",
+      "notes": "3-day weekend. Tuesday surge of ~40% above normal is expected."
+    },
+    "columbus_day": {
+      "name": "Columbus Day / Indigenous Peoples' Day",
+      "type": "floating",
+      "month": 10, "week": 2, "weekday": "Monday",
+      "volume_multiplier": 0.70,
+      "post_holiday_surge_multiplier": 1.10,
+      "severity_override": "INFO",
+      "notes": "Partial observance — many private businesses remain open."
+    },
+    "veterans_day": {
+      "name": "Veterans Day",
+      "type": "fixed",
+      "month": 11, "day": 11,
+      "volume_multiplier": 0.50,
+      "post_holiday_surge_multiplier": 1.15,
+      "observed_monday_if_sunday": true,
+      "severity_override": "LOW"
+    },
+    "thanksgiving": {
+      "name": "Thanksgiving Day",
+      "type": "floating",
+      "month": 11, "week": 4, "weekday": "Thursday",
+      "volume_multiplier": 0.05,
+      "post_holiday_surge_multiplier": 1.60,
+      "severity_override": "LOW",
+      "notes": "Lowest volume after Christmas. Black Friday surge follows."
+    },
+    "christmas_eve": {
+      "name": "Christmas Eve",
+      "type": "fixed",
+      "month": 12, "day": 24,
+      "volume_multiplier": 0.30,
+      "post_holiday_surge_multiplier": 1.10,
+      "observed_monday_if_sunday": false,
+      "severity_override": "LOW"
+    },
+    "christmas_day": {
+      "name": "Christmas Day",
+      "type": "fixed",
+      "month": 12, "day": 25,
+      "volume_multiplier": 0.05,
+      "post_holiday_surge_multiplier": 1.55,
+      "observed_monday_if_sunday": true,
+      "severity_override": "LOW",
+      "notes": "Second lowest transaction day. Dec 26 typically has very high volume."
+    }
+  },
+
+  "retail_business_events": {
+    "_comment": "Not federal holidays but cause significant volume spikes or dips.",
+
+    "black_friday": {
+      "name": "Black Friday",
+      "type": "floating",
+      "month": 11, "week": 4, "weekday": "Friday",
+      "volume_multiplier": 2.20,
+      "post_holiday_surge_multiplier": 1.0,
+      "severity_override": "LOW",
+      "notes": "Highest transaction volume day — spike up to 2.2x is expected, not a double-load error."
+    },
+    "cyber_monday": {
+      "name": "Cyber Monday",
+      "type": "floating",
+      "month": 11, "week": 4, "weekday": "Monday",
+      "volume_multiplier": 1.80,
+      "post_holiday_surge_multiplier": 1.0,
+      "severity_override": "LOW",
+      "notes": "Online transaction spike. Do not flag HIGH volume as double-load."
+    },
+    "super_bowl_sunday": {
+      "name": "Super Bowl Sunday",
+      "type": "dynamic",
+      "approximate_month": 2,
+      "volume_multiplier": 0.60,
+      "post_holiday_surge_multiplier": 1.10,
+      "severity_override": "INFO",
+      "notes": "Consumer attention diverted. Slight volume drop, especially in evening batch."
+    },
+    "month_end": {
+      "name": "Month-End Processing",
+      "type": "recurring",
+      "pattern": "last_business_day_of_month",
+      "volume_multiplier": 1.40,
+      "post_holiday_surge_multiplier": 1.0,
+      "severity_override": "INFO",
+      "notes": "Billing and renewal cycles cause volume spikes on last business day of month."
+    },
+    "quarter_end": {
+      "name": "Quarter-End Processing",
+      "type": "recurring",
+      "pattern": "last_business_day_of_quarter",
+      "volume_multiplier": 1.80,
+      "post_holiday_surge_multiplier": 1.20,
+      "severity_override": "INFO",
+      "notes": "Q-end reporting drives high member update activity."
+    }
+  },
+
+  "explicit_dates_2026": {
+    "_comment": "Pre-computed exact dates for 2026 to avoid floating-holiday resolution at runtime.",
+    "2026-01-01": {"holiday": "new_years_day",   "multiplier": 0.10, "surge_next": 1.50},
+    "2026-01-19": {"holiday": "mlk_day",          "multiplier": 0.30, "surge_next": 1.25},
+    "2026-02-16": {"holiday": "presidents_day",   "multiplier": 0.45, "surge_next": 1.20},
+    "2026-05-25": {"holiday": "memorial_day",     "multiplier": 0.20, "surge_next": 1.40},
+    "2026-06-19": {"holiday": "juneteenth",       "multiplier": 0.55, "surge_next": 1.15},
+    "2026-07-04": {"holiday": "independence_day", "multiplier": 0.15, "surge_next": 1.45},
+    "2026-07-03": {"holiday": "independence_day_observed_bridge", "multiplier": 0.35, "surge_next": 1.25},
+    "2026-09-07": {"holiday": "labor_day",        "multiplier": 0.20, "surge_next": 1.40},
+    "2026-10-12": {"holiday": "columbus_day",     "multiplier": 0.70, "surge_next": 1.10},
+    "2026-11-11": {"holiday": "veterans_day",     "multiplier": 0.50, "surge_next": 1.15},
+    "2026-11-26": {"holiday": "thanksgiving",     "multiplier": 0.05, "surge_next": 1.60},
+    "2026-11-27": {"holiday": "black_friday",     "multiplier": 2.20, "surge_next": 1.00},
+    "2026-11-30": {"holiday": "cyber_monday",     "multiplier": 1.80, "surge_next": 1.00},
+    "2026-12-24": {"holiday": "christmas_eve",    "multiplier": 0.30, "surge_next": 1.10},
+    "2026-12-25": {"holiday": "christmas_day",    "multiplier": 0.05, "surge_next": 1.55},
+    "2026-12-31": {"holiday": "new_years_eve",    "multiplier": 0.40, "surge_next": 1.20}
+  },
+
+  "explicit_dates_2025": {
+    "2025-01-01": {"holiday": "new_years_day",   "multiplier": 0.10, "surge_next": 1.50},
+    "2025-01-20": {"holiday": "mlk_day",          "multiplier": 0.30, "surge_next": 1.25},
+    "2025-02-17": {"holiday": "presidents_day",   "multiplier": 0.45, "surge_next": 1.20},
+    "2025-05-26": {"holiday": "memorial_day",     "multiplier": 0.20, "surge_next": 1.40},
+    "2025-06-19": {"holiday": "juneteenth",       "multiplier": 0.55, "surge_next": 1.15},
+    "2025-07-04": {"holiday": "independence_day", "multiplier": 0.15, "surge_next": 1.45},
+    "2025-09-01": {"holiday": "labor_day",        "multiplier": 0.20, "surge_next": 1.40},
+    "2025-10-13": {"holiday": "columbus_day",     "multiplier": 0.70, "surge_next": 1.10},
+    "2025-11-11": {"holiday": "veterans_day",     "multiplier": 0.50, "surge_next": 1.15},
+    "2025-11-27": {"holiday": "thanksgiving",     "multiplier": 0.05, "surge_next": 1.60},
+    "2025-11-28": {"holiday": "black_friday",     "multiplier": 2.20, "surge_next": 1.00},
+    "2025-12-01": {"holiday": "cyber_monday",     "multiplier": 1.80, "surge_next": 1.00},
+    "2025-12-24": {"holiday": "christmas_eve",    "multiplier": 0.30, "surge_next": 1.10},
+    "2025-12-25": {"holiday": "christmas_day",    "multiplier": 0.05, "surge_next": 1.55},
+    "2025-12-31": {"holiday": "new_years_eve",    "multiplier": 0.40, "surge_next": 1.20}
+  },
+
+  "zscore_thresholds": {
+    "_comment": "Adjusted Z-score thresholds when holiday context is detected.",
+    "normal_day":           {"alert_zscore": 3.0, "critical_zscore": 5.0},
+    "holiday_low_volume":   {"alert_zscore": 99.0, "critical_zscore": 99.0, "note": "Suppress all volume alerts on known low-volume holidays"},
+    "post_holiday_surge":   {"alert_zscore": 6.0, "critical_zscore": 10.0, "note": "Raise threshold day after holiday — surge is expected"},
+    "weekend":              {"alert_zscore": 4.0, "critical_zscore": 7.0},
+    "month_end":            {"alert_zscore": 5.0, "critical_zscore": 8.0},
+    "black_friday_cyber":   {"alert_zscore": 99.0, "critical_zscore": 99.0, "note": "Volume spikes are expected — do not alert"}
+  },
+
+  "club_overrides": {
+    "_comment": "Per-club multiplier adjustments for clubs in states with additional state/regional holidays.",
+    "CA": {
+      "cesar_chavez_day": {"month": 3, "day": 31, "multiplier": 0.70, "note": "California state holiday"}
+    },
+    "TX": {
+      "san_jacinto_day": {"month": 4, "day": 21, "multiplier": 0.80}
+    },
+    "HI": {
+      "statehood_day": {"month": 8, "week": 3, "weekday": "Friday", "multiplier": 0.40}
+    }
+  },
+
+  "usage_instructions": {
+    "how_agent_uses_this": [
+      "1. Agent reads failure_timestamp from the audit record.",
+      "2. Looks up the date in explicit_dates_{year} map.",
+      "3. If found: applies volume_multiplier to expected baseline.",
+      "4. If today's count >= baseline * multiplier * 0.5 → FALSE_POSITIVE.",
+      "5. Checks if yesterday was a holiday → applies surge_next for post-holiday check.",
+      "6. For per-club checks: also applies club_overrides for the club's state prefix.",
+      "7. All threshold adjustments are logged in ai_explanation for auditability."
+    ]
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "_comment": "Config for pyscript/log_analyzer_agent.py — Strands Log Analyzer Agent",
+  "analyzer": {
+    "name": "log_analyzer_agent",
+    "version": "1.0.0",
+    "description": "Auto-detect failures in Glue / Athena / Lambda / EMR / Step Functions logs and provide AI-powered root-cause + fix recommendations via Amazon Bedrock."
+  },
+
+  "log_sources": {
+    "_comment": "Default paths scanned when --log-paths is not passed on the CLI.",
+    "since_hours": 24,
+    "paths": [
+      "/aws/glue/jobs/trigger_glue_job",
+      "/aws/glue/jobs/etl_pipeline_job",
+      "/aws/lambda/etl-orchestrator-fn",
+      "s3://strands-etl-audit/glue-logs/",
+      "s3://strands-etl-audit/athena-logs/"
+    ]
+  },
+
+  "ai": {
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "max_tokens": 2048,
+    "max_error_chars_per_cluster": 8000,
+    "skip_bedrock_for_known_errors": true,
+    "_comment_skip": "When true, well-known patterns (OOM, AccessDenied, etc.) are diagnosed locally without a Bedrock call to reduce cost."
+  },
+
+  "output": {
+    "s3_bucket": "strands-etl-audit",
+    "report_prefix": "log_analyzer/reports/",
+    "audit_prefix":  "log_analyzer/audit_logs/"
+  },
+
+  "email": {
+    "enabled": true,
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands Log Analyzer",
+    "only_on_critical": true,
+    "_comment": "Set only_on_critical=false to receive a report on every run regardless of severity."
+  },
+
+  "glue": {
+    "log_groups": [
+      "/aws/glue/jobs/trigger_glue_job",
+      "/aws/glue/jobs/etl_pipeline_job",
+      "/aws/glue/jobs/table_validator_job"
+    ],
+    "s3_log_prefixes": [
+      "s3://strands-etl-audit/glue-logs/"
+    ],
+    "error_indicators": [
+      "JobRunException", "py4j.protocol.Py4JJavaError",
+      "OutOfMemoryError", "GlueJobRun.*FAILED",
+      "Job run failed", "worker failed"
+    ]
+  },
+
+  "athena": {
+    "log_groups": [
+      "/aws/athena/query-execution"
+    ],
+    "s3_log_prefixes": [
+      "s3://strands-etl-athena-results/errors/"
+    ],
+    "error_indicators": [
+      "HIVE_", "SYNTAX_ERROR", "INTERNAL_ERROR",
+      "Query exhausted resources", "COLUMN_NOT_FOUND",
+      "TABLE_NOT_FOUND", "GENERIC_INTERNAL_ERROR"
+    ]
+  },
+
+  "lambda": {
+    "log_groups": [
+      "/aws/lambda/etl-orchestrator-fn",
+      "/aws/lambda/s3-monitor-fn",
+      "/aws/lambda/validation-trigger-fn"
+    ],
+    "error_indicators": [
+      "Task timed out", "Runtime.ExitError",
+      "errorType", "errorMessage", "OutOfMemoryError"
+    ]
+  },
+
+  "emr": {
+    "log_groups": [
+      "/aws/emr-serverless/applications"
+    ],
+    "s3_log_prefixes": [
+      "s3://strands-etl-audit/emr-logs/"
+    ],
+    "error_indicators": [
+      "Container killed", "ApplicationMaster failed",
+      "YARN.*failed", "step failed", "Java heap"
+    ]
+  },
+
+  "step_functions": {
+    "log_groups": [
+      "/aws/states/etl-state-machine"
+    ],
+    "error_indicators": [
+      "ExecutionFailed", "States.TaskFailed",
+      "States.HeartbeatTimeout", "TaskTimedOut"
+    ]
+  },
+
+  "aws": {
+    "region": "us-east-1"
+  }
+}

@@ -16,6 +16,7 @@ Architecture mirrors strands_orchestrator.py to stay consistent with the project
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -36,6 +37,7 @@ from validation.prompts import (
     build_learning_prompt,
     build_batch_summary_prompt,
 )
+from validation.cost_tracker import BedrockCostTracker
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +82,15 @@ class ValidationAnalysisAgent:
         learning_bucket: str = "strands-etl-learning",
         aws_region: str = "us-east-1",
         model_id: str = DEFAULT_MODEL_ID,
+        cost_tracker: Optional[BedrockCostTracker] = None,
     ):
         self.learning_bucket = learning_bucket
         self.model_id = model_id
 
         self.bedrock = boto3.client("bedrock-runtime", region_name=aws_region)
         self.s3 = boto3.client("s3", region_name=aws_region)
+        self.cost_tracker: BedrockCostTracker = cost_tracker or BedrockCostTracker()
+        self._current_step_label = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -350,12 +355,17 @@ class ValidationAnalysisAgent:
     # Bedrock helper
     # ------------------------------------------------------------------
 
+    def set_step_label(self, label: str) -> None:
+        """Set the human-readable step label attached to the next Bedrock calls."""
+        self._current_step_label = label
+
     def _invoke_bedrock(self, prompt: str, agent_type: str = "decision") -> str:
-        """Invoke Bedrock Claude with system + user prompt."""
+        """Invoke Bedrock Claude with system + user prompt, recording token usage."""
         agent_system_notes = {
             "decision": "Focus: classify the record accurately. Be concise.",
             "learning": "Focus: extract generalizable patterns from historical data.",
             "batch": "Focus: high-level executive summary. Be brief and actionable.",
+            "log_analyzer": "Focus: identify root cause from log errors and propose concrete fixes.",
         }
         system = SYSTEM_PROMPT + "\n\n" + agent_system_notes.get(agent_type, "")
 
@@ -366,14 +376,40 @@ class ValidationAnalysisAgent:
                 "system": system,
                 "messages": [{"role": "user", "content": prompt}],
             }
+            t0 = time.time()
             response = self.bedrock.invoke_model(
                 modelId=self.model_id,
                 body=json.dumps(body),
             )
+            latency_ms = (time.time() - t0) * 1000
             result = json.loads(response["body"].read())
+
+            # Capture token usage from the response
+            usage = result.get("usage", {})
+            input_tokens  = usage.get("input_tokens",  0)
+            output_tokens = usage.get("output_tokens", 0)
+
+            record = self.cost_tracker.record_call(
+                model_id      = self.model_id,
+                input_tokens  = input_tokens,
+                output_tokens = output_tokens,
+                agent_type    = agent_type,
+                step_label    = self._current_step_label or agent_type,
+                latency_ms    = latency_ms,
+            )
+            logger.debug(
+                "Bedrock call [%s] in=%d out=%d cost=$%.6f latency=%.0fms",
+                agent_type, input_tokens, output_tokens, record.total_cost_usd, latency_ms,
+            )
             return result["content"][0]["text"]
+
         except Exception as e:
             logger.error(f"Bedrock invocation failed ({agent_type}): {e}")
+            # Record a zero-cost failed call so it appears in the summary
+            self.cost_tracker.record_call(
+                model_id=self.model_id, input_tokens=0, output_tokens=0,
+                agent_type=agent_type, step_label=f"{self._current_step_label} [FAILED]",
+            )
             return json.dumps({
                 "classification": ValidationClassification.NEEDS_INVESTIGATION.value,
                 "confidence": 0.0,
