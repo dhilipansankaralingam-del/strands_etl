@@ -1,0 +1,64 @@
+{
+  "analyzer": {
+    "name": "etl_agent_analyzer",
+    "description": "Strands ETL Agent Analyzer: reads failed audit_validation records, enriches them with AI classification via Amazon Bedrock, and emails an HTML report.",
+    "version": "1.0.0",
+    "run_mode": "analyze_existing",
+    "run_mode_options_doc": "analyze_existing = read FAIL rows from audit_validation and enrich with AI | full_pipeline = run table_validator first then enrich failures"
+  },
+  "athena": {
+    "database": "data_quality_db",
+    "workgroup": "primary",
+    "s3_output": "s3://strands-etl-athena-results/agent_analyzer/",
+    "audit_table": "audit_validation",
+    "poll_interval_seconds": 5,
+    "max_polls": 60
+  },
+  "analysis": {
+    "look_back_hours": 24,
+    "max_records": 500,
+    "batch_size": 50,
+    "extract_patterns": true,
+    "confidence_threshold": 0.70,
+    "skip_already_analysed": true,
+    "pipeline_filters": [],
+    "severity_filters": [],
+    "run_id_filter": ""
+  },
+  "ai": {
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "learning_bucket": "strands-etl-learning",
+    "max_tokens": 2048
+  },
+  "output": {
+    "s3_bucket": "strands-etl-audit",
+    "enriched_prefix": "audit_validation/enriched/",
+    "patterns_prefix": "agent_analyzer/patterns/",
+    "report_prefix": "agent_analyzer/reports/"
+  },
+  "audit": {
+    "s3_bucket": "strands-etl-audit",
+    "s3_prefix": "audit_logs/agent_analyzer/",
+    "database": "audit_db",
+    "table": "etl_agent_analyzer_audit",
+    "format": "pipe_delimited",
+    "partition_columns": ["run_date"]
+  },
+  "email": {
+    "enabled": true,
+    "smtp_host": "10.19.10.29",
+    "smtp_port": 25,
+    "sender": "gid02061@aaa-calif.com",
+    "recipients": [
+      "Ganji.Srinivasu@ace.aaa.com",
+      "Ahmad.Imran@ace.aaa.com",
+      "Suresh.Namitha@ace.aaa.com",
+      "Sankaralingam.DhilipanSomasundaram@ace.aaa.com",
+      "ramanan.swaminathan@ace.aaa.com"
+    ],
+    "subject_prefix": "Strands ETL Agent Analyzer"
+  },
+  "aws": {
+    "region": "us-east-1"
+  }
+}
