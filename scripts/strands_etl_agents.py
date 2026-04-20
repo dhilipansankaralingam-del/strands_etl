@@ -368,6 +368,157 @@ def get_job_run_status(job_name: str, run_id: str) -> Dict[str, Any]:
 
 
 @tool
+def run_athena_query(sql: str, database: str = 'default') -> Dict[str, Any]:
+    """Run a SQL query via Athena for data quality validation.
+
+    Args:
+        sql: SQL query to execute
+        database: Athena database (default: 'default')
+
+    Returns:
+        Dict with query results or error
+    """
+    print(f"      [TOOL] run_athena_query: {sql[:60]}...")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        athena = boto3.client('athena', region_name='us-west-2')
+
+        # Need output location - check environment
+        output_loc = os.environ.get('ATHENA_OUTPUT_LOCATION', 's3://aws-athena-query-results-us-west-2/')
+
+        response = athena.start_query_execution(
+            QueryString=sql,
+            QueryExecutionContext={'Database': database},
+            ResultConfiguration={'OutputLocation': output_loc}
+        )
+
+        query_id = response['QueryExecutionId']
+        print(f"      [TOOL] Query started: {query_id}")
+
+        # Poll for completion (max 60 seconds)
+        for _ in range(30):
+            status = athena.get_query_execution(QueryExecutionId=query_id)
+            state = status['QueryExecution']['Status']['State']
+
+            if state == 'SUCCEEDED':
+                # Get results
+                results = athena.get_query_results(QueryExecutionId=query_id)
+                rows = []
+                columns = []
+
+                for i, row in enumerate(results['ResultSet']['Rows']):
+                    values = [col.get('VarCharValue', '') for col in row['Data']]
+                    if i == 0:
+                        columns = values
+                    else:
+                        rows.append(dict(zip(columns, values)))
+
+                print(f"      [TOOL] Query returned {len(rows)} rows")
+                return {
+                    'success': True,
+                    'query_id': query_id,
+                    'columns': columns,
+                    'rows': rows[:100],  # Limit to 100 rows
+                    'row_count': len(rows)
+                }
+
+            elif state in ['FAILED', 'CANCELLED']:
+                error = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')
+                print(f"      [TOOL] Query failed: {error}")
+                return {'success': False, 'error': error, 'query_id': query_id}
+
+            time.sleep(2)
+
+        return {'success': False, 'error': 'Query timeout', 'query_id': query_id}
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e)}
+
+
+@tool
+def validate_data_quality_rule(database: str, table: str, rule_type: str, column: str = None, threshold: float = None) -> Dict[str, Any]:
+    """Validate a data quality rule against a table.
+
+    Args:
+        database: Database name
+        table: Table name
+        rule_type: Type of rule (not_null, unique, positive, row_count, completeness)
+        column: Column to validate (required for column-level rules)
+        threshold: Threshold value (for completeness, row_count rules)
+
+    Returns:
+        Dict with validation result, records scanned, outliers found
+    """
+    print(f"      [TOOL] validate_data_quality_rule: {database}.{table} - {rule_type}")
+
+    # Build validation SQL based on rule type
+    if rule_type == 'not_null':
+        sql = f"SELECT COUNT(*) as total, SUM(CASE WHEN {column} IS NULL THEN 1 ELSE 0 END) as nulls FROM {database}.{table}"
+    elif rule_type == 'unique':
+        sql = f"SELECT COUNT(*) as total, COUNT(*) - COUNT(DISTINCT {column}) as duplicates FROM {database}.{table}"
+    elif rule_type == 'positive':
+        sql = f"SELECT COUNT(*) as total, SUM(CASE WHEN {column} <= 0 THEN 1 ELSE 0 END) as negatives FROM {database}.{table}"
+    elif rule_type == 'row_count':
+        sql = f"SELECT COUNT(*) as total FROM {database}.{table}"
+    elif rule_type == 'completeness':
+        sql = f"SELECT COUNT(*) as total, SUM(CASE WHEN {column} IS NULL OR TRIM({column}) = '' THEN 1 ELSE 0 END) as incomplete FROM {database}.{table}"
+    else:
+        return {'error': f'Unknown rule type: {rule_type}'}
+
+    # Execute via Athena
+    result = run_athena_query(sql, database)
+
+    if not result.get('success'):
+        return {
+            'rule_type': rule_type,
+            'table': f'{database}.{table}',
+            'status': 'ERROR',
+            'error': result.get('error')
+        }
+
+    # Parse results
+    if result['rows']:
+        row = result['rows'][0]
+        total = int(row.get('total', 0))
+
+        if rule_type == 'row_count':
+            passed = total >= (threshold or 0)
+            return {
+                'rule_type': rule_type,
+                'table': f'{database}.{table}',
+                'status': 'PASS' if passed else 'FAIL',
+                'records_scanned': total,
+                'threshold': threshold,
+                'actual_value': total
+            }
+
+        outliers = int(row.get('nulls', row.get('duplicates', row.get('negatives', row.get('incomplete', 0)))))
+        pct = (total - outliers) / total if total > 0 else 0
+
+        if rule_type == 'completeness':
+            passed = pct >= (threshold or 0.95)
+        else:
+            passed = outliers == 0
+
+        return {
+            'rule_type': rule_type,
+            'column': column,
+            'table': f'{database}.{table}',
+            'status': 'PASS' if passed else 'FAIL',
+            'records_scanned': total,
+            'outliers_found': outliers,
+            'pass_rate': round(pct, 4),
+            'threshold': threshold
+        }
+
+    return {'rule_type': rule_type, 'status': 'NO_DATA'}
+
+
+@tool
 def store_execution_history(job_name: str, execution_data: Dict) -> Dict[str, Any]:
     """Store execution data for learning agent to use later.
 
@@ -565,6 +716,27 @@ Use get_glue_job_runs to fetch recent runs, then:
 Provide insights based on historical patterns."""
 
 
+DATA_QUALITY_PROMPT = """You are the Data Quality Agent. You validate data against quality rules.
+
+Your responsibilities:
+1. Run PRE-LOAD validations on source tables
+2. Run POST-LOAD validations on target tables
+3. Check for:
+   - NULL values in required columns (not_null)
+   - Duplicate keys (unique)
+   - Negative values where positives expected (positive)
+   - Row count thresholds (row_count)
+   - Data completeness (completeness)
+
+Use validate_data_quality_rule for each rule, or run_athena_query for custom SQL.
+
+Report:
+- Total records scanned
+- Outliers/failures found
+- Pass/Fail status for each rule
+- Overall data quality score"""
+
+
 EXECUTION_PROMPT = """You are the Execution Agent. You manage ETL job execution and track metrics.
 
 Your responsibilities:
@@ -628,27 +800,31 @@ class StrandsETLOrchestrator:
         print(f"  {'─'*60}")
 
         # 1. Sizing Agent
-        print(f"\n  [1/6] SIZING AGENT")
+        print(f"\n  [1/7] SIZING AGENT")
         self.results['sizing'] = self._run_sizing_agent(config)
 
         # 2. Code Analysis Agent
-        print(f"\n  [2/6] CODE ANALYSIS AGENT")
+        print(f"\n  [2/7] CODE ANALYSIS AGENT")
         self.results['code_analysis'] = self._run_code_agent(config)
 
-        # 3. Compliance Agent
-        print(f"\n  [3/6] COMPLIANCE AGENT")
+        # 3. Data Quality Agent
+        print(f"\n  [3/7] DATA QUALITY AGENT")
+        self.results['data_quality'] = self._run_data_quality_agent(config)
+
+        # 4. Compliance Agent
+        print(f"\n  [4/7] COMPLIANCE AGENT")
         self.results['compliance'] = self._run_compliance_agent(config)
 
-        # 4. Learning Agent (loads historical data)
-        print(f"\n  [4/6] LEARNING AGENT")
+        # 5. Learning Agent (loads historical data)
+        print(f"\n  [5/7] LEARNING AGENT")
         self.results['learning'] = self._run_learning_agent(config)
 
-        # 5. Execution Agent (optionally runs the job)
-        print(f"\n  [5/6] EXECUTION AGENT")
+        # 6. Execution Agent (optionally runs the job)
+        print(f"\n  [6/7] EXECUTION AGENT")
         self.results['execution'] = self._run_execution_agent(config, execute)
 
-        # 6. Recommendation Agent
-        print(f"\n  [6/6] RECOMMENDATION AGENT")
+        # 7. Recommendation Agent
+        print(f"\n  [7/7] RECOMMENDATION AGENT")
         self.results['recommendations'] = self._run_recommendation_agent(config)
 
         return {
@@ -713,6 +889,38 @@ class StrandsETLOrchestrator:
 
         result = self._run_agent('code_analysis', CODE_ANALYSIS_PROMPT, prompt, [read_file])
         return {'script_path': script, 'analysis': result}
+
+    def _run_data_quality_agent(self, config: Dict) -> Dict:
+        tables = config.get('source_tables', [])
+        dq_rules = config.get('data_quality', {}).get('rules', [])
+
+        prompt = f"""Validate data quality for job '{config.get('job_name')}':
+
+Source Tables:
+"""
+        for t in tables:
+            db = t.get('database', 'default')
+            tbl = t.get('table', t.get('name', ''))
+            prompt += f"  - {db}.{tbl}\n"
+
+        if dq_rules:
+            prompt += f"\nConfigured Rules:\n"
+            for rule in dq_rules[:5]:  # Limit to 5 rules
+                prompt += f"  - {rule}\n"
+        else:
+            prompt += """
+Default validations to run:
+1. Check NOT NULL on primary key columns
+2. Check row count > 0
+3. Check for duplicates on key columns
+4. Check data completeness (>95%)
+"""
+
+        prompt += "\nUse validate_data_quality_rule for each check. Report pass/fail status and outlier counts."
+
+        result = self._run_agent('data_quality', DATA_QUALITY_PROMPT, prompt,
+                                  [validate_data_quality_rule, run_athena_query])
+        return {'tables_checked': len(tables), 'analysis': result}
 
     def _run_compliance_agent(self, config: Dict) -> Dict:
         current = config.get('current_config', {})
@@ -788,22 +996,24 @@ Store the simulation results for future reference."""
 
 Previous Agent Findings:
 ---
-SIZING: {self.results.get('sizing', {}).get('analysis', 'N/A')[:500]}
+SIZING: {self.results.get('sizing', {}).get('analysis', 'N/A')[:400]}
 ---
-CODE ANALYSIS: {self.results.get('code_analysis', {}).get('analysis', 'N/A')[:500]}
+CODE ANALYSIS: {self.results.get('code_analysis', {}).get('analysis', 'N/A')[:400]}
 ---
-COMPLIANCE: {self.results.get('compliance', {}).get('analysis', 'N/A')[:500]}
+DATA QUALITY: {self.results.get('data_quality', {}).get('analysis', 'N/A')[:400]}
 ---
-LEARNING: {self.results.get('learning', {}).get('analysis', 'N/A')[:500]}
+COMPLIANCE: {self.results.get('compliance', {}).get('analysis', 'N/A')[:400]}
 ---
-EXECUTION: {self.results.get('execution', {}).get('analysis', 'N/A')[:500]}
+LEARNING: {self.results.get('learning', {}).get('analysis', 'N/A')[:400]}
+---
+EXECUTION: {self.results.get('execution', {}).get('analysis', 'N/A')[:400]}
 ---
 
 Current: {workers} workers, ~{runtime}h runtime, {runs} runs/month
 
 Provide:
-1. CRITICAL issues (must fix)
-2. HIGH priority optimizations (significant impact)
+1. CRITICAL issues (must fix - data quality failures, code errors)
+2. HIGH priority optimizations (significant cost/performance impact)
 3. MEDIUM improvements (nice to have)
 4. Platform comparison with cost savings
 5. Implementation roadmap with effort estimates"""
