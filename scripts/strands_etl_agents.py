@@ -264,6 +264,204 @@ def get_glue_job_runs(job_name: str, max_runs: int = 10) -> Dict[str, Any]:
 
 
 @tool
+def start_glue_job(job_name: str, workers: int = None, worker_type: str = None, dry_run: bool = True) -> Dict[str, Any]:
+    """Start a Glue job execution (or simulate in dry_run mode).
+
+    Args:
+        job_name: Name of the Glue job to run
+        workers: Override number of workers (optional)
+        worker_type: Override worker type G.1X/G.2X (optional)
+        dry_run: If True, simulate execution without actually running
+
+    Returns:
+        Dict with run_id, status, and execution details
+    """
+    print(f"      [TOOL] start_glue_job: {job_name} (dry_run={dry_run})")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    if dry_run:
+        print(f"      [TOOL] DRY RUN - simulating execution")
+        return {
+            'job_name': job_name,
+            'run_id': f'jr_simulated_{int(time.time())}',
+            'status': 'SIMULATED',
+            'dry_run': True,
+            'workers': workers or 10,
+            'worker_type': worker_type or 'G.1X',
+            'estimated_duration_sec': 300,
+            'estimated_cost_usd': round((workers or 10) * 0.44 * 0.5, 2)
+        }
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+
+        args = {}
+        if workers:
+            args['NumberOfWorkers'] = workers
+        if worker_type:
+            args['WorkerType'] = worker_type
+
+        response = glue.start_job_run(JobName=job_name, Arguments=args)
+        run_id = response['JobRunId']
+
+        print(f"      [TOOL] Started run: {run_id}")
+
+        return {
+            'job_name': job_name,
+            'run_id': run_id,
+            'status': 'STARTING',
+            'dry_run': False
+        }
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e), 'job_name': job_name}
+
+
+@tool
+def get_job_run_status(job_name: str, run_id: str) -> Dict[str, Any]:
+    """Get current status and metrics of a Glue job run.
+
+    Args:
+        job_name: Name of the Glue job
+        run_id: Job run ID to check
+
+    Returns:
+        Dict with status, duration, metrics, and any errors
+    """
+    print(f"      [TOOL] get_job_run_status: {job_name}/{run_id}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        run = glue.get_job_run(JobName=job_name, RunId=run_id)['JobRun']
+
+        result = {
+            'job_name': job_name,
+            'run_id': run_id,
+            'status': run['JobRunState'],
+            'started': run.get('StartedOn').isoformat() if run.get('StartedOn') else None,
+            'completed': run.get('CompletedOn').isoformat() if run.get('CompletedOn') else None,
+            'duration_sec': run.get('ExecutionTime', 0),
+            'dpu_seconds': run.get('DPUSeconds', 0),
+            'workers': run.get('NumberOfWorkers', 0),
+            'worker_type': run.get('WorkerType', ''),
+            'error': run.get('ErrorMessage', '')[:500] if run.get('ErrorMessage') else None
+        }
+
+        # Calculate cost
+        dpu_hours = result['dpu_seconds'] / 3600
+        cost_per_dpu = {'G.1X': 0.44, 'G.2X': 0.88, 'G.4X': 1.76}.get(result['worker_type'], 0.44)
+        result['cost_usd'] = round(dpu_hours * cost_per_dpu, 2)
+
+        print(f"      [TOOL] Status: {result['status']}, Duration: {result['duration_sec']}s")
+
+        return result
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e)}
+
+
+@tool
+def store_execution_history(job_name: str, execution_data: Dict) -> Dict[str, Any]:
+    """Store execution data for learning agent to use later.
+
+    Args:
+        job_name: Name of the job
+        execution_data: Dict with run metrics (duration, cost, workers, etc.)
+
+    Returns:
+        Confirmation of storage
+    """
+    print(f"      [TOOL] store_execution_history: {job_name}")
+
+    history_dir = Path('data/execution_history')
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    history_file = history_dir / f"{job_name}.jsonl"
+
+    record = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'job_name': job_name,
+        **execution_data
+    }
+
+    with open(history_file, 'a') as f:
+        f.write(json.dumps(record) + '\n')
+
+    # Count total records
+    with open(history_file, 'r') as f:
+        total = sum(1 for _ in f)
+
+    print(f"      [TOOL] Stored record #{total} for {job_name}")
+
+    return {
+        'stored': True,
+        'job_name': job_name,
+        'history_file': str(history_file),
+        'total_records': total
+    }
+
+
+@tool
+def load_execution_history(job_name: str, limit: int = 20) -> Dict[str, Any]:
+    """Load historical execution data for learning.
+
+    Args:
+        job_name: Name of the job
+        limit: Max records to return (default 20)
+
+    Returns:
+        Dict with historical runs and computed statistics
+    """
+    print(f"      [TOOL] load_execution_history: {job_name} (limit={limit})")
+
+    history_file = Path(f'data/execution_history/{job_name}.jsonl')
+
+    if not history_file.exists():
+        print(f"      [TOOL] No history found")
+        return {'job_name': job_name, 'records': [], 'count': 0}
+
+    records = []
+    with open(history_file, 'r') as f:
+        for line in f:
+            if line.strip():
+                records.append(json.loads(line))
+
+    # Take last N records
+    records = records[-limit:]
+
+    # Compute statistics
+    if records:
+        durations = [r.get('duration_sec', 0) for r in records if r.get('duration_sec')]
+        costs = [r.get('cost_usd', 0) for r in records if r.get('cost_usd')]
+
+        stats = {
+            'avg_duration_sec': sum(durations) / len(durations) if durations else 0,
+            'avg_cost_usd': sum(costs) / len(costs) if costs else 0,
+            'min_duration_sec': min(durations) if durations else 0,
+            'max_duration_sec': max(durations) if durations else 0,
+            'success_rate': sum(1 for r in records if r.get('status') == 'SUCCEEDED') / len(records)
+        }
+    else:
+        stats = {}
+
+    print(f"      [TOOL] Loaded {len(records)} records")
+
+    return {
+        'job_name': job_name,
+        'records': records,
+        'count': len(records),
+        'statistics': stats
+    }
+
+
+@tool
 def calculate_platform_costs(workers: int, runtime_hours: float, runs_per_month: int) -> Dict[str, Any]:
     """Calculate and compare costs across cloud platforms.
 
@@ -367,6 +565,20 @@ Use get_glue_job_runs to fetch recent runs, then:
 Provide insights based on historical patterns."""
 
 
+EXECUTION_PROMPT = """You are the Execution Agent. You manage ETL job execution and track metrics.
+
+Your responsibilities:
+1. Start Glue jobs (use dry_run=True for analysis mode, False for real execution)
+2. Monitor job status using get_job_run_status
+3. Store execution results for learning using store_execution_history
+4. Track costs, duration, and success/failure
+
+When executing:
+- Always confirm job parameters before starting
+- Store results after completion for future learning
+- Report any errors clearly with recommendations"""
+
+
 RECOMMENDATION_PROMPT = """You are the Recommendation Agent. Synthesize all findings into actionable recommendations.
 
 Based on inputs from other agents:
@@ -403,30 +615,40 @@ class StrandsETLOrchestrator:
         print(f"  Region: {self.region}")
         print(f"{'='*70}")
 
-    def analyze(self, config: Dict) -> Dict[str, Any]:
-        """Run all agents on a config."""
+    def analyze(self, config: Dict, execute: bool = False) -> Dict[str, Any]:
+        """Run all agents on a config.
+
+        Args:
+            config: Job configuration
+            execute: If True, run ExecutionAgent to actually start the job
+        """
         job_name = config.get('job_name', 'unknown')
         print(f"\n  Job: {job_name}")
+        print(f"  Mode: {'EXECUTE' if execute else 'ANALYZE ONLY'}")
         print(f"  {'─'*60}")
 
         # 1. Sizing Agent
-        print(f"\n  [1/5] SIZING AGENT")
+        print(f"\n  [1/6] SIZING AGENT")
         self.results['sizing'] = self._run_sizing_agent(config)
 
         # 2. Code Analysis Agent
-        print(f"\n  [2/5] CODE ANALYSIS AGENT")
+        print(f"\n  [2/6] CODE ANALYSIS AGENT")
         self.results['code_analysis'] = self._run_code_agent(config)
 
         # 3. Compliance Agent
-        print(f"\n  [3/5] COMPLIANCE AGENT")
+        print(f"\n  [3/6] COMPLIANCE AGENT")
         self.results['compliance'] = self._run_compliance_agent(config)
 
-        # 4. Learning Agent
-        print(f"\n  [4/5] LEARNING AGENT")
+        # 4. Learning Agent (loads historical data)
+        print(f"\n  [4/6] LEARNING AGENT")
         self.results['learning'] = self._run_learning_agent(config)
 
-        # 5. Recommendation Agent
-        print(f"\n  [5/5] RECOMMENDATION AGENT")
+        # 5. Execution Agent (optionally runs the job)
+        print(f"\n  [5/6] EXECUTION AGENT")
+        self.results['execution'] = self._run_execution_agent(config, execute)
+
+        # 6. Recommendation Agent
+        print(f"\n  [6/6] RECOMMENDATION AGENT")
         self.results['recommendations'] = self._run_recommendation_agent(config)
 
         return {
@@ -508,10 +730,53 @@ Review for security, cost controls, and best practices."""
 
     def _run_learning_agent(self, config: Dict) -> Dict:
         glue_job = config.get('glue_job_name', config.get('job_name', ''))
-        prompt = f"Analyze historical runs for Glue job: {glue_job}\n\nIdentify patterns, failures, and optimization opportunities."
+        prompt = f"""Analyze historical data for job: {glue_job}
 
-        result = self._run_agent('learning', LEARNING_PROMPT, prompt, [get_glue_job_runs])
+1. Use load_execution_history to get stored execution records
+2. Use get_glue_job_runs to get recent Glue runs
+3. Identify patterns: avg duration, cost trends, failure rates
+4. Learn optimal resource configurations
+5. Detect anomalies or degradation"""
+
+        result = self._run_agent('learning', LEARNING_PROMPT, prompt,
+                                  [get_glue_job_runs, load_execution_history])
         return {'glue_job': glue_job, 'analysis': result}
+
+    def _run_execution_agent(self, config: Dict, execute: bool = False) -> Dict:
+        glue_job = config.get('glue_job_name', config.get('job_name', ''))
+        current = config.get('current_config', {})
+        workers = current.get('NumberOfWorkers', current.get('workers', 10))
+        worker_type = current.get('WorkerType', 'G.1X')
+
+        if execute:
+            prompt = f"""Execute the Glue job: {glue_job}
+
+Configuration:
+- Workers: {workers}
+- Worker Type: {worker_type}
+
+Steps:
+1. Start the job using start_glue_job with dry_run=False
+2. Monitor status using get_job_run_status (poll every 30 seconds)
+3. Once complete, store results using store_execution_history
+4. Report final status, duration, cost, and any errors"""
+        else:
+            prompt = f"""Simulate execution for job: {glue_job}
+
+Configuration:
+- Workers: {workers}
+- Worker Type: {worker_type}
+
+Use start_glue_job with dry_run=True to estimate:
+- Expected duration based on data size
+- Expected cost
+- Resource utilization
+
+Store the simulation results for future reference."""
+
+        result = self._run_agent('execution', EXECUTION_PROMPT, prompt,
+                                  [start_glue_job, get_job_run_status, store_execution_history])
+        return {'glue_job': glue_job, 'executed': execute, 'analysis': result}
 
     def _run_recommendation_agent(self, config: Dict) -> Dict:
         current = config.get('current_config', {})
@@ -525,16 +790,23 @@ Previous Agent Findings:
 ---
 SIZING: {self.results.get('sizing', {}).get('analysis', 'N/A')[:500]}
 ---
-CODE: {self.results.get('code_analysis', {}).get('analysis', 'N/A')[:500]}
+CODE ANALYSIS: {self.results.get('code_analysis', {}).get('analysis', 'N/A')[:500]}
 ---
 COMPLIANCE: {self.results.get('compliance', {}).get('analysis', 'N/A')[:500]}
 ---
 LEARNING: {self.results.get('learning', {}).get('analysis', 'N/A')[:500]}
 ---
+EXECUTION: {self.results.get('execution', {}).get('analysis', 'N/A')[:500]}
+---
 
 Current: {workers} workers, ~{runtime}h runtime, {runs} runs/month
 
-Provide prioritized recommendations and compare platform costs."""
+Provide:
+1. CRITICAL issues (must fix)
+2. HIGH priority optimizations (significant impact)
+3. MEDIUM improvements (nice to have)
+4. Platform comparison with cost savings
+5. Implementation roadmap with effort estimates"""
 
         result = self._run_agent('recommendations', RECOMMENDATION_PROMPT, prompt, [calculate_platform_costs])
         return {'analysis': result}
@@ -544,7 +816,7 @@ Provide prioritized recommendations and compare platform costs."""
 # CLI
 # =============================================================================
 
-def run_single_config(config_path: str, output_dir: str, model: str = None):
+def run_single_config(config_path: str, output_dir: str, model: str = None, execute: bool = False):
     """Run analysis on a single config file."""
     print(f"\n  Loading: {config_path}")
 
@@ -552,7 +824,7 @@ def run_single_config(config_path: str, output_dir: str, model: str = None):
         config = json.load(f)
 
     orchestrator = StrandsETLOrchestrator(model=model)
-    result = orchestrator.analyze(config)
+    result = orchestrator.analyze(config, execute=execute)
 
     # Save results
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -577,7 +849,7 @@ def run_single_config(config_path: str, output_dir: str, model: str = None):
     return result
 
 
-def run_batch(source_dir: str, output_dir: str, model: str = None):
+def run_batch(source_dir: str, output_dir: str, model: str = None, execute: bool = False):
     """Run analysis on all configs in a directory."""
     configs = list(Path(source_dir).glob('*.json'))
     print(f"\n  Found {len(configs)} config files in {source_dir}")
@@ -588,7 +860,7 @@ def run_batch(source_dir: str, output_dir: str, model: str = None):
         print(f"  [{i}/{len(configs)}] {cfg_path.name}")
         print(f"{'#'*70}")
 
-        result = run_single_config(str(cfg_path), output_dir, model)
+        result = run_single_config(str(cfg_path), output_dir, model, execute)
         results.append(result)
 
     return results
@@ -600,14 +872,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single config
-  python scripts/strands_etl_agents.py --config demo_configs/sales_etl.json --dest reports/
+  # Analyze only (default)
+  python scripts/strands_etl_agents.py --config demo_configs/sales_etl.json
+
+  # Analyze and execute the Glue job
+  python scripts/strands_etl_agents.py --config job.json --execute
 
   # Batch mode
   python scripts/strands_etl_agents.py --source demo_configs/ --dest reports/
-
-  # Custom model
-  python scripts/strands_etl_agents.py --config job.json --model us.anthropic.claude-sonnet-4-6-20250514
 
 Environment:
   AWS_REGION=us-west-2 (default)
@@ -618,16 +890,24 @@ Environment:
     parser.add_argument('--source', '-s', help='Directory with config JSONs (batch mode)')
     parser.add_argument('--dest', '-d', default='./reports', help='Output directory')
     parser.add_argument('--model', '-m', help='Bedrock model ID')
+    parser.add_argument('--execute', '-e', action='store_true', help='Actually execute the Glue job (not just analyze)')
 
     args = parser.parse_args()
 
     if not args.config and not args.source:
         parser.error("Either --config or --source required")
 
+    if args.execute:
+        print("\n  WARNING: --execute mode will START ACTUAL GLUE JOBS!")
+        confirm = input("  Type 'yes' to confirm: ")
+        if confirm.lower() != 'yes':
+            print("  Aborted.")
+            return
+
     if args.config:
-        run_single_config(args.config, args.dest, args.model)
+        run_single_config(args.config, args.dest, args.model, args.execute)
     else:
-        run_batch(args.source, args.dest, args.model)
+        run_batch(args.source, args.dest, args.model, args.execute)
 
 
 if __name__ == '__main__':
