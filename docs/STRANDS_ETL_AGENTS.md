@@ -90,7 +90,17 @@ python scripts/strands_etl_agents.py --source demo_configs/ --dest reports/
 python scripts/strands_etl_agents.py --config job.json --execute
 ```
 
-## Agents
+## Agents (7 Total)
+
+| # | Agent | Tools | Purpose |
+|---|-------|-------|---------|
+| 1 | SizingAgent | `scan_s3_location`, `get_glue_table_info` | Determine data sizes |
+| 2 | CodeAnalysisAgent | `read_file` | Line-by-line code review |
+| 3 | DataQualityAgent | `validate_data_quality_rule`, `run_athena_query` | Validate data rules |
+| 4 | ComplianceAgent | - | Security & best practices |
+| 5 | LearningAgent | `get_glue_job_runs`, `load_execution_history` | Learn from history |
+| 6 | ExecutionAgent | `start_glue_job`, `get_job_run_status`, `store_execution_history` | Run/track jobs |
+| 7 | RecommendationAgent | `calculate_platform_costs` | Prioritized recommendations |
 
 ### 1. Sizing Agent
 
@@ -129,7 +139,44 @@ Line 78: [ANTI-PATTERN] for row in df.collect():
          [FIX] Use df.foreach() or foreachPartition()
 ```
 
-### 3. Compliance Agent
+### 3. Data Quality Agent
+
+**Purpose:** Validate data against quality rules using Athena.
+
+**Tools:**
+- `validate_data_quality_rule(database, table, rule_type, column)` - Run validation
+- `run_athena_query(sql)` - Execute custom SQL
+
+**Rule Types:**
+- `not_null` - Check for NULL values
+- `unique` - Check for duplicates
+- `positive` - Check for negative values
+- `row_count` - Verify minimum row count
+- `completeness` - Check data completeness percentage
+
+**Output:**
+```
+[TOOL] validate_data_quality_rule: sales_db.orders - not_null
+[TOOL] Query returned 1 rows
+Result: PASS | Records: 1,523,456 | Outliers: 0
+
+[TOOL] validate_data_quality_rule: sales_db.orders - completeness
+Result: FAIL | Records: 1,523,456 | Outliers: 45,231 | Pass Rate: 97.03%
+```
+
+**Config:**
+```json
+{
+  "data_quality": {
+    "rules": [
+      {"table": "sales_db.orders", "type": "not_null", "column": "order_id"},
+      {"table": "sales_db.orders", "type": "completeness", "column": "customer_id", "threshold": 0.99}
+    ]
+  }
+}
+```
+
+### 4. Compliance Agent
 
 **Purpose:** Check security, cost controls, and best practices.
 
@@ -140,7 +187,7 @@ Line 78: [ANTI-PATTERN] for row in df.collect():
 - Logging enabled
 - VPC settings
 
-### 4. Learning Agent
+### 5. Learning Agent
 
 **Purpose:** Learn from historical job runs to identify patterns and anomalies.
 
@@ -157,7 +204,7 @@ Historical Analysis (last 20 runs):
 - Trend: Duration increasing 15% over last month
 ```
 
-### 5. Execution Agent
+### 6. Execution Agent
 
 **Purpose:** Execute jobs (or simulate) and store results for learning.
 
@@ -170,7 +217,7 @@ Historical Analysis (last 20 runs):
 - **Analyze mode (default):** Simulates execution, estimates cost/duration
 - **Execute mode (`--execute`):** Actually starts the Glue job
 
-### 6. Recommendation Agent
+### 7. Recommendation Agent
 
 **Purpose:** Synthesize all findings into prioritized recommendations.
 
@@ -200,31 +247,35 @@ PLATFORM COMPARISON:
 1. SIZING AGENT
    └─> Scans S3 locations and Glue tables
    └─> Determines actual data volumes
-   └─> Sets shared state: total_size_gb
 
 2. CODE ANALYSIS AGENT
    └─> Reads script file
    └─> Finds anti-patterns with line numbers
    └─> Suggests specific fixes
 
-3. COMPLIANCE AGENT
+3. DATA QUALITY AGENT
+   └─> Runs Athena queries to validate rules
+   └─> Checks NULL, duplicates, completeness
+   └─> Reports pass/fail with outlier counts
+
+4. COMPLIANCE AGENT
    └─> Reviews configuration
    └─> Checks security settings
    └─> Validates best practices
 
-4. LEARNING AGENT
+5. LEARNING AGENT
    └─> Loads historical execution data
    └─> Computes statistics (avg duration, cost)
    └─> Identifies trends and anomalies
 
-5. EXECUTION AGENT
+6. EXECUTION AGENT
    └─> Simulates or executes job
    └─> Monitors progress (if executing)
    └─> Stores results for future learning
 
-6. RECOMMENDATION AGENT
+7. RECOMMENDATION AGENT
    └─> Aggregates all findings
-   └─> Prioritizes by impact
+   └─> Prioritizes by impact (critical DQ issues first)
    └─> Compares platform costs
    └─> Generates implementation roadmap
 ```
