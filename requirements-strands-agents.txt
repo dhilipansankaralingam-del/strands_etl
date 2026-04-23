@@ -1,0 +1,11 @@
+# Requirements for Strands ETL Agents
+# Install: pip install -r requirements-strands-agents.txt
+
+# Core - Strands SDK (includes anthropic, pydantic, etc.)
+strands-agents>=1.0.0
+
+# AWS SDK
+boto3>=1.28.0
+
+# Optional but recommended
+python-dotenv>=1.0.0    # For .env file support
