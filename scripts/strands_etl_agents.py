@@ -613,6 +613,602 @@ def load_execution_history(job_name: str, limit: int = 20) -> Dict[str, Any]:
 
 
 @tool
+def analyze_table_schema(database: str, table: str) -> Dict[str, Any]:
+    """Analyze table schema: column count, types, width estimate, and partition layout.
+
+    Args:
+        database: Glue database name
+        table: Table name
+
+    Returns:
+        Dict with column breakdown, estimated row width bytes, wide-table flags
+    """
+    print(f"      [TOOL] analyze_table_schema: {database}.{table}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        resp = glue.get_table(DatabaseName=database, Name=table)
+        tbl = resp['Table']
+
+        sd = tbl.get('StorageDescriptor', {})
+        columns = sd.get('Columns', [])
+        partitions = tbl.get('PartitionKeys', [])
+
+        type_map = {}
+        estimated_row_bytes = 0
+        type_widths = {
+            'string': 50, 'varchar': 50, 'char': 20,
+            'int': 4, 'bigint': 8, 'long': 8, 'double': 8, 'float': 4,
+            'boolean': 1, 'date': 4, 'timestamp': 8,
+            'decimal': 16, 'array': 100, 'map': 200, 'struct': 150, 'binary': 100
+        }
+
+        complex_cols = []
+        string_cols = []
+        numeric_cols = []
+
+        for col in columns:
+            col_type = col.get('Type', 'string').lower().split('<')[0]
+            width = type_widths.get(col_type, 50)
+            estimated_row_bytes += width
+            type_map[col_type] = type_map.get(col_type, 0) + 1
+
+            if col_type in ('array', 'map', 'struct'):
+                complex_cols.append(col['Name'])
+            elif col_type in ('string', 'varchar', 'char'):
+                string_cols.append(col['Name'])
+            elif col_type in ('int', 'bigint', 'double', 'float', 'decimal', 'long'):
+                numeric_cols.append(col['Name'])
+
+        is_wide = len(columns) > 50
+        has_complex = len(complex_cols) > 0
+
+        print(f"      [TOOL] {len(columns)} columns, ~{estimated_row_bytes}B/row, wide={is_wide}")
+
+        return {
+            'database': database,
+            'table': table,
+            'total_columns': len(columns),
+            'partition_keys': [p['Name'] for p in partitions],
+            'partition_count': len(partitions),
+            'estimated_row_bytes': estimated_row_bytes,
+            'estimated_row_kb': round(estimated_row_bytes / 1024, 3),
+            'type_breakdown': type_map,
+            'string_columns': string_cols[:10],
+            'numeric_columns': numeric_cols[:10],
+            'complex_columns': complex_cols,
+            'is_wide_table': is_wide,
+            'has_complex_types': has_complex,
+            'warnings': (
+                (['Wide table (>50 cols): consider columnar pruning'] if is_wide else []) +
+                (['Complex types (array/map/struct): UDFs may be slow'] if has_complex else [])
+            )
+        }
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e), 'database': database, 'table': table}
+
+
+@tool
+def detect_data_skew(database: str, table: str, partition_column: str, sample_limit: int = 20) -> Dict[str, Any]:
+    """Detect data skew by analyzing partition value distribution via Athena.
+
+    Args:
+        database: Database name
+        table: Table name
+        partition_column: Column to check skew on (partition key or join key)
+        sample_limit: Top N partition values to sample
+
+    Returns:
+        Dict with skew score, hot partitions, and recommended salting strategy
+    """
+    print(f"      [TOOL] detect_data_skew: {database}.{table} on {partition_column}")
+
+    sql = f"""
+        SELECT {partition_column},
+               COUNT(*) as record_count,
+               ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER(), 2) as pct_of_total
+        FROM {database}.{table}
+        GROUP BY {partition_column}
+        ORDER BY record_count DESC
+        LIMIT {sample_limit}
+    """
+
+    result = run_athena_query(sql, database)
+
+    if not result.get('success'):
+        return {'error': result.get('error'), 'database': database, 'table': table}
+
+    rows = result.get('rows', [])
+    if not rows:
+        return {'skew_detected': False, 'message': 'No data returned'}
+
+    counts = [int(r.get('record_count', 0)) for r in rows]
+    pcts = [float(r.get('pct_of_total', 0)) for r in rows]
+
+    max_pct = max(pcts) if pcts else 0
+    min_count = min(counts) if counts else 0
+    max_count = max(counts) if counts else 0
+    skew_ratio = max_count / min_count if min_count > 0 else 999
+
+    skew_detected = max_pct > 30 or skew_ratio > 10
+
+    hot_partitions = [
+        {'value': r.get(partition_column, ''), 'count': int(r.get('record_count', 0)), 'pct': float(r.get('pct_of_total', 0))}
+        for r in rows[:5]
+    ]
+
+    recommendations = []
+    if skew_detected:
+        recommendations.append(f"Salt {partition_column} with random suffix (e.g. CONCAT({partition_column}, '_', CAST(FLOOR(RAND()*10) AS STRING)))")
+        recommendations.append("Use skewHint: df.hint('skew', '{partition_column}')")
+        recommendations.append("Enable AQE: spark.sql.adaptive.enabled=true, spark.sql.adaptive.skewJoin.enabled=true")
+        if max_pct > 50:
+            recommendations.append(f"Consider pre-aggregating hot partition before join")
+
+    print(f"      [TOOL] Skew detected={skew_detected}, max_pct={max_pct}%, ratio={skew_ratio:.1f}x")
+
+    return {
+        'database': database,
+        'table': table,
+        'partition_column': partition_column,
+        'skew_detected': skew_detected,
+        'skew_ratio': round(skew_ratio, 2),
+        'max_partition_pct': max_pct,
+        'hot_partitions': hot_partitions,
+        'total_partitions_sampled': len(rows),
+        'recommendations': recommendations
+    }
+
+
+@tool
+def analyze_s3_object_timestamps(s3_uri: str, lookback_hours: int = 24) -> Dict[str, Any]:
+    """Analyze S3 object LastModified timestamps to detect incremental data patterns.
+
+    Args:
+        s3_uri: S3 URI to scan
+        lookback_hours: Hours to look back for recent objects
+
+    Returns:
+        Dict with incremental patterns, new file counts, and CDC recommendations
+    """
+    print(f"      [TOOL] analyze_s3_object_timestamps: {s3_uri} (last {lookback_hours}h)")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        from datetime import timezone
+        path = s3_uri.replace('s3://', '').replace('s3a://', '')
+        bucket, *prefix_parts = path.split('/')
+        prefix = '/'.join(prefix_parts)
+
+        s3 = boto3.client('s3', region_name='us-west-2')
+        paginator = s3.get_paginator('list_objects_v2')
+
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        cutoff = now.replace(hour=now.hour - lookback_hours % 24,
+                             day=now.day - lookback_hours // 24) if lookback_hours < 24 * 30 else None
+
+        total_files = 0
+        recent_files = 0
+        recent_size = 0
+        total_size = 0
+        oldest = None
+        newest = None
+        hourly_buckets = {}
+
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, PaginationConfig={'MaxItems': 2000}):
+            for obj in page.get('Contents', []):
+                total_files += 1
+                total_size += obj.get('Size', 0)
+                lm = obj.get('LastModified')
+
+                if lm:
+                    if oldest is None or lm < oldest:
+                        oldest = lm
+                    if newest is None or lm > newest:
+                        newest = lm
+
+                    hour_key = lm.strftime('%Y-%m-%d %H:00')
+                    hourly_buckets[hour_key] = hourly_buckets.get(hour_key, 0) + 1
+
+                    if cutoff and lm >= cutoff:
+                        recent_files += 1
+                        recent_size += obj.get('Size', 0)
+
+        recent_pct = round(recent_files / total_files * 100, 1) if total_files else 0
+        recent_gb = round(recent_size / (1024**3), 3)
+        total_gb = round(total_size / (1024**3), 3)
+
+        # Detect pattern
+        if recent_pct < 5:
+            pattern = 'FULL_LOAD'
+            cdc_suitable = False
+        elif recent_pct < 30:
+            pattern = 'INCREMENTAL'
+            cdc_suitable = True
+        else:
+            pattern = 'APPEND_HEAVY'
+            cdc_suitable = True
+
+        recommendations = []
+        if cdc_suitable:
+            recommendations.append(f"Use incremental load: filter WHERE last_modified >= '{lookback_hours}h ago'")
+            recommendations.append("Add --job-bookmark-option=job-bookmark-enable in Glue for auto-incrementals")
+            recommendations.append(f"Only {recent_gb:.2f} GB changed in last {lookback_hours}h vs {total_gb:.2f} GB total - process delta only")
+        else:
+            recommendations.append("Data appears static/full-load - consider scheduling less frequently")
+
+        print(f"      [TOOL] Pattern={pattern}, recent={recent_pct}%, recent={recent_gb}GB/{total_gb}GB")
+
+        return {
+            's3_uri': s3_uri,
+            'total_files': total_files,
+            'total_size_gb': total_gb,
+            'recent_files_last_Nh': recent_files,
+            'recent_size_gb': recent_gb,
+            'recent_pct': recent_pct,
+            'data_pattern': pattern,
+            'cdc_suitable': cdc_suitable,
+            'oldest_object': oldest.isoformat() if oldest else None,
+            'newest_object': newest.isoformat() if newest else None,
+            'top_active_hours': sorted(hourly_buckets.items(), key=lambda x: x[1], reverse=True)[:5],
+            'recommendations': recommendations
+        }
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e), 's3_uri': s3_uri}
+
+
+@tool
+def analyze_executor_sizing(total_data_gb: float, num_columns: int, worker_type: str = 'G.1X',
+                             num_workers: int = 10) -> Dict[str, Any]:
+    """Calculate optimal executor sizing based on data volume and table width.
+
+    Args:
+        total_data_gb: Total input data in GB
+        num_columns: Number of columns in the widest table
+        worker_type: Glue worker type (G.1X, G.2X, G.4X, G.8X)
+        num_workers: Current number of workers
+
+    Returns:
+        Dict with per-executor data, shuffle estimates, and recommended executor count
+    """
+    print(f"      [TOOL] analyze_executor_sizing: {total_data_gb}GB, {num_columns} cols, {worker_type}x{num_workers}")
+
+    worker_specs = {
+        'G.1X':  {'vcpu': 4,  'mem_gb': 16,  'cost_dpu': 0.44},
+        'G.2X':  {'vcpu': 8,  'mem_gb': 32,  'cost_dpu': 0.88},
+        'G.4X':  {'vcpu': 16, 'mem_gb': 64,  'cost_dpu': 1.76},
+        'G.8X':  {'vcpu': 32, 'mem_gb': 128, 'cost_dpu': 3.52},
+        'Standard': {'vcpu': 4, 'mem_gb': 16, 'cost_dpu': 0.44},
+    }
+    spec = worker_specs.get(worker_type, worker_specs['G.1X'])
+
+    executor_mem = spec['mem_gb']
+    driver_overhead = 0.25
+    usable_mem_gb = executor_mem * (1 - driver_overhead)
+
+    data_per_executor_gb = total_data_gb / max(num_workers - 1, 1)
+    width_multiplier = 1 + (num_columns / 100)
+    effective_data_per_exec = data_per_executor_gb * width_multiplier
+
+    shuffle_estimate_gb = total_data_gb * 2.5
+    shuffle_per_executor = shuffle_estimate_gb / max(num_workers - 1, 1)
+
+    mem_ok = effective_data_per_exec < usable_mem_gb * 0.6
+    optimal_workers = max(2, int((total_data_gb * width_multiplier) / (usable_mem_gb * 0.5)) + 1)
+
+    issues = []
+    if not mem_ok:
+        issues.append(f"Data per executor ({effective_data_per_exec:.1f}GB) exceeds safe threshold ({usable_mem_gb*0.6:.1f}GB)")
+    if shuffle_per_executor > usable_mem_gb * 0.4:
+        issues.append(f"Shuffle ({shuffle_per_executor:.1f}GB/executor) may cause spill to disk")
+    if num_columns > 100:
+        issues.append(f"Wide table ({num_columns} cols): consider SELECT only needed columns early")
+
+    spark_configs = {
+        'spark.executor.memory': f'{int(executor_mem * 0.75)}g',
+        'spark.executor.memoryOverhead': f'{int(executor_mem * 0.25 * 1024)}m',
+        'spark.sql.shuffle.partitions': str(max(200, optimal_workers * 4)),
+        'spark.default.parallelism': str(optimal_workers * 2),
+    }
+
+    print(f"      [TOOL] Per-executor: {data_per_executor_gb:.2f}GB raw, optimal_workers={optimal_workers}")
+
+    return {
+        'worker_type': worker_type,
+        'worker_mem_gb': executor_mem,
+        'usable_mem_gb': round(usable_mem_gb, 2),
+        'data_per_executor_gb': round(data_per_executor_gb, 3),
+        'effective_data_per_executor_gb': round(effective_data_per_exec, 3),
+        'shuffle_estimate_gb': round(shuffle_estimate_gb, 2),
+        'shuffle_per_executor_gb': round(shuffle_per_executor, 3),
+        'current_workers': num_workers,
+        'optimal_workers': optimal_workers,
+        'mem_sufficient': mem_ok,
+        'issues': issues,
+        'recommended_spark_configs': spark_configs,
+        'upgrade_needed': optimal_workers > num_workers or not mem_ok
+    }
+
+
+@tool
+def get_spark_config_recommendations(data_size_gb: float, num_tables: int, has_skew: bool,
+                                      has_wide_tables: bool, has_complex_types: bool,
+                                      worker_type: str = 'G.1X', num_workers: int = 10) -> Dict[str, Any]:
+    """Generate dynamic Spark configuration recommendations based on workload characteristics.
+
+    Args:
+        data_size_gb: Total data size in GB
+        num_tables: Number of tables being joined
+        has_skew: Whether data skew was detected
+        has_wide_tables: Whether any table has >50 columns
+        has_complex_types: Whether any table has array/map/struct columns
+        worker_type: Glue worker type
+        num_workers: Number of workers
+
+    Returns:
+        Dict with categorized Spark configs to apply dynamically
+    """
+    print(f"      [TOOL] get_spark_config_recommendations: {data_size_gb}GB, {num_tables} tables, skew={has_skew}")
+
+    worker_mem = {'G.1X': 16, 'G.2X': 32, 'G.4X': 64, 'G.8X': 128, 'Standard': 16}.get(worker_type, 16)
+
+    shuffle_partitions = max(200, num_workers * max(4, int(data_size_gb / 2)))
+    broadcast_threshold = '100MB' if data_size_gb > 100 else '256MB'
+
+    configs = {
+        'adaptive_query_execution': {
+            'spark.sql.adaptive.enabled': 'true',
+            'spark.sql.adaptive.coalescePartitions.enabled': 'true',
+            'spark.sql.adaptive.coalescePartitions.minPartitionNum': str(num_workers),
+            'spark.sql.adaptive.advisoryPartitionSizeInBytes': '128MB',
+            'spark.sql.adaptive.skewJoin.enabled': 'true' if has_skew else 'false',
+            'spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes': '256MB',
+            'spark.sql.adaptive.skewJoin.skewedPartitionFactor': '5',
+        },
+        'memory_management': {
+            'spark.executor.memory': f'{int(worker_mem * 0.75)}g',
+            'spark.executor.memoryOverhead': f'{int(worker_mem * 0.25 * 1024)}m',
+            'spark.memory.fraction': '0.8',
+            'spark.memory.storageFraction': '0.3',
+            'spark.sql.execution.arrow.pyspark.enabled': 'true',
+        },
+        'shuffle_tuning': {
+            'spark.sql.shuffle.partitions': str(shuffle_partitions),
+            'spark.default.parallelism': str(num_workers * 2),
+            'spark.shuffle.compress': 'true',
+            'spark.shuffle.spill.compress': 'true',
+            'spark.io.compression.codec': 'lz4',
+        },
+        'join_optimization': {
+            'spark.sql.autoBroadcastJoinThreshold': broadcast_threshold,
+            'spark.sql.join.preferSortMergeJoin': 'false' if data_size_gb < 50 else 'true',
+            'spark.sql.broadcastTimeout': '600',
+        },
+        'io_optimization': {
+            'spark.sql.parquet.filterPushdown': 'true',
+            'spark.sql.parquet.mergeSchema': 'false',
+            'spark.hadoop.fs.s3a.fast.upload': 'true',
+            'spark.hadoop.fs.s3a.multipart.size': '128MB',
+            'spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version': '2',
+        },
+        'wide_table_specific': {
+            'spark.sql.columnVector.offheap.enabled': 'true',
+            'spark.sql.execution.columnar.scan.enabled': 'true',
+        } if has_wide_tables else {},
+        'complex_type_specific': {
+            'spark.sql.legacy.timeParserPolicy': 'LEGACY',
+            'spark.sql.mapKeyDedupPolicy': 'LAST_WIN',
+        } if has_complex_types else {},
+    }
+
+    glue_job_params = {
+        '--conf': ' '.join([
+            f"spark.sql.adaptive.enabled=true",
+            f"spark.sql.shuffle.partitions={shuffle_partitions}",
+            f"spark.sql.adaptive.skewJoin.enabled={'true' if has_skew else 'false'}",
+        ])
+    }
+
+    highlights = []
+    if has_skew:
+        highlights.append("AQE skew join enabled - critical for your skewed partitions")
+    if data_size_gb > 100:
+        highlights.append(f"shuffle.partitions={shuffle_partitions} tuned for {data_size_gb:.0f}GB data")
+    if has_wide_tables:
+        highlights.append("Off-heap columnar vectors enabled for wide table performance")
+    highlights.append(f"Broadcast threshold={broadcast_threshold} based on data size")
+
+    print(f"      [TOOL] Generated {sum(len(v) for v in configs.values())} spark configs")
+
+    return {
+        'configs': configs,
+        'glue_job_parameters': glue_job_params,
+        'key_highlights': highlights,
+        'how_to_apply': "Pass via Glue job --conf parameter or spark.sparkContext.setConf() at runtime"
+    }
+
+
+@tool
+def get_alternative_tools_analysis(data_size_gb: float, monthly_runs: int,
+                                    avg_runtime_hours: float, has_streaming: bool = False,
+                                    has_ml: bool = False) -> Dict[str, Any]:
+    """Analyze alternative AWS and cross-platform tools that could improve cost or performance.
+
+    Args:
+        data_size_gb: Total data size in GB
+        monthly_runs: Number of monthly job runs
+        avg_runtime_hours: Average runtime in hours
+        has_streaming: Whether workload has streaming requirements
+        has_ml: Whether workload includes ML/feature engineering
+
+    Returns:
+        Dict with ranked alternative tools and innovative recommendations
+    """
+    print(f"      [TOOL] get_alternative_tools_analysis: {data_size_gb}GB, {monthly_runs} runs/mo, stream={has_streaming}")
+
+    glue_monthly = monthly_runs * avg_runtime_hours * 10 * 0.44  # ~10 DPUs
+
+    aws_alternatives = []
+
+    # AWS EMR Serverless
+    emr_cost = monthly_runs * avg_runtime_hours * 8 * 0.26
+    aws_alternatives.append({
+        'tool': 'AWS EMR Serverless',
+        'category': 'AWS Native',
+        'monthly_cost_est': round(emr_cost, 2),
+        'savings_pct': round((glue_monthly - emr_cost) / glue_monthly * 100, 1),
+        'best_for': 'Large Spark jobs, full Spark API control, no cluster mgmt',
+        'migration_effort': 'Low - same PySpark code, change entrypoint',
+        'pros': ['40% cheaper than Glue', 'Full Spark config control', 'No DPU limits', 'Spot instance support'],
+        'cons': ['No visual ETL', 'Manual IAM setup', 'Cold start latency'],
+        'innovative_feature': 'Pre-initialized capacity pools for zero cold-start'
+    })
+
+    # AWS Athena CTAS
+    if data_size_gb < 50:
+        athena_cost = monthly_runs * data_size_gb * 0.005
+        aws_alternatives.append({
+            'tool': 'AWS Athena (CTAS)',
+            'category': 'AWS Native - Serverless SQL',
+            'monthly_cost_est': round(athena_cost, 2),
+            'savings_pct': round((glue_monthly - athena_cost) / glue_monthly * 100, 1),
+            'best_for': 'SQL-based transformations on data <100GB, ad-hoc ETL',
+            'migration_effort': 'Medium - rewrite PySpark as SQL',
+            'pros': ['Pay per query ($5/TB scanned)', 'Zero infrastructure', 'Instant start', 'Federated queries'],
+            'cons': ['No complex UDFs', 'Limited window functions', 'No iterative processing'],
+            'innovative_feature': 'Athena ACID transactions with Iceberg tables'
+        })
+
+    # AWS Glue with Iceberg
+    aws_alternatives.append({
+        'tool': 'AWS Glue + Apache Iceberg',
+        'category': 'AWS Native - Enhancement',
+        'monthly_cost_est': round(glue_monthly * 0.7, 2),
+        'savings_pct': 30.0,
+        'best_for': 'Incremental/CDC workloads, time-travel, schema evolution',
+        'migration_effort': 'Low - add Iceberg config to existing Glue job',
+        'pros': ['30% less data scanned via partition pruning', 'Row-level deletes (MERGE INTO)', 'Time travel queries', 'Schema evolution without rewrite'],
+        'cons': ['Iceberg overhead for small datasets', 'Compaction jobs needed'],
+        'innovative_feature': 'Automatic compaction + partition evolution based on query patterns'
+    })
+
+    # AWS Step Functions + Lambda
+    if avg_runtime_hours < 0.25 and data_size_gb < 5:
+        lambda_cost = monthly_runs * 0.002
+        aws_alternatives.append({
+            'tool': 'AWS Lambda + Step Functions',
+            'category': 'AWS Serverless',
+            'monthly_cost_est': round(lambda_cost, 2),
+            'savings_pct': round((glue_monthly - lambda_cost) / glue_monthly * 100, 1),
+            'best_for': 'Lightweight ETL <15min, event-driven pipelines',
+            'migration_effort': 'High - rewrite logic, no Spark',
+            'pros': ['Near-zero cost', 'Event-driven', 'No cold start with provisioned concurrency'],
+            'cons': ['15min max runtime', '10GB memory limit', 'No Spark DataFrame API'],
+            'innovative_feature': 'Lambda SnapStart for JVM-based ETL (sub-second init)'
+        })
+
+    # Kinesis + Flink for streaming
+    if has_streaming:
+        aws_alternatives.append({
+            'tool': 'Amazon Kinesis + Managed Flink (Zeppelin)',
+            'category': 'AWS Streaming',
+            'monthly_cost_est': round(monthly_runs * 0.11 * avg_runtime_hours * 24, 2),
+            'savings_pct': None,
+            'best_for': 'Real-time streaming ETL, sub-second latency',
+            'migration_effort': 'High - rewrite as streaming pipeline',
+            'pros': ['Sub-second latency', 'Exactly-once semantics', 'Auto-scaling', 'Serverless'],
+            'cons': ['Higher complexity', 'Stateful processing overhead'],
+            'innovative_feature': 'Flink SQL + Iceberg Streaming Sink for real-time lakehouse'
+        })
+
+    # Cross-platform alternatives
+    cross_platform = [
+        {
+            'platform': 'Databricks (AWS)',
+            'monthly_cost_est': round(glue_monthly * 0.6, 2),
+            'savings_pct': 40.0,
+            'best_for': 'ML + ETL, Unity Catalog governance, Delta Lake',
+            'innovative_features': ['Photon engine (3-5x faster than Spark)', 'Delta Live Tables for CDC', 'Liquid clustering replaces partitioning', 'AI/BI dashboards built-in']
+        },
+        {
+            'platform': 'Snowflake (Snowpark)',
+            'monthly_cost_est': round(glue_monthly * 0.9, 2),
+            'savings_pct': 10.0,
+            'best_for': 'SQL-heavy workloads, data sharing, governed access',
+            'innovative_features': ['Snowpark Python for Spark-like DataFrames', 'Automatic clustering', 'Zero-copy cloning for dev/test', 'Dynamic tables (CDC built-in)']
+        },
+        {
+            'platform': 'GCP Dataproc Serverless',
+            'monthly_cost_est': round(glue_monthly * 0.55, 2),
+            'savings_pct': 45.0,
+            'best_for': 'Pure Spark workloads, BigQuery integration',
+            'innovative_features': ['Dataproc Metastore for shared catalog', 'BigQuery Storage Read API (10x faster)', 'Persistent Spark History Server', 'Spot VMs for 60-91% savings']
+        },
+        {
+            'platform': 'Azure Synapse Spark',
+            'monthly_cost_est': round(glue_monthly * 0.75, 2),
+            'savings_pct': 25.0,
+            'best_for': 'Microsoft ecosystem, Power BI integration',
+            'innovative_features': ['Synapse Link for zero-ETL from CosmosDB/SQL', 'Intelligent query acceleration', 'Dedicated SQL pool for BI workloads']
+        },
+    ]
+
+    innovative_patterns = [
+        {
+            'pattern': 'Apache Iceberg + Incremental Processing',
+            'description': 'Use Iceberg snapshot diff to process only new/changed rows since last run',
+            'impact': 'Reduce data scanned by 70-90% for slowly changing datasets',
+            'implementation': "spark.read.format('iceberg').option('start-snapshot-id', last_snapshot).load(table)"
+        },
+        {
+            'pattern': 'Z-Order Clustering',
+            'description': 'Co-locate related data using Z-order on frequently filtered columns',
+            'impact': '50-80% reduction in files scanned for selective queries',
+            'implementation': "ALTER TABLE t REORG WHERE ... ORDER BY ZORDER(col1, col2)"
+        },
+        {
+            'pattern': 'Bloom Filter Indexes',
+            'description': 'Add Parquet bloom filters on high-cardinality join/filter columns',
+            'impact': '40-60% I/O reduction for point lookups and selective joins',
+            'implementation': "df.write.option('parquet.bloom.filter.enabled#col', 'true').parquet(path)"
+        },
+        {
+            'pattern': 'Dynamic Partition Pruning',
+            'description': 'Let Spark broadcast dimension table filters to prune fact table partitions',
+            'impact': '60-80% reduction in fact table scans for star schema joins',
+            'implementation': "spark.conf.set('spark.sql.optimizer.dynamicPartitionPruning.enabled', 'true')"
+        },
+        {
+            'pattern': 'Graviton3 Workers (EMR on EC2)',
+            'description': 'Use ARM-based Graviton3 instances for 20-40% price-performance improvement',
+            'impact': '20-40% better performance per dollar vs x86',
+            'implementation': "emr_master: r7g.xlarge, core: r7g.2xlarge"
+        },
+    ]
+
+    aws_alternatives.sort(key=lambda x: x.get('monthly_cost_est', 9999))
+
+    print(f"      [TOOL] Found {len(aws_alternatives)} AWS alternatives, {len(cross_platform)} cross-platform options")
+
+    return {
+        'current_glue_monthly_est': round(glue_monthly, 2),
+        'aws_alternatives': aws_alternatives,
+        'cross_platform_options': cross_platform,
+        'innovative_patterns': innovative_patterns,
+        'top_recommendation': aws_alternatives[0] if aws_alternatives else None
+    }
+
+
+@tool
 def calculate_platform_costs(workers: int, runtime_hours: float, runs_per_month: int) -> Dict[str, Any]:
     """Calculate and compare costs across cloud platforms.
 
@@ -751,17 +1347,80 @@ When executing:
 - Report any errors clearly with recommendations"""
 
 
-RECOMMENDATION_PROMPT = """You are the Recommendation Agent. Synthesize all findings into actionable recommendations.
+RECOMMENDATION_PROMPT = """You are the Advanced Recommendation Agent. Perform deep multi-dimensional analysis and synthesize all findings into comprehensive, actionable recommendations.
 
-Based on inputs from other agents:
-1. Prioritize by impact (Critical > High > Medium > Low)
-2. Group by category (Cost, Performance, Security, Code Quality)
-3. Estimate effort for each recommendation
-4. Create implementation roadmap
+## Your Analysis Framework
 
-Use calculate_platform_costs to compare platform options.
+### 1. Data Volume & Executor Sizing Analysis
+Use analyze_executor_sizing to determine:
+- Per-executor data load (input GB / (workers-1))
+- Memory headroom vs shuffle spill risk
+- Optimal worker count based on data size and table width
+- Whether current worker type (G.1X/G.2X/G.4X) is right-sized
 
-Format as prioritized list with clear next steps."""
+### 2. Table Width & Schema Analysis
+Use analyze_table_schema for each source table:
+- Wide tables (>50 cols) need columnar pruning early in pipeline
+- Complex types (array/map/struct) increase serialization cost
+- Estimate row width in bytes to validate partition sizes
+- Flag schema issues that slow down joins
+
+### 3. Data Skew Detection
+Use detect_data_skew on partition/join keys:
+- Identify hot partitions (>30% of data in one value)
+- Calculate skew ratio (max_partition / min_partition)
+- Recommend salting, AQE skew join hints, or pre-aggregation
+
+### 4. Incremental Processing (Timestamp Analysis)
+Use analyze_s3_object_timestamps for each S3 source:
+- Detect FULL_LOAD vs INCREMENTAL vs APPEND_HEAVY patterns
+- Calculate what % of data changed recently
+- Recommend CDC / Glue Bookmarks / Iceberg snapshots to process only deltas
+
+### 5. Dynamic Spark Config Generation
+Use get_spark_config_recommendations to generate tuned configs:
+- AQE settings calibrated to data size and skew
+- Shuffle partition count = f(workers, data_gb)
+- Broadcast threshold tuning
+- Memory fraction and off-heap for wide/complex tables
+- I/O compression and S3 multipart settings
+
+### 6. Alternative Tools & Platforms
+Use get_alternative_tools_analysis to identify:
+- AWS Native: EMR Serverless, Athena CTAS, Iceberg, Lambda
+- Cross-Platform: Databricks Photon, Snowpark, GCP Dataproc, Azure Synapse
+- Innovative patterns: Bloom filters, Z-order, Dynamic partition pruning, Graviton3
+- Calculate monthly cost savings for each alternative
+
+### 7. Synthesize All Agent Findings
+After using all tools, produce a PRIORITIZED report:
+
+**CRITICAL** (data loss / job failure risk):
+- Data quality failures on critical columns
+- OOM-prone code patterns (collect(), toPandas())
+- Skew causing executor failures
+
+**HIGH** (>20% cost or performance impact):
+- Wrong executor sizing
+- Missing incremental processing (processing full data when 95% unchanged)
+- Missing broadcasts on small tables
+- No AQE enabled
+
+**MEDIUM** (5-20% impact):
+- Suboptimal Spark configs
+- Wide-table column pruning opportunities
+- Compression codec improvements
+
+**LOW / INNOVATIVE** (future-proofing):
+- Platform migration opportunities
+- Iceberg/Delta Lake adoption
+- Bloom filters, Z-ordering
+
+Always include:
+- SPARK CONFIG BLOCK: exact configs to copy-paste
+- PLATFORM COMPARISON TABLE: cost vs current Glue
+- IMPLEMENTATION ROADMAP: Week 1 / Month 1 / Quarter 1
+- ESTIMATED SAVINGS: $ and % for top 3 recommendations"""
 
 
 # =============================================================================
@@ -1025,36 +1684,86 @@ Store the simulation results for future reference."""
     def _run_recommendation_agent(self, config: Dict) -> Dict:
         current = config.get('current_config', {})
         workers = current.get('NumberOfWorkers', current.get('workers', 10))
+        worker_type = current.get('WorkerType', 'G.1X')
         runtime = config.get('avg_runtime_hours', 0.5)
         runs = config.get('monthly_runs', 30)
+        source_tables = config.get('source_tables', [])
 
-        prompt = f"""Synthesize recommendations for job '{config.get('job_name')}':
+        # Build table info for schema/skew analysis
+        table_list = []
+        for t in source_tables:
+            db = t.get('database', 'default')
+            tbl = t.get('table', t.get('name', ''))
+            loc = t.get('location', t.get('s3_path', ''))
+            rows_est = t.get('estimated_rows', 0)
+            table_list.append(f"  - {db}.{tbl} | location: {loc} | est_rows: {rows_est:,}")
 
-Previous Agent Findings:
----
-SIZING: {self.results.get('sizing', {}).get('analysis', 'N/A')[:400]}
----
-CODE ANALYSIS: {self.results.get('code_analysis', {}).get('analysis', 'N/A')[:400]}
----
-DATA QUALITY: {self.results.get('data_quality', {}).get('analysis', 'N/A')[:400]}
----
-COMPLIANCE: {self.results.get('compliance', {}).get('analysis', 'N/A')[:400]}
----
-LEARNING: {self.results.get('learning', {}).get('analysis', 'N/A')[:400]}
----
-EXECUTION: {self.results.get('execution', {}).get('analysis', 'N/A')[:400]}
----
+        tables_str = '\n'.join(table_list) if table_list else '  (none specified)'
 
-Current: {workers} workers, ~{runtime}h runtime, {runs} runs/month
+        # Estimate total data from sizing agent result
+        sizing_text = self.results.get('sizing', {}).get('analysis', '')
 
-Provide:
-1. CRITICAL issues (must fix - data quality failures, code errors)
-2. HIGH priority optimizations (significant cost/performance impact)
-3. MEDIUM improvements (nice to have)
-4. Platform comparison with cost savings
-5. Implementation roadmap with effort estimates"""
+        prompt = f"""Perform comprehensive deep-dive analysis for job '{config.get('job_name')}' and generate actionable recommendations.
 
-        result = self._run_agent('recommendations', RECOMMENDATION_PROMPT, prompt, [calculate_platform_costs])
+## JOB CONFIGURATION
+- Workers: {workers} x {worker_type}
+- Avg Runtime: {runtime}h
+- Monthly Runs: {runs}
+- Script: {config.get('script_path', 'N/A')}
+- Glue Job: {config.get('glue_job_name', 'N/A')}
+
+## SOURCE TABLES
+{tables_str}
+
+## PREVIOUS AGENT FINDINGS
+
+### SIZING AGENT
+{self.results.get('sizing', {}).get('analysis', 'N/A')[:600]}
+
+### CODE ANALYSIS AGENT
+{self.results.get('code_analysis', {}).get('analysis', 'N/A')[:600]}
+
+### DATA QUALITY AGENT
+{self.results.get('data_quality', {}).get('analysis', 'N/A')[:600]}
+
+### COMPLIANCE AGENT
+{self.results.get('compliance', {}).get('analysis', 'N/A')[:400]}
+
+### LEARNING AGENT
+{self.results.get('learning', {}).get('analysis', 'N/A')[:400]}
+
+### EXECUTION AGENT
+{self.results.get('execution', {}).get('analysis', 'N/A')[:300]}
+
+## YOUR DEEP-DIVE ANALYSIS STEPS
+
+Step 1: Call analyze_executor_sizing with estimated total data size (extract from SIZING results above, default 10.0 if unknown), number of columns from widest table (estimate 30 if unknown), worker_type='{worker_type}', num_workers={workers}
+
+Step 2: For each source table with a database and table name, call analyze_table_schema to get column counts, types, and wide-table warnings.
+
+Step 3: For source tables with S3 locations, call analyze_s3_object_timestamps to detect incremental vs full-load patterns.
+
+Step 4: Call get_spark_config_recommendations using insights from Steps 1-3 to generate tuned Spark configs.
+
+Step 5: Call get_alternative_tools_analysis to identify cheaper/faster alternatives on AWS and other platforms.
+
+Step 6: Call calculate_platform_costs with current config ({workers} workers, {runtime}h, {runs} runs/month).
+
+Step 7: Synthesize ALL findings (from this session AND the 6 steps above) into a comprehensive report with CRITICAL / HIGH / MEDIUM / LOW sections, a copy-paste Spark config block, a platform comparison table, and a phased implementation roadmap.
+
+Be specific: include exact line numbers from code analysis, exact Spark config key=value pairs, exact dollar savings, and specific AWS service names."""
+
+        tools = [
+            analyze_executor_sizing,
+            analyze_table_schema,
+            detect_data_skew,
+            analyze_s3_object_timestamps,
+            get_spark_config_recommendations,
+            get_alternative_tools_analysis,
+            calculate_platform_costs,
+        ]
+
+        result = self._run_agent('recommendations', RECOMMENDATION_PROMPT, prompt, tools)
         return {'analysis': result}
 
 
