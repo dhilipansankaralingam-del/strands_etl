@@ -1,0 +1,63 @@
+{
+  "job_name": "sales_analytics_daily",
+  "description": "Daily sales analytics ETL job",
+
+  "script_path": "./sample_scripts/sales_transform.py",
+  "glue_job_name": "sales-analytics-daily",
+
+  "source_tables": [
+    {
+      "database": "sales_raw",
+      "table": "orders",
+      "location": "s3://your-bucket/raw/orders/",
+      "estimated_rows": 5000000
+    },
+    {
+      "database": "sales_raw",
+      "table": "customers",
+      "location": "s3://your-bucket/raw/customers/",
+      "estimated_rows": 500000
+    },
+    {
+      "database": "sales_raw",
+      "table": "products",
+      "location": "s3://your-bucket/raw/products/",
+      "estimated_rows": 10000
+    }
+  ],
+
+  "target_tables": [
+    {
+      "database": "sales_curated",
+      "table": "daily_sales_summary"
+    }
+  ],
+
+  "current_config": {
+    "NumberOfWorkers": 10,
+    "WorkerType": "G.1X",
+    "GlueVersion": "4.0",
+    "Timeout": 60
+  },
+
+  "monthly_runs": 30,
+  "avg_runtime_hours": 0.5,
+
+  "data_quality": {
+    "athena_output_location": "s3://your-bucket/athena-results/",
+    "rules": [
+      {"table": "sales_raw.orders", "type": "not_null", "column": "order_id", "severity": "critical"},
+      {"table": "sales_raw.orders", "type": "not_null", "column": "customer_id", "severity": "critical"},
+      {"table": "sales_raw.orders", "type": "positive", "column": "amount", "severity": "warning"},
+      {"table": "sales_raw.customers", "type": "unique", "column": "customer_id", "severity": "critical"},
+      {"table": "sales_raw.orders", "type": "completeness", "column": "order_date", "threshold": 0.99}
+    ]
+  },
+
+  "compliance": {
+    "require_encryption": true,
+    "require_vpc": false,
+    "max_workers": 20,
+    "max_timeout_minutes": 120
+  }
+}

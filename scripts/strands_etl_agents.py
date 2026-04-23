@@ -838,8 +838,30 @@ class StrandsETLOrchestrator:
         """Run a single agent and track metrics."""
         start = time.time()
 
-        print(f"    Creating agent...")
-        print(f"    Prompt: {len(user_prompt)} chars")
+        # Print agent context
+        print(f"\n    {'─'*55}")
+        print(f"    AGENT CONTEXT: {name.upper()}")
+        print(f"    {'─'*55}")
+        print(f"    Model: {self.model}")
+        print(f"    Tools: {[t.__name__ for t in tools]}")
+        print(f"    System Prompt: {len(system_prompt)} chars")
+        print(f"    {'─'*55}")
+        print(f"    SYSTEM PROMPT:")
+        print(f"    {'─'*55}")
+        for line in system_prompt.split('\n')[:10]:  # First 10 lines
+            print(f"    {line[:80]}")
+        if system_prompt.count('\n') > 10:
+            print(f"    ... ({system_prompt.count(chr(10)) - 10} more lines)")
+        print(f"    {'─'*55}")
+        print(f"    USER PROMPT:")
+        print(f"    {'─'*55}")
+        for line in user_prompt.split('\n')[:15]:  # First 15 lines
+            print(f"    {line[:80]}")
+        if user_prompt.count('\n') > 15:
+            print(f"    ... ({user_prompt.count(chr(10)) - 15} more lines)")
+        print(f"    {'─'*55}")
+        print(f"    EXECUTING AGENT...")
+        print(f"    {'─'*55}")
 
         try:
             agent = Agent(
@@ -848,7 +870,6 @@ class StrandsETLOrchestrator:
                 tools=tools
             )
 
-            print(f"    Executing...")
             response = agent(user_prompt)
             duration = time.time() - start
 
@@ -856,12 +877,27 @@ class StrandsETLOrchestrator:
             input_tok = getattr(getattr(response, 'metrics', None), 'input_tokens', 0) or 0
             output_tok = getattr(getattr(response, 'metrics', None), 'output_tokens', 0) or 0
 
+            # Print response summary
+            print(f"    {'─'*55}")
+            print(f"    AGENT RESPONSE:")
+            print(f"    {'─'*55}")
+            response_str = str(response)
+            for line in response_str.split('\n')[:20]:  # First 20 lines
+                print(f"    {line[:80]}")
+            if response_str.count('\n') > 20:
+                print(f"    ... ({response_str.count(chr(10)) - 20} more lines)")
+            print(f"    {'─'*55}")
+
             self.tracker.log_agent(name, input_tok, output_tok, duration)
 
-            return str(response)
+            return response_str
 
         except Exception as e:
+            print(f"    {'─'*55}")
             print(f"    ERROR: {e}")
+            print(f"    {'─'*55}")
+            import traceback
+            traceback.print_exc()
             return f"Agent error: {e}"
 
     def _run_sizing_agent(self, config: Dict) -> Dict:
