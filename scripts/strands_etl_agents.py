@@ -2663,59 +2663,117 @@ class StrandsETLOrchestrator:
           5. Learning       → historical patterns + Spark metrics
           6. Resource Alloc → compute resources based on all above
           7. Execution      → runs job + collects post-execution metrics
-          8. Learning Feed  → re-run learning to ingest new metrics
+          8. Dashboard      → CloudWatch dashboard generation
           9. Recommendation → final prioritized recommendations
 
         Args:
             config: Job configuration dict
             execute: If True, actually start the Glue job (requires confirmation)
+
+        Config agent flags (all default to True):
+            agents.sizing: true/false
+            agents.code_analysis: true/false
+            agents.data_quality: true/false
+            agents.compliance: true/false
+            agents.learning: true/false
+            agents.resource_allocator: true/false
+            agents.execution: true/false
+            agents.dashboard: true/false
+            agents.recommendation: true/false
         """
         job_name = config.get('job_name', 'unknown')
+        agents_cfg = config.get('agents', {})
+
+        # Helper to check if agent is enabled
+        def is_enabled(agent_name: str) -> bool:
+            return agents_cfg.get(agent_name, True)
+
         print(f"\n  Job: {job_name}")
         print(f"  Mode: {'EXECUTE' if execute else 'ANALYZE ONLY'}")
-        print(f"  Code Analysis: {'ON' if config.get('enable_code_analysis', True) else 'OFF'}")
         print(f"  Audit Table: {config.get('audit', {}).get('dynamodb_table', 'etl_audit_log')}")
+        print(f"  {'─'*60}")
+        print(f"  AGENTS ENABLED:")
+        agent_list = ['sizing', 'code_analysis', 'data_quality', 'compliance', 'learning',
+                      'resource_allocator', 'execution', 'dashboard', 'recommendation']
+        for a in agent_list:
+            status = '✓ ON' if is_enabled(a) else '✗ OFF'
+            print(f"    {a:20s} {status}")
         print(f"  {'─'*60}")
 
         # 1. Sizing Agent
-        print(f"\n  [1/9] SIZING AGENT")
-        self.results['sizing'] = self._run_sizing_agent(config)
+        if is_enabled('sizing'):
+            print(f"\n  [1/9] SIZING AGENT")
+            self.results['sizing'] = self._run_sizing_agent(config)
+        else:
+            print(f"\n  [1/9] SIZING AGENT  [SKIPPED]")
+            self.results['sizing'] = {'analysis': 'Skipped (agents.sizing=false)'}
 
-        # 2. Code Analysis Agent (can be disabled in config)
-        if config.get('enable_code_analysis', True) and config.get('script_path'):
+        # 2. Code Analysis Agent
+        if is_enabled('code_analysis') and config.get('script_path'):
             print(f"\n  [2/9] CODE ANALYSIS AGENT")
             self.results['code_analysis'] = self._run_code_agent(config)
         else:
-            print(f"\n  [2/9] CODE ANALYSIS AGENT  [SKIPPED - disabled or no script_path]")
-            self.results['code_analysis'] = {'analysis': 'Skipped (set enable_code_analysis:true and script_path in config)'}
+            print(f"\n  [2/9] CODE ANALYSIS AGENT  [SKIPPED]")
+            self.results['code_analysis'] = {'analysis': 'Skipped (agents.code_analysis=false or no script_path)'}
 
         # 3. Data Quality Agent
-        print(f"\n  [3/9] DATA QUALITY AGENT")
-        self.results['data_quality'] = self._run_data_quality_agent(config)
+        if is_enabled('data_quality'):
+            print(f"\n  [3/9] DATA QUALITY AGENT")
+            self.results['data_quality'] = self._run_data_quality_agent(config)
+        else:
+            print(f"\n  [3/9] DATA QUALITY AGENT  [SKIPPED]")
+            self.results['data_quality'] = {'analysis': 'Skipped (agents.data_quality=false)'}
 
         # 4. Compliance Agent (PII/GDPR/HIPAA)
-        print(f"\n  [4/9] COMPLIANCE AGENT")
-        self.results['compliance'] = self._run_compliance_agent(config)
+        if is_enabled('compliance'):
+            print(f"\n  [4/9] COMPLIANCE AGENT")
+            self.results['compliance'] = self._run_compliance_agent(config)
+        else:
+            print(f"\n  [4/9] COMPLIANCE AGENT  [SKIPPED]")
+            self.results['compliance'] = {'analysis': 'Skipped (agents.compliance=false)'}
 
         # 5. Learning Agent (historical patterns)
-        print(f"\n  [5/9] LEARNING AGENT")
-        self.results['learning'] = self._run_learning_agent(config)
+        if is_enabled('learning'):
+            print(f"\n  [5/9] LEARNING AGENT")
+            self.results['learning'] = self._run_learning_agent(config)
+        else:
+            print(f"\n  [5/9] LEARNING AGENT  [SKIPPED]")
+            self.results['learning'] = {'analysis': 'Skipped (agents.learning=false)'}
 
-        # 6. Resource Allocator Agent (synthesises 1-5 into resource decision)
-        print(f"\n  [6/9] RESOURCE ALLOCATOR AGENT")
-        self.results['resource_allocation'] = self._run_resource_allocator_agent(config)
+        # 6. Resource Allocator Agent
+        if is_enabled('resource_allocator'):
+            print(f"\n  [6/9] RESOURCE ALLOCATOR AGENT")
+            self.results['resource_allocation'] = self._run_resource_allocator_agent(config)
+        else:
+            print(f"\n  [6/9] RESOURCE ALLOCATOR AGENT  [SKIPPED]")
+            self.results['resource_allocation'] = {'analysis': 'Skipped (agents.resource_allocator=false)'}
 
-        # 7. Execution Agent (uses resource allocation, runs job, collects metrics)
-        print(f"\n  [7/9] EXECUTION AGENT")
-        self.results['execution'] = self._run_execution_agent(config, execute)
+        # 7. Execution Agent
+        if is_enabled('execution'):
+            print(f"\n  [7/9] EXECUTION AGENT")
+            self.results['execution'] = self._run_execution_agent(config, execute)
+        else:
+            print(f"\n  [7/9] EXECUTION AGENT  [SKIPPED]")
+            self.results['execution'] = {'analysis': 'Skipped (agents.execution=false)'}
 
         # 8. Dashboard
-        print(f"\n  [8/9] GENERATING CLOUDWATCH DASHBOARD")
-        self.results['dashboard'] = self._generate_dashboard(config)
+        if is_enabled('dashboard'):
+            print(f"\n  [8/9] GENERATING CLOUDWATCH DASHBOARD")
+            self.results['dashboard'] = self._generate_dashboard(config)
+        else:
+            print(f"\n  [8/9] DASHBOARD  [SKIPPED]")
+            self.results['dashboard'] = {'created': False, 'reason': 'Skipped (agents.dashboard=false)'}
 
         # 9. Recommendation Agent
-        print(f"\n  [9/9] RECOMMENDATION AGENT")
-        self.results['recommendations'] = self._run_recommendation_agent(config)
+        if is_enabled('recommendation'):
+            print(f"\n  [9/9] RECOMMENDATION AGENT")
+            self.results['recommendations'] = self._run_recommendation_agent(config)
+        else:
+            print(f"\n  [9/9] RECOMMENDATION AGENT  [SKIPPED]")
+            self.results['recommendations'] = {'analysis': 'Skipped (agents.recommendation=false)'}
+
+        # Store this run's recommendations for history
+        self._store_recommendation_history(job_name, self.results.get('recommendations', {}))
 
         return {
             'job_name': job_name,
@@ -2723,6 +2781,18 @@ class StrandsETLOrchestrator:
             'agents': self.results,
             'token_usage': self.tracker.summary()
         }
+
+    def _store_recommendation_history(self, job_name: str, recommendations: Dict):
+        """Store recommendations to history file for CLI retrieval."""
+        history_dir = Path('data/recommendation_history')
+        history_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'job_name': job_name,
+            'recommendations': recommendations.get('analysis', str(recommendations)),
+        }
+        with open(history_dir / f"{job_name}.jsonl", 'a') as f:
+            f.write(json.dumps(record, default=str) + '\n')
 
     def _run_agent(self, name: str, system_prompt: str, user_prompt: str, tools: list) -> str:
         """Run a single agent and track metrics."""
@@ -2763,9 +2833,44 @@ class StrandsETLOrchestrator:
             response = agent(user_prompt)
             duration = time.time() - start
 
-            # Extract tokens
-            input_tok = getattr(getattr(response, 'metrics', None), 'input_tokens', 0) or 0
-            output_tok = getattr(getattr(response, 'metrics', None), 'output_tokens', 0) or 0
+            # Extract tokens from Strands response - try multiple paths
+            input_tok = 0
+            output_tok = 0
+
+            # Method 1: response.metrics object
+            if hasattr(response, 'metrics') and response.metrics:
+                metrics = response.metrics
+                input_tok = getattr(metrics, 'input_tokens', 0) or getattr(metrics, 'inputTokens', 0) or 0
+                output_tok = getattr(metrics, 'output_tokens', 0) or getattr(metrics, 'outputTokens', 0) or 0
+
+            # Method 2: response.usage dict (common pattern)
+            if input_tok == 0 and hasattr(response, 'usage') and response.usage:
+                usage = response.usage
+                if isinstance(usage, dict):
+                    input_tok = usage.get('input_tokens', usage.get('prompt_tokens', 0))
+                    output_tok = usage.get('output_tokens', usage.get('completion_tokens', 0))
+
+            # Method 3: response._raw or response.raw_response
+            if input_tok == 0:
+                raw = getattr(response, '_raw', None) or getattr(response, 'raw_response', None)
+                if raw and isinstance(raw, dict):
+                    usage = raw.get('usage', {})
+                    input_tok = usage.get('input_tokens', usage.get('prompt_tokens', 0))
+                    output_tok = usage.get('output_tokens', usage.get('completion_tokens', 0))
+
+            # Method 4: For Bedrock responses, check message structure
+            if input_tok == 0 and hasattr(response, 'message'):
+                msg = response.message
+                if hasattr(msg, 'usage'):
+                    input_tok = getattr(msg.usage, 'input_tokens', 0)
+                    output_tok = getattr(msg.usage, 'output_tokens', 0)
+
+            # Method 5: Estimate from content length if all else fails
+            if input_tok == 0:
+                # Rough estimate: 1 token ≈ 4 chars
+                input_tok = (len(system_prompt) + len(user_prompt)) // 4
+                output_tok = len(str(response)) // 4
+                print(f"    [TOKEN ESTIMATE - actual metrics unavailable]")
 
             # Print response summary
             print(f"    {'─'*55}")
@@ -2783,11 +2888,14 @@ class StrandsETLOrchestrator:
             return response_str
 
         except Exception as e:
+            duration = time.time() - start
             print(f"    {'─'*55}")
             print(f"    ERROR: {e}")
             print(f"    {'─'*55}")
             import traceback
             traceback.print_exc()
+            # Log minimal tokens for error case
+            self.tracker.log_agent(name, len(user_prompt) // 4, 0, duration)
             return f"Agent error: {e}"
 
     def _run_sizing_agent(self, config: Dict) -> Dict:
@@ -3102,6 +3210,133 @@ Be specific: include exact line numbers from code analysis, exact Spark config k
 
 
 # =============================================================================
+# HISTORY FUNCTIONS
+# =============================================================================
+
+def show_learning_history(job_name: str, limit: int = 10):
+    """Display learning/execution history for a job."""
+    print(f"\n{'='*70}")
+    print(f"  LEARNING HISTORY: {job_name}")
+    print(f"{'='*70}\n")
+
+    # Execution history
+    exec_file = Path(f'data/execution_history/{job_name}.jsonl')
+    if exec_file.exists():
+        with open(exec_file) as f:
+            records = [json.loads(l) for l in f if l.strip()][-limit:]
+        print(f"  EXECUTION HISTORY (last {len(records)} runs):")
+        print(f"  {'─'*60}")
+        for r in records:
+            ts = r.get('timestamp', 'N/A')[:19]
+            dur = r.get('duration_sec', 0)
+            cost = r.get('cost_usd', 0)
+            status = r.get('status', 'N/A')
+            workers = r.get('num_workers', 'N/A')
+            print(f"    {ts} | {status:10s} | {dur:>6.0f}s | ${cost:.4f} | {workers} workers")
+        print()
+    else:
+        print(f"  No execution history found at {exec_file}\n")
+
+    # Spark metrics history
+    metrics_file = Path(f'data/spark_metrics/{job_name}.jsonl')
+    if metrics_file.exists():
+        with open(metrics_file) as f:
+            records = [json.loads(l) for l in f if l.strip()][-limit:]
+        print(f"  SPARK METRICS HISTORY (last {len(records)} runs):")
+        print(f"  {'─'*60}")
+        for r in records:
+            ts = r.get('timestamp', 'N/A')[:19]
+            read_gb = r.get('data_read_gb', 'N/A')
+            shuffle_gb = r.get('shuffle_total_gb', 'N/A')
+            driver_heap = r.get('driver_heap_pct', 'N/A')
+            exec_heap = r.get('executor_heap_pct_avg', 'N/A')
+            skew = len(r.get('skew_flags', []))
+            print(f"    {ts} | Read:{read_gb}GB | Shuffle:{shuffle_gb}GB | "
+                  f"Driver:{driver_heap}% | Exec:{exec_heap}% | Skew flags:{skew}")
+        print()
+    else:
+        print(f"  No spark metrics history found at {metrics_file}\n")
+
+
+def show_recommendation_history(job_name: str, limit: int = 5):
+    """Display past recommendations for a job."""
+    print(f"\n{'='*70}")
+    print(f"  RECOMMENDATION HISTORY: {job_name}")
+    print(f"{'='*70}\n")
+
+    rec_file = Path(f'data/recommendation_history/{job_name}.jsonl')
+    if rec_file.exists():
+        with open(rec_file) as f:
+            records = [json.loads(l) for l in f if l.strip()][-limit:]
+        for i, r in enumerate(records, 1):
+            ts = r.get('timestamp', 'N/A')[:19]
+            print(f"  [{i}] {ts}")
+            print(f"  {'─'*60}")
+            rec_text = r.get('recommendations', '')
+            # Print first 30 lines
+            for line in rec_text.split('\n')[:30]:
+                print(f"    {line[:100]}")
+            if rec_text.count('\n') > 30:
+                print(f"    ... ({rec_text.count(chr(10)) - 30} more lines)")
+            print()
+    else:
+        print(f"  No recommendation history found at {rec_file}")
+        print(f"  Run an analysis first to generate recommendations.\n")
+
+
+def show_audit_history(job_name: str = None, limit: int = 20):
+    """Display audit log entries."""
+    print(f"\n{'='*70}")
+    print(f"  AUDIT LOG" + (f" (job: {job_name})" if job_name else " (all jobs)"))
+    print(f"{'='*70}\n")
+
+    audit_file = Path('data/audit_log.jsonl')
+    if audit_file.exists():
+        with open(audit_file) as f:
+            records = [json.loads(l) for l in f if l.strip()]
+        if job_name:
+            records = [r for r in records if r.get('job_name') == job_name]
+        records = records[-limit:]
+
+        print(f"  {'TIMESTAMP':<20} {'JOB NAME':<25} {'EVENT TYPE':<20}")
+        print(f"  {'─'*65}")
+        for r in records:
+            ts = r.get('timestamp', 'N/A')[:19]
+            job = r.get('job_name', 'N/A')[:24]
+            event = r.get('event_type', 'N/A')[:19]
+            print(f"  {ts:<20} {job:<25} {event:<20}")
+        print()
+    else:
+        print(f"  No audit log found at {audit_file}\n")
+
+
+def list_all_jobs():
+    """List all jobs with history."""
+    print(f"\n{'='*70}")
+    print(f"  JOBS WITH HISTORY")
+    print(f"{'='*70}\n")
+
+    jobs = set()
+    for dir_name in ['data/execution_history', 'data/spark_metrics', 'data/recommendation_history']:
+        dir_path = Path(dir_name)
+        if dir_path.exists():
+            for f in dir_path.glob('*.jsonl'):
+                jobs.add(f.stem)
+
+    if jobs:
+        print(f"  {'JOB NAME':<40} {'EXEC HISTORY':<15} {'SPARK METRICS':<15} {'RECOMMENDATIONS'}")
+        print(f"  {'─'*85}")
+        for job in sorted(jobs):
+            exec_count = sum(1 for _ in open(f'data/execution_history/{job}.jsonl')) if Path(f'data/execution_history/{job}.jsonl').exists() else 0
+            metrics_count = sum(1 for _ in open(f'data/spark_metrics/{job}.jsonl')) if Path(f'data/spark_metrics/{job}.jsonl').exists() else 0
+            rec_count = sum(1 for _ in open(f'data/recommendation_history/{job}.jsonl')) if Path(f'data/recommendation_history/{job}.jsonl').exists() else 0
+            print(f"  {job:<40} {exec_count:<15} {metrics_count:<15} {rec_count}")
+        print()
+    else:
+        print(f"  No jobs found with history.\n")
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -3170,21 +3405,69 @@ Examples:
   # Batch mode
   python scripts/strands_etl_agents.py --source demo_configs/ --dest reports/
 
+  # View history
+  python scripts/strands_etl_agents.py --learning-history my_job_name
+  python scripts/strands_etl_agents.py --recommendation-history my_job_name
+  python scripts/strands_etl_agents.py --audit-history my_job_name
+  python scripts/strands_etl_agents.py --list-jobs
+
+Config agent flags (set in JSON):
+  {
+    "agents": {
+      "sizing": true,
+      "code_analysis": true,
+      "data_quality": true,
+      "compliance": true,
+      "learning": true,
+      "resource_allocator": true,
+      "execution": true,
+      "dashboard": true,
+      "recommendation": true
+    }
+  }
+
 Environment:
   AWS_REGION=us-west-2 (default)
   AWS_PROFILE=your-profile
 """
     )
+    # Analysis mode
     parser.add_argument('--config', '-c', help='Single config JSON file')
     parser.add_argument('--source', '-s', help='Directory with config JSONs (batch mode)')
     parser.add_argument('--dest', '-d', default='./reports', help='Output directory')
     parser.add_argument('--model', '-m', help='Bedrock model ID')
     parser.add_argument('--execute', '-e', action='store_true', help='Actually execute the Glue job (not just analyze)')
 
+    # History mode
+    parser.add_argument('--learning-history', metavar='JOB_NAME', help='Show learning/execution history for a job')
+    parser.add_argument('--recommendation-history', metavar='JOB_NAME', help='Show past recommendations for a job')
+    parser.add_argument('--audit-history', metavar='JOB_NAME', nargs='?', const='__all__', help='Show audit log (optionally filter by job)')
+    parser.add_argument('--list-jobs', action='store_true', help='List all jobs with history')
+    parser.add_argument('--limit', type=int, default=10, help='Max records to show in history (default: 10)')
+
     args = parser.parse_args()
 
+    # History commands
+    if args.list_jobs:
+        list_all_jobs()
+        return
+
+    if args.learning_history:
+        show_learning_history(args.learning_history, args.limit)
+        return
+
+    if args.recommendation_history:
+        show_recommendation_history(args.recommendation_history, args.limit)
+        return
+
+    if args.audit_history:
+        job_filter = None if args.audit_history == '__all__' else args.audit_history
+        show_audit_history(job_filter, args.limit)
+        return
+
+    # Analysis mode - need config or source
     if not args.config and not args.source:
-        parser.error("Either --config or --source required")
+        parser.error("Either --config or --source required (or use --list-jobs / --learning-history / --recommendation-history)")
 
     if args.execute:
         print("\n  WARNING: --execute mode will START ACTUAL GLUE JOBS!")

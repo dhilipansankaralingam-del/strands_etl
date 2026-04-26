@@ -5,6 +5,23 @@
   "script_path": "./sample_scripts/sales_transform.py",
   "glue_job_name": "sales-analytics-daily",
 
+  "agents": {
+    "sizing": true,
+    "code_analysis": true,
+    "data_quality": true,
+    "compliance": true,
+    "learning": true,
+    "resource_allocator": true,
+    "execution": true,
+    "dashboard": true,
+    "recommendation": true
+  },
+
+  "audit": {
+    "dynamodb_table": "etl_audit_log",
+    "region": "us-west-2"
+  },
+
   "source_tables": [
     {
       "database": "sales_raw",
