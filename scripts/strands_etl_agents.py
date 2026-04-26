@@ -1802,6 +1802,507 @@ def get_glue_job_run_history(job_name: str, max_runs: int = 20) -> Dict[str, Any
 
 
 # =============================================================================
+# RESOURCE ALLOCATOR TOOLS
+# =============================================================================
+
+@tool
+def compute_resource_recommendation(
+    total_data_gb: float,
+    num_tables: int,
+    has_skew: bool,
+    has_complex_joins: bool,
+    code_issues: int,
+    historical_avg_duration_sec: float,
+    historical_avg_workers: int,
+    historical_success_rate: float,
+    day_of_week: str,
+    hour_of_day: int,
+    worker_type: str = 'G.1X'
+) -> Dict[str, Any]:
+    """Compute optimal resource allocation combining sizing, history, code analysis, and time patterns.
+
+    Args:
+        total_data_gb: Total input data in GB from Sizing Agent
+        num_tables: Number of source tables (join complexity)
+        has_skew: Whether data skew was detected
+        has_complex_joins: Whether code has broadcast-missing or cross-join patterns
+        code_issues: Number of anti-patterns found by Code Analysis Agent
+        historical_avg_duration_sec: Average duration from Learning Agent
+        historical_avg_workers: Average workers used historically
+        historical_success_rate: Historical success rate (0.0-1.0)
+        day_of_week: e.g. 'Monday', 'Saturday'
+        hour_of_day: 0-23
+        worker_type: Current worker type
+    Returns:
+        Dict with recommended workers, worker_type, spark configs, and reasoning
+    """
+    print(f"      [TOOL] compute_resource_recommendation: {total_data_gb}GB, dow={day_of_week}, hour={hour_of_day}")
+
+    worker_mem = {'G.1X': 16, 'G.2X': 32, 'G.4X': 64, 'G.8X': 128}.get(worker_type, 16)
+
+    # Base workers from data volume
+    base_workers = max(2, int(total_data_gb / 5))
+
+    # Skew multiplier
+    skew_mult = 1.4 if has_skew else 1.0
+
+    # Join complexity
+    join_mult = 1.0 + (num_tables - 1) * 0.1
+
+    # Code issue penalty (anti-patterns mean we need more headroom)
+    code_mult = 1.0 + min(code_issues * 0.05, 0.3)
+
+    # Historical learning weight
+    if historical_avg_workers > 0 and historical_avg_duration_sec > 0:
+        # If historically fast with fewer workers, trust history
+        hist_weight = 0.4
+        data_weight = 0.6
+        hist_workers = historical_avg_workers
+        computed = int(base_workers * skew_mult * join_mult * code_mult)
+        blended = int(computed * data_weight + hist_workers * hist_weight)
+    else:
+        blended = int(base_workers * skew_mult * join_mult * code_mult)
+
+    # Weekend/off-peak: reduce workers (less contention, can run leaner)
+    is_weekend = day_of_week in ('Saturday', 'Sunday')
+    is_off_peak = hour_of_day < 8 or hour_of_day > 20
+    if is_weekend or is_off_peak:
+        blended = max(2, int(blended * 0.85))
+        schedule_note = 'Off-peak/weekend: reduced workers by 15%'
+    else:
+        schedule_note = 'Business hours: standard allocation'
+
+    # Low success rate → add buffer
+    if historical_success_rate < 0.85:
+        blended = int(blended * 1.2)
+        schedule_note += ' | Low success rate: +20% buffer'
+
+    recommended_workers = max(2, min(blended, 50))
+
+    # Recommend worker type upgrade if data per worker is high
+    data_per_worker = total_data_gb / max(recommended_workers - 1, 1)
+    rec_worker_type = worker_type
+    upgrade_reason = None
+    if data_per_worker > worker_mem * 0.6:
+        upgrade_map = {'G.1X': 'G.2X', 'G.2X': 'G.4X', 'G.4X': 'G.8X', 'G.8X': 'G.8X'}
+        rec_worker_type = upgrade_map.get(worker_type, 'G.2X')
+        upgrade_reason = f"Data/executor ({data_per_worker:.1f}GB) > 60% of {worker_mem}GB RAM"
+
+    shuffle_partitions = max(200, recommended_workers * 4)
+    spark_configs = {
+        'spark.sql.adaptive.enabled': 'true',
+        'spark.sql.adaptive.skewJoin.enabled': 'true' if has_skew else 'false',
+        'spark.sql.shuffle.partitions': str(shuffle_partitions),
+        'spark.sql.autoBroadcastJoinThreshold': '256MB' if total_data_gb < 100 else '64MB',
+        'spark.memory.fraction': '0.8',
+        'spark.executor.memory': f"{int({'G.1X':16,'G.2X':32,'G.4X':64,'G.8X':128}.get(rec_worker_type,16)*0.75)}g",
+    }
+
+    reasoning = [
+        f"Base workers from data volume ({total_data_gb:.1f}GB / 5GB per worker): {base_workers}",
+        f"Skew multiplier: {skew_mult}x" if has_skew else "No skew detected",
+        f"Join complexity ({num_tables} tables): {join_mult:.2f}x",
+        f"Code issues ({code_issues} anti-patterns): {code_mult:.2f}x",
+        f"Historical blend (avg {historical_avg_workers} workers): applied" if historical_avg_workers else "No history",
+        schedule_note,
+    ]
+    if upgrade_reason:
+        reasoning.append(f"Worker type upgrade {worker_type}→{rec_worker_type}: {upgrade_reason}")
+
+    print(f"      [TOOL] Recommended: {recommended_workers}x {rec_worker_type}, shuffle_partitions={shuffle_partitions}")
+
+    return {
+        'recommended_workers': recommended_workers,
+        'recommended_worker_type': rec_worker_type,
+        'current_worker_type': worker_type,
+        'upgrade_needed': rec_worker_type != worker_type,
+        'spark_configs': spark_configs,
+        'data_per_worker_gb': round(data_per_worker, 2),
+        'schedule_context': {'day_of_week': day_of_week, 'hour_of_day': hour_of_day, 'is_weekend': is_weekend, 'is_off_peak': is_off_peak},
+        'reasoning': reasoning,
+        'estimated_duration_min': round(historical_avg_duration_sec / 60 * (historical_avg_workers / max(recommended_workers, 1)), 1) if historical_avg_duration_sec else None,
+        'estimated_cost_usd': round(recommended_workers * {'G.1X': 0.44, 'G.2X': 0.88, 'G.4X': 1.76}.get(rec_worker_type, 0.44) * (historical_avg_duration_sec / 3600 if historical_avg_duration_sec else 0.5), 2),
+    }
+
+
+@tool
+def get_weekday_volume_pattern(job_name: str) -> Dict[str, Any]:
+    """Analyze historical execution history to find weekday vs weekend volume and duration patterns.
+
+    Args:
+        job_name: Glue job name
+
+    Returns:
+        Dict with per-weekday avg duration, cost, and volume trends
+    """
+    print(f"      [TOOL] get_weekday_volume_pattern: {job_name}")
+
+    history_file = Path(f'data/execution_history/{job_name}.jsonl')
+    if not history_file.exists():
+        # Fall back to Glue runs
+        if HAS_AWS:
+            try:
+                glue = boto3.client('glue', region_name='us-west-2')
+                runs = glue.get_job_runs(JobName=job_name, MaxResults=50).get('JobRuns', [])
+            except Exception:
+                runs = []
+        else:
+            runs = []
+        records = [{'timestamp': r.get('StartedOn').isoformat() if r.get('StartedOn') else None,
+                    'duration_sec': r.get('ExecutionTime', 0),
+                    'status': r.get('JobRunState')} for r in runs]
+    else:
+        with open(history_file) as f:
+            records = [json.loads(l) for l in f if l.strip()]
+
+    from collections import defaultdict
+    day_stats: Dict[str, list] = defaultdict(list)
+    for rec in records:
+        ts = rec.get('timestamp') or rec.get('started')
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                day_name = dt.strftime('%A')
+                day_stats[day_name].append(rec.get('duration_sec', 0))
+            except Exception:
+                pass
+
+    pattern = {}
+    for day, durations in day_stats.items():
+        pattern[day] = {
+            'avg_duration_sec': round(sum(durations) / len(durations), 1),
+            'run_count': len(durations),
+            'max_duration_sec': max(durations),
+        }
+
+    weekday_avg = sum(v['avg_duration_sec'] for k, v in pattern.items() if k not in ('Saturday', 'Sunday')) / max(1, sum(1 for k in pattern if k not in ('Saturday', 'Sunday')))
+    weekend_avg = sum(v['avg_duration_sec'] for k, v in pattern.items() if k in ('Saturday', 'Sunday')) / max(1, sum(1 for k in pattern if k in ('Saturday', 'Sunday')))
+
+    print(f"      [TOOL] Weekday avg={weekday_avg:.0f}s, Weekend avg={weekend_avg:.0f}s")
+
+    return {
+        'job_name': job_name,
+        'per_day_stats': pattern,
+        'weekday_avg_duration_sec': round(weekday_avg, 1),
+        'weekend_avg_duration_sec': round(weekend_avg, 1),
+        'weekend_is_lighter': weekend_avg < weekday_avg * 0.9,
+        'peak_day': max(pattern, key=lambda d: pattern[d]['avg_duration_sec']) if pattern else None,
+        'lightest_day': min(pattern, key=lambda d: pattern[d]['avg_duration_sec']) if pattern else None,
+    }
+
+
+# =============================================================================
+# EXECUTION METRICS + AUDIT TOOLS
+# =============================================================================
+
+@tool
+def collect_post_execution_metrics(job_name: str, run_id: str) -> Dict[str, Any]:
+    """Collect comprehensive post-execution Spark metrics from CloudWatch for Learning Agent.
+
+    Covers: data skew, shuffle, driver/executor memory, idle executors,
+    data movement between nodes, stage-level memory hotspots.
+
+    Args:
+        job_name: Glue job name
+        run_id: Completed run ID
+
+    Returns:
+        Dict with full Spark metric breakdown ready for Learning Agent ingestion
+    """
+    print(f"      [TOOL] collect_post_execution_metrics: {job_name}/{run_id}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        cw   = boto3.client('cloudwatch', region_name='us-west-2')
+
+        run = glue.get_job_run(JobName=job_name, RunId=run_id)['JobRun']
+        started   = run.get('StartedOn')
+        completed = run.get('CompletedOn')
+        if not started or not completed:
+            return {'error': 'Run not completed yet', 'run_id': run_id}
+
+        worker_type = run.get('WorkerType', 'G.1X')
+        num_workers = run.get('NumberOfWorkers', 10)
+        duration    = run.get('ExecutionTime', 0)
+        dpu_sec     = run.get('DPUSeconds', 0)
+
+        def _cw_stat(metric, stat='Maximum'):
+            try:
+                r = cw.get_metric_statistics(
+                    Namespace='Glue',
+                    MetricName=metric,
+                    Dimensions=[
+                        {'Name': 'JobName',   'Value': job_name},
+                        {'Name': 'JobRunId',  'Value': run_id},
+                        {'Name': 'Type',      'Value': 'gauge'},
+                    ],
+                    StartTime=started, EndTime=completed,
+                    Period=int(duration) or 3600,
+                    Statistics=[stat],
+                )
+                pts = r.get('Datapoints', [])
+                return pts[0].get(stat) if pts else None
+            except Exception:
+                return None
+
+        # Raw metrics
+        bytes_read          = _cw_stat('glue.driver.aggregate.bytesRead')
+        bytes_written       = _cw_stat('glue.driver.aggregate.bytesWritten')
+        records_read        = _cw_stat('glue.driver.aggregate.recordsRead')
+        shuffle_local       = _cw_stat('glue.driver.aggregate.shuffleLocalBytesRead')
+        shuffle_remote      = _cw_stat('glue.driver.aggregate.shuffleRemoteBytesRead')
+        driver_heap_used    = _cw_stat('glue.driver.jvm.heap.used')
+        driver_heap_usage   = _cw_stat('glue.driver.jvm.heap.usage')
+        exec_heap_usage     = _cw_stat('glue.ALL.jvm.heap.usage', 'Average')
+        exec_heap_used      = _cw_stat('glue.ALL.jvm.heap.used', 'Average')
+        num_exec_alloc      = _cw_stat('glue.driver.ExecutorAllocationManager.executors.numberAllExecutors')
+        num_exec_needed     = _cw_stat('glue.driver.ExecutorAllocationManager.executors.numberMaxNeededExecutors')
+        tasks_failed        = _cw_stat('glue.driver.aggregate.numFailedTasks')
+        tasks_completed     = _cw_stat('glue.driver.aggregate.numCompletedTasks')
+        gc_time             = _cw_stat('glue.driver.aggregate.elapsedTime')  # proxy for GC
+
+        # Derived
+        shuffle_total   = (shuffle_local or 0) + (shuffle_remote or 0)
+        shuffle_ratio   = round(shuffle_total / bytes_read, 2) if bytes_read else None
+        read_gb         = round(bytes_read / 1024**3, 3)    if bytes_read    else None
+        written_gb      = round(bytes_written / 1024**3, 3) if bytes_written else None
+        shuffle_gb      = round(shuffle_total / 1024**3, 3) if shuffle_total else None
+        driver_heap_gb  = round(driver_heap_used / 1024**3, 2) if driver_heap_used else None
+        exec_heap_pct   = round(exec_heap_usage * 100, 1)   if exec_heap_usage  else None
+        driver_heap_pct = round(driver_heap_usage * 100, 1) if driver_heap_usage else None
+        idle_executors  = round((num_exec_alloc or 0) - (num_exec_needed or 0), 1)
+
+        # Stage memory hotspot proxy: tasks_failed / tasks_completed ratio
+        task_failure_pct = round(tasks_failed / max(tasks_completed or 1, 1) * 100, 2) if tasks_failed else 0.0
+
+        # Skew detection
+        skew_flags = []
+        if shuffle_ratio and shuffle_ratio > 5:
+            skew_flags.append(f"HIGH SHUFFLE RATIO {shuffle_ratio}x - data skew likely")
+        if driver_heap_pct and driver_heap_pct > 85:
+            skew_flags.append(f"DRIVER HEAP {driver_heap_pct}% - check collect()/broadcast OOM")
+        if exec_heap_pct and exec_heap_pct > 80:
+            skew_flags.append(f"EXECUTOR HEAP AVG {exec_heap_pct}% - memory pressure, upgrade worker type")
+        if idle_executors > num_workers * 0.3:
+            skew_flags.append(f"{idle_executors:.0f} idle executors (>{num_workers*0.3:.0f}) - over-provisioned")
+        if task_failure_pct > 5:
+            skew_flags.append(f"Task failure rate {task_failure_pct}% - check OOM / skew in stages")
+
+        cost = round(dpu_sec / 3600 * {'G.1X': 0.44, 'G.2X': 0.88, 'G.4X': 1.76, 'G.8X': 3.52}.get(worker_type, 0.44), 4)
+
+        result = {
+            'job_name':             job_name,
+            'run_id':               run_id,
+            'status':               run.get('JobRunState'),
+            'worker_type':          worker_type,
+            'num_workers':          num_workers,
+            'duration_sec':         duration,
+            'cost_usd':             cost,
+            # Data volumes
+            'data_read_gb':         read_gb,
+            'data_written_gb':      written_gb,
+            'records_read':         int(records_read) if records_read else None,
+            # Shuffle / data movement between nodes
+            'shuffle_local_gb':     round(shuffle_local / 1024**3, 3) if shuffle_local else None,
+            'shuffle_remote_gb':    round(shuffle_remote / 1024**3, 3) if shuffle_remote else None,
+            'shuffle_total_gb':     shuffle_gb,
+            'shuffle_to_read_ratio':shuffle_ratio,
+            # Memory
+            'driver_heap_pct':      driver_heap_pct,
+            'driver_heap_used_gb':  driver_heap_gb,
+            'executor_heap_pct_avg':exec_heap_pct,
+            # Executor utilization
+            'executors_allocated':  int(num_exec_alloc) if num_exec_alloc else None,
+            'executors_max_needed': int(num_exec_needed) if num_exec_needed else None,
+            'idle_executors':       max(0, idle_executors),
+            # Task health
+            'tasks_completed':      int(tasks_completed) if tasks_completed else None,
+            'tasks_failed':         int(tasks_failed) if tasks_failed else None,
+            'task_failure_pct':     task_failure_pct,
+            # Analysis
+            'skew_flags':           skew_flags,
+            'health_status':        'CONCERNING' if skew_flags else 'HEALTHY',
+            'collected_at':         datetime.utcnow().isoformat(),
+        }
+
+        print(f"      [TOOL] Metrics collected: read={read_gb}GB, shuffle={shuffle_gb}GB, "
+              f"driver_heap={driver_heap_pct}%, exec_heap={exec_heap_pct}%, idle={idle_executors}, skew_flags={len(skew_flags)}")
+        return result
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e), 'job_name': job_name, 'run_id': run_id}
+
+
+@tool
+def write_audit_record(job_name: str, run_id: str, event_type: str,
+                        details: Dict, table_name: str = 'etl_audit_log',
+                        region: str = 'us-west-2') -> Dict[str, Any]:
+    """Write an audit record to DynamoDB for compliance and operational tracking.
+
+    Args:
+        job_name: ETL job name
+        run_id: Execution run ID
+        event_type: e.g. 'JOB_START', 'JOB_COMPLETE', 'RESOURCE_ALLOCATED', 'COMPLIANCE_SCAN', 'DQ_CHECK'
+        details: Dict of event-specific details to store
+        table_name: DynamoDB table name (default: etl_audit_log)
+        region: AWS region
+
+    Returns:
+        Confirmation dict
+    """
+    print(f"      [TOOL] write_audit_record: {table_name} | {job_name} | {event_type}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        import uuid
+        dynamodb = boto3.resource('dynamodb', region_name=region)
+        table    = dynamodb.Table(table_name)
+
+        record = {
+            'audit_id':   str(uuid.uuid4()),
+            'job_name':   job_name,
+            'run_id':     run_id,
+            'event_type': event_type,
+            'timestamp':  datetime.utcnow().isoformat(),
+            'details':    json.dumps(details, default=str),
+            'ttl':        int(time.time()) + 90 * 86400,  # 90-day TTL
+        }
+
+        table.put_item(Item=record)
+        print(f"      [TOOL] Written audit_id={record['audit_id']}")
+        return {'success': True, 'audit_id': record['audit_id'], 'table': table_name}
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR writing audit: {e}")
+        # Fallback: write to local JSONL
+        local_path = Path('data/audit_log.jsonl')
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, 'a') as f:
+            f.write(json.dumps({
+                'job_name': job_name, 'run_id': run_id,
+                'event_type': event_type, 'timestamp': datetime.utcnow().isoformat(),
+                'details': details,
+            }, default=str) + '\n')
+        return {'success': True, 'fallback': 'local', 'path': str(local_path), 'error': str(e)}
+
+
+@tool
+def store_metrics_for_learning(job_name: str, run_metrics: Dict) -> Dict[str, Any]:
+    """Persist post-execution Spark metrics to the learning store for future Resource Allocator use.
+
+    Args:
+        job_name: ETL job name
+        run_metrics: Full metrics dict from collect_post_execution_metrics
+
+    Returns:
+        Confirmation dict
+    """
+    print(f"      [TOOL] store_metrics_for_learning: {job_name}")
+
+    history_dir  = Path('data/execution_history')
+    metrics_dir  = Path('data/spark_metrics')
+    history_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    record = {'timestamp': datetime.utcnow().isoformat(), 'job_name': job_name, **run_metrics}
+
+    # Append to execution history (used by learning agent)
+    with open(history_dir / f"{job_name}.jsonl", 'a') as f:
+        f.write(json.dumps(record, default=str) + '\n')
+
+    # Separate detailed spark metrics store
+    with open(metrics_dir / f"{job_name}.jsonl", 'a') as f:
+        f.write(json.dumps(record, default=str) + '\n')
+
+    print(f"      [TOOL] Stored to execution_history and spark_metrics")
+    return {'stored': True, 'job_name': job_name, 'files': [str(history_dir / f"{job_name}.jsonl"), str(metrics_dir / f"{job_name}.jsonl")]}
+
+
+# =============================================================================
+# DASHBOARD TOOLS
+# =============================================================================
+
+@tool
+def generate_cloudwatch_dashboard(job_name: str, region: str = 'us-west-2') -> Dict[str, Any]:
+    """Create or update a CloudWatch dashboard for an ETL job with Spark metrics widgets.
+
+    Args:
+        job_name: Glue job name (used as dashboard name)
+        region: AWS region
+
+    Returns:
+        Dict with dashboard URL and widget summary
+    """
+    print(f"      [TOOL] generate_cloudwatch_dashboard: {job_name}")
+
+    dashboard_name = f"ETL-{job_name.replace('_', '-').replace(' ', '-')}"
+
+    def _metric(name, label, stat='Maximum', color='#1f77b4'):
+        return {
+            'type': 'metric',
+            'properties': {
+                'metrics': [['Glue', name, 'JobName', job_name, 'Type', 'gauge']],
+                'view': 'timeSeries', 'stat': stat, 'period': 300,
+                'title': label, 'region': region,
+                'annotations': {'horizontal': []},
+            },
+        }
+
+    widgets = [
+        # Row 1: Data Volume
+        {**_metric('glue.driver.aggregate.bytesRead',    'Data Read (bytes)'),    'x': 0,  'y': 0,  'width': 8, 'height': 6},
+        {**_metric('glue.driver.aggregate.bytesWritten', 'Data Written (bytes)'), 'x': 8,  'y': 0,  'width': 8, 'height': 6},
+        {**_metric('glue.driver.aggregate.recordsRead',  'Records Read'),         'x': 16, 'y': 0,  'width': 8, 'height': 6},
+        # Row 2: Shuffle / Data Movement
+        {**_metric('glue.driver.aggregate.shuffleLocalBytesRead',  'Shuffle Local (bytes)'),  'x': 0,  'y': 6,  'width': 8, 'height': 6},
+        {**_metric('glue.driver.aggregate.shuffleRemoteBytesRead', 'Shuffle Remote (bytes) = Data Movement', 'Maximum', '#d62728'), 'x': 8, 'y': 6, 'width': 8, 'height': 6},
+        # Row 3: Memory
+        {**_metric('glue.driver.jvm.heap.usage',  'Driver Heap Usage %',    'Maximum', '#ff7f0e'), 'x': 0,  'y': 12, 'width': 8, 'height': 6},
+        {**_metric('glue.ALL.jvm.heap.usage',     'Executor Heap Usage % (avg)', 'Average', '#2ca02c'), 'x': 8, 'y': 12, 'width': 8, 'height': 6},
+        {**_metric('glue.driver.jvm.heap.used',   'Driver Heap Used (bytes)', 'Maximum', '#9467bd'), 'x': 16, 'y': 12, 'width': 8, 'height': 6},
+        # Row 4: Executor Utilization
+        {**_metric('glue.driver.ExecutorAllocationManager.executors.numberAllExecutors',       'Executors Allocated'), 'x': 0,  'y': 18, 'width': 8, 'height': 6},
+        {**_metric('glue.driver.ExecutorAllocationManager.executors.numberMaxNeededExecutors', 'Executors Needed'),    'x': 8,  'y': 18, 'width': 8, 'height': 6},
+        # Row 5: Tasks
+        {**_metric('glue.driver.aggregate.numCompletedTasks', 'Tasks Completed'), 'x': 0,  'y': 24, 'width': 8, 'height': 6},
+        {**_metric('glue.driver.aggregate.numFailedTasks',    'Tasks Failed', 'Maximum', '#d62728'), 'x': 8, 'y': 24, 'width': 8, 'height': 6},
+    ]
+
+    # Embed x/y into each widget properties
+    for i, w in enumerate(widgets):
+        w.setdefault('x', (i % 3) * 8)
+        w.setdefault('y', (i // 3) * 6)
+        w.setdefault('width', 8)
+        w.setdefault('height', 6)
+
+    dashboard_body = json.dumps({'widgets': widgets})
+    dashboard_url  = f"https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}#dashboards:name={dashboard_name}"
+
+    if HAS_AWS:
+        try:
+            cw = boto3.client('cloudwatch', region_name=region)
+            cw.put_dashboard(DashboardName=dashboard_name, DashboardBody=dashboard_body)
+            print(f"      [TOOL] Dashboard created/updated: {dashboard_name}")
+            return {'created': True, 'dashboard_name': dashboard_name, 'url': dashboard_url, 'widgets': len(widgets)}
+        except Exception as e:
+            print(f"      [TOOL] ERROR: {e}")
+            return {'created': False, 'error': str(e), 'dashboard_name': dashboard_name, 'body': dashboard_body}
+
+    # No AWS: return body for manual creation
+    local = Path(f'reports/{dashboard_name}.json')
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text(dashboard_body)
+    print(f"      [TOOL] Saved dashboard JSON to {local}")
+    return {'created': False, 'local_file': str(local), 'dashboard_name': dashboard_name, 'url': dashboard_url}
+
+
+# =============================================================================
 # AGENT DEFINITIONS
 # =============================================================================
 
@@ -1940,18 +2441,116 @@ Report:
 - Overall data quality score"""
 
 
-EXECUTION_PROMPT = """You are the Execution Agent. You manage ETL job execution and track metrics.
+RESOURCE_ALLOCATOR_PROMPT = """You are the Resource Allocator Agent. Your job is to determine the optimal compute resources for a Glue ETL job based on ALL available signals.
 
-Your responsibilities:
-1. Start Glue jobs (use dry_run=True for analysis mode, False for real execution)
-2. Monitor job status using get_job_run_status
-3. Store execution results for learning using store_execution_history
-4. Track costs, duration, and success/failure
+## Input Signals (use ALL of them)
 
-When executing:
-- Always confirm job parameters before starting
-- Store results after completion for future learning
-- Report any errors clearly with recommendations"""
+### 1. Sizing Agent Output  → total data GB, file counts, S3 locations
+### 2. Code Analysis Output → anti-pattern count, join complexity, UDF usage
+### 3. Learning Agent Output → historical avg duration, avg workers, success rate
+### 4. Compliance Output    → encryption requirements (encrypted jobs may need more overhead)
+### 5. Time Context         → use get_weekday_volume_pattern + datetime.now()
+
+## Your Steps
+
+**Step 1:** Call get_weekday_volume_pattern to understand if today is a high/low volume day.
+
+**Step 2:** Call compute_resource_recommendation with:
+- total_data_gb from Sizing Agent (estimate from text if not exact)
+- num_tables = count of source_tables in config
+- has_skew = True if Learning/Sizing detected skew
+- has_complex_joins = True if Code Analysis found missing broadcasts or cross-joins
+- code_issues = count of anti-patterns from Code Analysis
+- historical_avg_duration_sec, historical_avg_workers, historical_success_rate from Learning
+- day_of_week and hour_of_day from current time
+- worker_type from current config
+
+**Step 3:** Write audit record using write_audit_record with event_type='RESOURCE_ALLOCATED'.
+
+**Step 4:** Output a structured RESOURCE ALLOCATION DECISION:
+
+```
+RESOURCE ALLOCATION DECISION
+==============================
+Recommended Workers:    X  (current: Y)
+Recommended Type:       G.NX  (current: G.MX)
+Estimated Duration:     ~Z min
+Estimated Cost:         $W
+
+SPARK CONFIGS TO APPLY:
+  spark.sql.adaptive.enabled = true
+  spark.sql.shuffle.partitions = N
+  ...
+
+REASONING:
+  1. Data volume: X GB → base N workers
+  2. Skew detected → +40%
+  3. Weekend/off-peak → -15%
+  4. Historical: avg Y workers, Z min → blended
+  5. Code issues (N anti-patterns) → +10% buffer
+
+PASS TO EXECUTION AGENT:
+  workers=X, worker_type=G.NX, spark_configs={...}
+```"""
+
+
+EXECUTION_PROMPT = """You are the Execution Agent. You receive a resource allocation decision from the Resource Allocator Agent and execute the Glue job with those exact parameters.
+
+## Your Steps
+
+### Phase 1: PRE-EXECUTION
+1. Write audit record: write_audit_record(event_type='JOB_START', details={workers, worker_type, spark_configs, reason})
+2. Start Glue job: start_glue_job(job_name, workers=allocated_workers, worker_type=allocated_type, dry_run=False/True)
+
+### Phase 2: MONITORING (if executing)
+3. Poll get_job_run_status every 30s until SUCCEEDED/FAILED
+4. Log interim status to audit: write_audit_record(event_type='JOB_PROGRESS', details={status, elapsed_sec})
+
+### Phase 3: POST-EXECUTION METRICS (CRITICAL)
+After job completes, collect ALL Spark metrics for the Learning Agent:
+5. Call collect_post_execution_metrics(job_name, run_id) — gets:
+   - Data read/written GB, records processed
+   - Shuffle local + remote GB (= data movement between nodes)
+   - Driver heap % and GB used
+   - Executor heap % avg
+   - Executors allocated vs needed (idle detection)
+   - Task failure rate
+   - Skew flags (shuffle ratio, OOM indicators)
+
+### Phase 4: PERSIST FOR LEARNING
+6. Call store_metrics_for_learning(job_name, metrics) to persist ALL metrics
+7. Write completion audit: write_audit_record(event_type='JOB_COMPLETE', details=metrics)
+8. Generate CloudWatch dashboard: generate_cloudwatch_dashboard(job_name)
+
+### Phase 5: REPORT
+Output a full execution summary:
+```
+EXECUTION SUMMARY
+==================
+Status:          SUCCEEDED / FAILED
+Duration:        Xm Ys
+Cost:            $Z
+
+DATA PROCESSED:
+  Read:          X GB | Y records
+  Written:       Z GB
+  Shuffle Local: A GB  (within node)
+  Shuffle Remote:B GB  (between nodes = network cost)
+
+MEMORY:
+  Driver Heap:   X% (Y GB)
+  Executor Heap: Z% avg
+
+EXECUTOR UTILIZATION:
+  Allocated: N | Needed: M | Idle: K (K/N = X%)
+
+SKEW / HEALTH FLAGS:
+  [list any flags]
+
+→ Metrics stored for Learning Agent ✓
+→ Audit record written ✓
+→ Dashboard updated ✓
+```"""
 
 
 RECOMMENDATION_PROMPT = """You are the Advanced Recommendation Agent. Perform deep multi-dimensional analysis and synthesize all findings into comprehensive, actionable recommendations.
@@ -2054,43 +2653,68 @@ class StrandsETLOrchestrator:
         print(f"{'='*70}")
 
     def analyze(self, config: Dict, execute: bool = False) -> Dict[str, Any]:
-        """Run all agents on a config.
+        """Run full 9-agent pipeline on a config.
+
+        Pipeline order:
+          1. Sizing         → data volumes
+          2. Code Analysis  → anti-patterns
+          3. Data Quality   → DQ rule validation
+          4. Compliance     → PII/GDPR/HIPAA/encryption
+          5. Learning       → historical patterns + Spark metrics
+          6. Resource Alloc → compute resources based on all above
+          7. Execution      → runs job + collects post-execution metrics
+          8. Learning Feed  → re-run learning to ingest new metrics
+          9. Recommendation → final prioritized recommendations
 
         Args:
-            config: Job configuration
-            execute: If True, run ExecutionAgent to actually start the job
+            config: Job configuration dict
+            execute: If True, actually start the Glue job (requires confirmation)
         """
         job_name = config.get('job_name', 'unknown')
         print(f"\n  Job: {job_name}")
         print(f"  Mode: {'EXECUTE' if execute else 'ANALYZE ONLY'}")
+        print(f"  Code Analysis: {'ON' if config.get('enable_code_analysis', True) else 'OFF'}")
+        print(f"  Audit Table: {config.get('audit', {}).get('dynamodb_table', 'etl_audit_log')}")
         print(f"  {'─'*60}")
 
         # 1. Sizing Agent
-        print(f"\n  [1/7] SIZING AGENT")
+        print(f"\n  [1/9] SIZING AGENT")
         self.results['sizing'] = self._run_sizing_agent(config)
 
-        # 2. Code Analysis Agent
-        print(f"\n  [2/7] CODE ANALYSIS AGENT")
-        self.results['code_analysis'] = self._run_code_agent(config)
+        # 2. Code Analysis Agent (can be disabled in config)
+        if config.get('enable_code_analysis', True) and config.get('script_path'):
+            print(f"\n  [2/9] CODE ANALYSIS AGENT")
+            self.results['code_analysis'] = self._run_code_agent(config)
+        else:
+            print(f"\n  [2/9] CODE ANALYSIS AGENT  [SKIPPED - disabled or no script_path]")
+            self.results['code_analysis'] = {'analysis': 'Skipped (set enable_code_analysis:true and script_path in config)'}
 
         # 3. Data Quality Agent
-        print(f"\n  [3/7] DATA QUALITY AGENT")
+        print(f"\n  [3/9] DATA QUALITY AGENT")
         self.results['data_quality'] = self._run_data_quality_agent(config)
 
-        # 4. Compliance Agent
-        print(f"\n  [4/7] COMPLIANCE AGENT")
+        # 4. Compliance Agent (PII/GDPR/HIPAA)
+        print(f"\n  [4/9] COMPLIANCE AGENT")
         self.results['compliance'] = self._run_compliance_agent(config)
 
-        # 5. Learning Agent (loads historical data)
-        print(f"\n  [5/7] LEARNING AGENT")
+        # 5. Learning Agent (historical patterns)
+        print(f"\n  [5/9] LEARNING AGENT")
         self.results['learning'] = self._run_learning_agent(config)
 
-        # 6. Execution Agent (optionally runs the job)
-        print(f"\n  [6/7] EXECUTION AGENT")
+        # 6. Resource Allocator Agent (synthesises 1-5 into resource decision)
+        print(f"\n  [6/9] RESOURCE ALLOCATOR AGENT")
+        self.results['resource_allocation'] = self._run_resource_allocator_agent(config)
+
+        # 7. Execution Agent (uses resource allocation, runs job, collects metrics)
+        print(f"\n  [7/9] EXECUTION AGENT")
         self.results['execution'] = self._run_execution_agent(config, execute)
 
-        # 7. Recommendation Agent
-        print(f"\n  [7/7] RECOMMENDATION AGENT")
+        # 8. Dashboard
+        print(f"\n  [8/9] GENERATING CLOUDWATCH DASHBOARD")
+        self.results['dashboard'] = self._generate_dashboard(config)
+
+        # 9. Recommendation Agent
+        print(f"\n  [9/9] RECOMMENDATION AGENT")
         self.results['recommendations'] = self._run_recommendation_agent(config)
 
         return {
@@ -2288,41 +2912,108 @@ After calling all three tools, produce a complete LEARNING REPORT covering:
         result = self._run_agent('learning', LEARNING_PROMPT, prompt, tools)
         return {'glue_job': glue_job, 'analysis': result}
 
-    def _run_execution_agent(self, config: Dict, execute: bool = False) -> Dict:
-        glue_job = config.get('glue_job_name', config.get('job_name', ''))
-        current = config.get('current_config', {})
-        workers = current.get('NumberOfWorkers', current.get('workers', 10))
+    def _run_resource_allocator_agent(self, config: Dict) -> Dict:
+        glue_job    = config.get('glue_job_name', config.get('job_name', ''))
+        current     = config.get('current_config', {})
+        workers     = current.get('NumberOfWorkers', current.get('workers', 10))
         worker_type = current.get('WorkerType', 'G.1X')
+        audit_table = config.get('audit', {}).get('dynamodb_table', 'etl_audit_log')
 
-        if execute:
-            prompt = f"""Execute the Glue job: {glue_job}
+        sizing_text   = self.results.get('sizing', {}).get('analysis', 'N/A')
+        code_text     = self.results.get('code_analysis', {}).get('analysis', 'N/A')
+        learning_text = self.results.get('learning', {}).get('analysis', 'N/A')
+        tables        = config.get('source_tables', [])
 
-Configuration:
-- Workers: {workers}
-- Worker Type: {worker_type}
+        now = datetime.utcnow()
+        prompt = f"""Determine optimal resource allocation for Glue job '{glue_job}'.
 
-Steps:
-1. Start the job using start_glue_job with dry_run=False
-2. Monitor status using get_job_run_status (poll every 30 seconds)
-3. Once complete, store results using store_execution_history
-4. Report final status, duration, cost, and any errors"""
-        else:
-            prompt = f"""Simulate execution for job: {glue_job}
+## CURRENT CONFIG
+  Workers:     {workers} x {worker_type}
+  Tables:      {len(tables)} source tables
+  Audit Table: {audit_table}
 
-Configuration:
-- Workers: {workers}
-- Worker Type: {worker_type}
+## SIZING AGENT OUTPUT
+{sizing_text[:500]}
 
-Use start_glue_job with dry_run=True to estimate:
-- Expected duration based on data size
-- Expected cost
-- Resource utilization
+## CODE ANALYSIS OUTPUT
+{code_text[:500]}
 
-Store the simulation results for future reference."""
+## LEARNING AGENT OUTPUT
+{learning_text[:500]}
 
-        result = self._run_agent('execution', EXECUTION_PROMPT, prompt,
-                                  [start_glue_job, get_job_run_status, store_execution_history])
+## CURRENT TIME CONTEXT
+  UTC Time:    {now.strftime('%Y-%m-%d %H:%M')}
+  Day:         {now.strftime('%A')}
+  Hour:        {now.hour}
+
+## STEPS
+1. Call get_weekday_volume_pattern(job_name='{glue_job}') to get day-of-week patterns
+2. Extract from the agent outputs above:
+   - total_data_gb (estimate 10.0 if unknown)
+   - code_issues count (count 'ANTI-PATTERN' or 'LINE' mentions, default 0)
+   - historical_avg_duration_sec, historical_avg_workers, historical_success_rate (default 0 if no history)
+   - has_skew (True if skew mentioned in learning output)
+3. Call compute_resource_recommendation with all extracted values, day_of_week='{now.strftime('%A')}', hour_of_day={now.hour}
+4. Call write_audit_record(job_name='{glue_job}', run_id='allocation-{now.strftime('%Y%m%d%H%M%S')}', event_type='RESOURCE_ALLOCATED', details=recommendation, table_name='{audit_table}')
+5. Output the RESOURCE ALLOCATION DECISION block"""
+
+        tools = [compute_resource_recommendation, get_weekday_volume_pattern, write_audit_record]
+        result = self._run_agent('resource_allocator', RESOURCE_ALLOCATOR_PROMPT, prompt, tools)
+        return {'glue_job': glue_job, 'analysis': result}
+
+    def _run_execution_agent(self, config: Dict, execute: bool = False) -> Dict:
+        glue_job    = config.get('glue_job_name', config.get('job_name', ''))
+        current     = config.get('current_config', {})
+        workers     = current.get('NumberOfWorkers', current.get('workers', 10))
+        worker_type = current.get('WorkerType', 'G.1X')
+        audit_table = config.get('audit', {}).get('dynamodb_table', 'etl_audit_log')
+
+        # Pull resource allocation decision if available
+        alloc_text = self.results.get('resource_allocation', {}).get('analysis', '')
+        alloc_note = f"\n## RESOURCE ALLOCATION DECISION\n{alloc_text[:600]}\nUse the workers/worker_type from the above decision if available.\n" if alloc_text else ''
+
+        mode = 'EXECUTE' if execute else 'DRY_RUN'
+        prompt = f"""{'Execute' if execute else 'Simulate execution of'} Glue job '{glue_job}'.
+{alloc_note}
+## PARAMETERS
+  Workers:     {workers} x {worker_type}
+  Audit Table: {audit_table}
+  Mode:        {mode}
+
+## STEPS
+
+**Phase 1 - Start:**
+1. Write audit: write_audit_record(job_name='{glue_job}', run_id='pre-run', event_type='JOB_START', details={{'workers':{workers},'worker_type':'{worker_type}'}}, table_name='{audit_table}')
+2. Start job:   start_glue_job(job_name='{glue_job}', workers={workers}, worker_type='{worker_type}', dry_run={'False' if execute else 'True'})
+
+**Phase 2 - Monitor (if executing):**
+3. If not dry_run, poll get_job_run_status every 30s until terminal state
+
+**Phase 3 - Post-execution metrics (CRITICAL):**
+4. Call collect_post_execution_metrics(job_name='{glue_job}', run_id=<run_id from step 2>)
+   This collects: data read/written, shuffle (= data movement between nodes), driver heap %,
+   executor heap %, idle executors, task failure rate, skew flags.
+
+**Phase 4 - Persist:**
+5. store_metrics_for_learning(job_name='{glue_job}', run_metrics=<metrics from step 4>)
+6. write_audit_record(event_type='JOB_COMPLETE', details=<metrics>, table_name='{audit_table}')
+
+**Phase 5 - Output EXECUTION SUMMARY** as specified in your system prompt."""
+
+        tools = [
+            start_glue_job, get_job_run_status, store_execution_history,
+            collect_post_execution_metrics, store_metrics_for_learning,
+            write_audit_record,
+        ]
+        result = self._run_agent('execution', EXECUTION_PROMPT, prompt, tools)
         return {'glue_job': glue_job, 'executed': execute, 'analysis': result}
+
+    def _generate_dashboard(self, config: Dict) -> Dict:
+        glue_job = config.get('glue_job_name', config.get('job_name', ''))
+        try:
+            return generate_cloudwatch_dashboard(glue_job)
+        except Exception as e:
+            return {'error': str(e)}
 
     def _run_recommendation_agent(self, config: Dict) -> Dict:
         current = config.get('current_config', {})
