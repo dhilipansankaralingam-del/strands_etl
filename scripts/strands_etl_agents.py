@@ -1261,6 +1261,547 @@ def calculate_platform_costs(workers: int, runtime_hours: float, runs_per_month:
 
 
 # =============================================================================
+# COMPLIANCE TOOLS - PII / GDPR / HIPAA
+# =============================================================================
+
+# Canonical sensitive-column name patterns
+_PII_PATTERNS = {
+    'DIRECT_IDENTIFIER': [
+        'ssn', 'social_security', 'passport', 'national_id', 'tax_id', 'ein',
+        'drivers_license', 'license_number', 'voter_id',
+    ],
+    'CONTACT': [
+        'email', 'phone', 'mobile', 'fax', 'address', 'street', 'city', 'zip',
+        'postal', 'latitude', 'longitude', 'geo',
+    ],
+    'FINANCIAL': [
+        'credit_card', 'card_number', 'cvv', 'iban', 'account_number', 'routing',
+        'bank_account', 'salary', 'income', 'wage', 'payment',
+    ],
+    'HEALTH_PHI': [
+        'diagnosis', 'icd', 'medication', 'prescription', 'treatment', 'condition',
+        'patient', 'mrn', 'health_plan', 'insurance_id', 'npi', 'dea_number',
+        'discharge', 'admission', 'procedure_code', 'lab_result', 'vital',
+    ],
+    'BIOMETRIC': [
+        'fingerprint', 'retina', 'face_id', 'voiceprint', 'dna', 'biometric',
+    ],
+    'DEMOGRAPHIC': [
+        'dob', 'birth_date', 'age', 'gender', 'race', 'ethnicity', 'religion',
+        'nationality', 'marital_status', 'sexual_orientation',
+    ],
+    'CREDENTIAL': [
+        'password', 'passwd', 'secret', 'token', 'api_key', 'private_key',
+        'access_key', 'credential', 'auth_token',
+    ],
+    'NAME': [
+        'first_name', 'last_name', 'full_name', 'middle_name', 'maiden_name',
+        'legal_name',
+    ],
+}
+
+_GDPR_CATEGORIES = {'DIRECT_IDENTIFIER', 'CONTACT', 'FINANCIAL', 'DEMOGRAPHIC', 'NAME', 'BIOMETRIC'}
+_HIPAA_CATEGORIES = {'DIRECT_IDENTIFIER', 'CONTACT', 'HEALTH_PHI', 'BIOMETRIC'}
+_PCI_CATEGORIES = {'FINANCIAL', 'CREDENTIAL'}
+
+
+@tool
+def scan_columns_for_pii(database: str, table: str) -> Dict[str, Any]:
+    """Scan Glue table columns for PII, GDPR, HIPAA, and PCI sensitive data patterns.
+
+    Args:
+        database: Glue database name
+        table: Table name
+
+    Returns:
+        Dict with flagged columns, regulation applicability, and masking recommendations
+    """
+    print(f"      [TOOL] scan_columns_for_pii: {database}.{table}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        resp = glue.get_table(DatabaseName=database, Name=table)
+        tbl = resp['Table']
+        sd = tbl.get('StorageDescriptor', {})
+        all_cols = sd.get('Columns', []) + tbl.get('PartitionKeys', [])
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e)}
+
+    flagged = {}
+    for col in all_cols:
+        col_name = col['Name'].lower()
+        col_type = col.get('Type', 'string')
+        for category, keywords in _PII_PATTERNS.items():
+            for kw in keywords:
+                if kw in col_name:
+                    flagged[col['Name']] = {
+                        'category': category,
+                        'matched_keyword': kw,
+                        'col_type': col_type,
+                        'gdpr': category in _GDPR_CATEGORIES,
+                        'hipaa': category in _HIPAA_CATEGORIES,
+                        'pci': category in _PCI_CATEGORIES,
+                    }
+                    break
+            if col['Name'] in flagged:
+                break
+
+    gdpr_cols = [c for c, v in flagged.items() if v['gdpr']]
+    hipaa_cols = [c for c, v in flagged.items() if v['hipaa']]
+    pci_cols = [c for c, v in flagged.items() if v['pci']]
+
+    masking_recs = []
+    for col_name, info in flagged.items():
+        cat = info['category']
+        if cat in ('DIRECT_IDENTIFIER', 'CREDENTIAL'):
+            masking_recs.append(f"{col_name}: TOKENIZE or HASH (SHA-256)")
+        elif cat == 'FINANCIAL':
+            masking_recs.append(f"{col_name}: MASK last 4 digits only (PCI DSS req)")
+        elif cat in ('CONTACT', 'NAME'):
+            masking_recs.append(f"{col_name}: PSEUDONYMIZE via lookup table (GDPR Art.4)")
+        elif cat == 'HEALTH_PHI':
+            masking_recs.append(f"{col_name}: ENCRYPT at-rest + RBAC (HIPAA §164.312)")
+        elif cat == 'DEMOGRAPHIC':
+            masking_recs.append(f"{col_name}: GENERALIZE (age range, region instead of exact)")
+        elif cat == 'BIOMETRIC':
+            masking_recs.append(f"{col_name}: IRREVERSIBLE HASH + separate storage required")
+
+    print(f"      [TOOL] {len(flagged)} sensitive cols: GDPR={len(gdpr_cols)}, HIPAA={len(hipaa_cols)}, PCI={len(pci_cols)}")
+
+    return {
+        'database': database,
+        'table': table,
+        'total_columns_scanned': len(all_cols),
+        'sensitive_columns_found': len(flagged),
+        'flagged_columns': flagged,
+        'gdpr_applicable': len(gdpr_cols) > 0,
+        'hipaa_applicable': len(hipaa_cols) > 0,
+        'pci_applicable': len(pci_cols) > 0,
+        'gdpr_columns': gdpr_cols,
+        'hipaa_columns': hipaa_cols,
+        'pci_columns': pci_cols,
+        'masking_recommendations': masking_recs,
+        'compliance_risk': 'HIGH' if hipaa_cols or (len(gdpr_cols) > 3) else 'MEDIUM' if gdpr_cols or pci_cols else 'LOW',
+    }
+
+
+@tool
+def derive_sensitive_data_via_query(database: str, table: str, sample_size: int = 1000) -> Dict[str, Any]:
+    """Run Athena sample queries to derive sensitive data by analyzing actual values (regex-based).
+
+    Args:
+        database: Database name
+        table: Table name
+        sample_size: Number of rows to sample
+
+    Returns:
+        Dict with value-level PII detection results
+    """
+    print(f"      [TOOL] derive_sensitive_data_via_query: {database}.{table} (sample={sample_size})")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        resp = glue.get_table(DatabaseName=database, Name=table)
+        cols = resp['Table'].get('StorageDescriptor', {}).get('Columns', [])
+        string_cols = [c['Name'] for c in cols if 'string' in c.get('Type', '').lower() or 'varchar' in c.get('Type', '').lower()][:8]
+    except Exception as e:
+        return {'error': str(e)}
+
+    if not string_cols:
+        return {'message': 'No string columns to sample', 'table': f'{database}.{table}'}
+
+    # Build regex detection SQL for each string column
+    detections = {}
+    patterns = {
+        'EMAIL':        r"REGEXP_LIKE({col}, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}')",
+        'US_PHONE':     r"REGEXP_LIKE({col}, '\d{{3}}[-.\s]?\d{{3}}[-.\s]?\d{{4}}')",
+        'SSN':          r"REGEXP_LIKE({col}, '\d{{3}}-\d{{2}}-\d{{4}}')",
+        'CREDIT_CARD':  r"REGEXP_LIKE({col}, '\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}')",
+        'IP_ADDRESS':   r"REGEXP_LIKE({col}, '\d{{1,3}}\.\d{{1,3}}\.\d{{1,3}}\.\d{{1,3}}')",
+        'DATE_OF_BIRTH':r"REGEXP_LIKE({col}, '\d{{4}}-\d{{2}}-\d{{2}}') AND LOWER({col}) LIKE '%birth%'",
+    }
+
+    for col in string_cols:
+        col_flags = []
+        for pii_type, pattern_tpl in patterns.items():
+            pattern = pattern_tpl.format(col=col)
+            sql = f"""
+                SELECT COUNT(*) as matches
+                FROM (SELECT {col} FROM {database}.{table} LIMIT {sample_size})
+                WHERE {pattern}
+            """
+            result = run_athena_query(sql, database)
+            if result.get('success') and result.get('rows'):
+                count = int(result['rows'][0].get('matches', 0))
+                if count > 0:
+                    col_flags.append({'type': pii_type, 'sample_matches': count})
+
+        if col_flags:
+            detections[col] = col_flags
+
+    gdpr_hit = any(
+        any(f['type'] in ('EMAIL', 'US_PHONE', 'DATE_OF_BIRTH') for f in flags)
+        for flags in detections.values()
+    )
+    hipaa_hit = any(
+        any(f['type'] in ('SSN',) for f in flags)
+        for flags in detections.values()
+    )
+    pci_hit = any(
+        any(f['type'] in ('CREDIT_CARD',) for f in flags)
+        for flags in detections.values()
+    )
+
+    print(f"      [TOOL] Value-level PII in {len(detections)} cols: GDPR={gdpr_hit}, HIPAA={hipaa_hit}, PCI={pci_hit}")
+
+    return {
+        'database': database,
+        'table': table,
+        'sample_size': sample_size,
+        'columns_with_pii_values': detections,
+        'gdpr_triggered': gdpr_hit,
+        'hipaa_triggered': hipaa_hit,
+        'pci_triggered': pci_hit,
+        'action_required': bool(detections),
+    }
+
+
+@tool
+def check_data_encryption_compliance(database: str, table: str) -> Dict[str, Any]:
+    """Check S3 encryption, Glue encryption settings, and KMS key usage for a table.
+
+    Args:
+        database: Glue database name
+        table: Table name
+
+    Returns:
+        Dict with encryption status and compliance gaps
+    """
+    print(f"      [TOOL] check_data_encryption_compliance: {database}.{table}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    findings = {}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        resp = glue.get_table(DatabaseName=database, Name=table)
+        tbl = resp['Table']
+        location = tbl.get('StorageDescriptor', {}).get('Location', '')
+        params = tbl.get('Parameters', {})
+        findings['glue_table_location'] = location
+        findings['glue_table_params'] = params
+
+        # Check S3 bucket encryption
+        if location.startswith('s3://'):
+            bucket = location.replace('s3://', '').split('/')[0]
+            s3 = boto3.client('s3', region_name='us-west-2')
+            try:
+                enc = s3.get_bucket_encryption(Bucket=bucket)
+                rules = enc.get('ServerSideEncryptionConfiguration', {}).get('Rules', [])
+                enc_type = rules[0].get('ApplyServerSideEncryptionByDefault', {}).get('SSEAlgorithm', 'NONE') if rules else 'NONE'
+                kms_key = rules[0].get('ApplyServerSideEncryptionByDefault', {}).get('KMSMasterKeyID', None) if rules else None
+                findings['s3_encryption'] = enc_type
+                findings['kms_key_id'] = kms_key
+                findings['s3_encrypted'] = enc_type in ('aws:kms', 'AES256')
+                findings['uses_cmk'] = kms_key is not None and 'alias/aws/' not in str(kms_key)
+            except Exception as e:
+                findings['s3_encryption'] = f'ERROR: {e}'
+                findings['s3_encrypted'] = False
+
+        # Check Glue Data Catalog encryption
+        try:
+            dc_enc = glue.get_data_catalog_encryption_settings()
+            catalog_enc = dc_enc.get('DataCatalogEncryptionSettings', {})
+            findings['catalog_password_encrypted'] = catalog_enc.get('ConnectionPasswordEncryption', {}).get('ReturnConnectionPasswordEncrypted', False)
+            findings['catalog_encrypted_at_rest'] = catalog_enc.get('EncryptionAtRest', {}).get('CatalogEncryptionMode', 'DISABLED') != 'DISABLED'
+        except Exception as e:
+            findings['catalog_encryption_check'] = f'ERROR: {e}'
+
+        gaps = []
+        if not findings.get('s3_encrypted'):
+            gaps.append('CRITICAL: S3 bucket not encrypted - required for HIPAA/PCI/GDPR')
+        if not findings.get('uses_cmk'):
+            gaps.append('HIGH: Using AWS-managed key - use Customer Managed Key (CMK) for full control')
+        if not findings.get('catalog_encrypted_at_rest'):
+            gaps.append('MEDIUM: Glue Data Catalog not encrypted at rest')
+
+        findings['compliance_gaps'] = gaps
+        findings['overall_status'] = 'COMPLIANT' if not gaps else ('NON_COMPLIANT' if any('CRITICAL' in g for g in gaps) else 'PARTIAL')
+
+        print(f"      [TOOL] Encryption: S3={findings.get('s3_encrypted')}, CMK={findings.get('uses_cmk')}, gaps={len(gaps)}")
+        return findings
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e)}
+
+
+# =============================================================================
+# LEARNING TOOLS - DETAILED GLUE RUN METRICS
+# =============================================================================
+
+@tool
+def get_glue_run_metrics(job_name: str, run_id: str) -> Dict[str, Any]:
+    """Fetch detailed Spark metrics for a specific Glue job run from CloudWatch.
+
+    Args:
+        job_name: Name of the Glue job
+        run_id: Specific run ID to fetch metrics for
+
+    Returns:
+        Dict with executor memory, driver memory, data shuffled, skew indicators, spark configs
+    """
+    print(f"      [TOOL] get_glue_run_metrics: {job_name}/{run_id}")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    metrics_data = {}
+
+    try:
+        cw = boto3.client('cloudwatch', region_name='us-west-2')
+        glue = boto3.client('glue', region_name='us-west-2')
+
+        # Get job run details
+        run = glue.get_job_run(JobName=job_name, RunId=run_id)['JobRun']
+        started = run.get('StartedOn')
+        completed = run.get('CompletedOn')
+        num_workers = run.get('NumberOfWorkers', 10)
+        worker_type = run.get('WorkerType', 'G.1X')
+        dpu_seconds = run.get('DPUSeconds', 0)
+
+        metrics_data['run_id'] = run_id
+        metrics_data['job_name'] = job_name
+        metrics_data['status'] = run.get('JobRunState')
+        metrics_data['num_workers'] = num_workers
+        metrics_data['worker_type'] = worker_type
+        metrics_data['duration_sec'] = run.get('ExecutionTime', 0)
+        metrics_data['dpu_seconds'] = dpu_seconds
+        metrics_data['cost_usd'] = round(dpu_seconds / 3600 * {'G.1X': 0.44, 'G.2X': 0.88, 'G.4X': 1.76}.get(worker_type, 0.44), 4)
+
+        # Parse Spark configs from job arguments
+        glue_job = glue.get_job(JobName=job_name)['Job']
+        spark_configs = {}
+        for k, v in run.get('Arguments', {}).items():
+            if '--conf' in k or 'spark.' in v:
+                spark_configs[k] = v
+        metrics_data['spark_configs'] = spark_configs or glue_job.get('DefaultArguments', {})
+
+        if started and completed:
+            end_time = completed
+            start_time = started
+
+            # Metric names from Glue CloudWatch namespace
+            cw_metrics = [
+                ('glue.driver.aggregate.bytesRead',    'bytes_read'),
+                ('glue.driver.aggregate.bytesWritten', 'bytes_written'),
+                ('glue.driver.aggregate.recordsRead',  'records_read'),
+                ('glue.driver.aggregate.shuffleLocalBytesRead',  'shuffle_local_bytes'),
+                ('glue.driver.aggregate.shuffleRemoteBytesRead', 'shuffle_remote_bytes'),
+                ('glue.driver.jvm.heap.usage',         'driver_heap_usage_pct'),
+                ('glue.driver.jvm.heap.used',          'driver_heap_used_bytes'),
+                ('glue.ALL.jvm.heap.usage',            'executor_heap_usage_avg'),
+                ('glue.ALL.jvm.heap.used',             'executor_heap_used_bytes'),
+                ('glue.driver.ExecutorAllocationManager.executors.numberAllExecutors', 'executors_total'),
+                ('glue.driver.ExecutorAllocationManager.executors.numberMaxNeededExecutors', 'executors_max_needed'),
+            ]
+
+            for metric_name, key in cw_metrics:
+                try:
+                    resp = cw.get_metric_statistics(
+                        Namespace='Glue',
+                        MetricName=metric_name,
+                        Dimensions=[
+                            {'Name': 'JobName', 'Value': job_name},
+                            {'Name': 'JobRunId', 'Value': run_id},
+                            {'Name': 'Type', 'Value': 'gauge'},
+                        ],
+                        StartTime=start_time,
+                        EndTime=end_time,
+                        Period=3600,
+                        Statistics=['Maximum', 'Average'],
+                    )
+                    pts = resp.get('Datapoints', [])
+                    if pts:
+                        metrics_data[key] = {
+                            'max': max(p['Maximum'] for p in pts),
+                            'avg': round(sum(p['Average'] for p in pts) / len(pts), 2),
+                        }
+                except Exception:
+                    pass
+
+        # Compute derived insights
+        br = metrics_data.get('bytes_read', {}).get('max', 0)
+        bw = metrics_data.get('bytes_written', {}).get('max', 0)
+        shuffle = (metrics_data.get('shuffle_local_bytes', {}).get('max', 0) +
+                   metrics_data.get('shuffle_remote_bytes', {}).get('max', 0))
+
+        metrics_data['data_read_gb']      = round(br / (1024**3), 3) if br else None
+        metrics_data['data_written_gb']   = round(bw / (1024**3), 3) if bw else None
+        metrics_data['shuffle_total_gb']  = round(shuffle / (1024**3), 3) if shuffle else None
+        metrics_data['shuffle_to_read_ratio'] = round(shuffle / br, 2) if br and br > 0 else None
+        metrics_data['driver_heap_pct']   = metrics_data.get('driver_heap_usage_pct', {}).get('max')
+        metrics_data['executor_heap_pct'] = metrics_data.get('executor_heap_usage_avg', {}).get('avg')
+
+        # Skew indicators
+        skew_flags = []
+        if metrics_data['shuffle_to_read_ratio'] and metrics_data['shuffle_to_read_ratio'] > 5:
+            skew_flags.append(f"High shuffle ratio ({metrics_data['shuffle_to_read_ratio']}x) - likely data skew")
+        if metrics_data['driver_heap_pct'] and metrics_data['driver_heap_pct'] > 0.85:
+            skew_flags.append(f"Driver heap {metrics_data['driver_heap_pct']*100:.0f}% - check for collect() or driver OOM")
+        if metrics_data['executor_heap_pct'] and metrics_data['executor_heap_pct'] > 0.80:
+            skew_flags.append(f"Executor heap {metrics_data['executor_heap_pct']*100:.0f}% - memory pressure, consider G.2X")
+
+        metrics_data['skew_indicators'] = skew_flags
+        metrics_data['health_status'] = 'CONCERNING' if skew_flags else 'HEALTHY'
+
+        print(f"      [TOOL] Read={metrics_data.get('data_read_gb')}GB, Shuffle={metrics_data.get('shuffle_total_gb')}GB, "
+              f"DriverHeap={metrics_data.get('driver_heap_pct')}, skew_flags={len(skew_flags)}")
+
+        return metrics_data
+
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e), 'job_name': job_name, 'run_id': run_id}
+
+
+@tool
+def get_glue_job_run_history(job_name: str, max_runs: int = 20) -> Dict[str, Any]:
+    """Get full historical metrics for all recent Glue job runs with trend analysis.
+
+    Args:
+        job_name: Name of the Glue job
+        max_runs: Max runs to analyze
+
+    Returns:
+        Dict with per-run metrics, trend analysis, anomalies, and optimal config learnings
+    """
+    print(f"      [TOOL] get_glue_job_run_history: {job_name} (max={max_runs})")
+
+    if not HAS_AWS:
+        return {'error': 'boto3 not installed'}
+
+    try:
+        glue = boto3.client('glue', region_name='us-west-2')
+        cw = boto3.client('cloudwatch', region_name='us-west-2')
+
+        runs_resp = glue.get_job_runs(JobName=job_name, MaxResults=max_runs)
+        runs = runs_resp.get('JobRuns', [])
+
+        run_summaries = []
+        for r in runs:
+            dpu_sec = r.get('DPUSeconds', 0)
+            wtype = r.get('WorkerType', 'G.1X')
+            cost = round(dpu_sec / 3600 * {'G.1X': 0.44, 'G.2X': 0.88, 'G.4X': 1.76}.get(wtype, 0.44), 4)
+            run_summaries.append({
+                'run_id':       r['Id'],
+                'status':       r['JobRunState'],
+                'started':      r.get('StartedOn').isoformat() if r.get('StartedOn') else None,
+                'duration_sec': r.get('ExecutionTime', 0),
+                'dpu_seconds':  dpu_sec,
+                'num_workers':  r.get('NumberOfWorkers', 0),
+                'worker_type':  wtype,
+                'cost_usd':     cost,
+                'error':        (r.get('ErrorMessage', '')[:300] if r.get('ErrorMessage') else None),
+            })
+
+        # Fetch CloudWatch aggregate metrics across all runs via most recent run
+        aggregate_insights = {}
+        if runs:
+            latest_run = runs[0]
+            run_id = latest_run['Id']
+            started = latest_run.get('StartedOn')
+            completed = latest_run.get('CompletedOn')
+            if started and completed:
+                for metric_name, key in [
+                    ('glue.driver.aggregate.bytesRead',   'latest_bytes_read'),
+                    ('glue.driver.aggregate.recordsRead', 'latest_records_read'),
+                    ('glue.driver.aggregate.shuffleRemoteBytesRead', 'latest_shuffle_bytes'),
+                    ('glue.driver.jvm.heap.usage',        'latest_driver_heap_pct'),
+                    ('glue.ALL.jvm.heap.usage',           'latest_executor_heap_pct'),
+                    ('glue.driver.ExecutorAllocationManager.executors.numberMaxNeededExecutors', 'max_executors_needed'),
+                ]:
+                    try:
+                        resp = cw.get_metric_statistics(
+                            Namespace='Glue',
+                            MetricName=metric_name,
+                            Dimensions=[
+                                {'Name': 'JobName',    'Value': job_name},
+                                {'Name': 'JobRunId',   'Value': run_id},
+                                {'Name': 'Type',       'Value': 'gauge'},
+                            ],
+                            StartTime=started,
+                            EndTime=completed,
+                            Period=3600,
+                            Statistics=['Maximum', 'Average'],
+                        )
+                        pts = resp.get('Datapoints', [])
+                        if pts:
+                            aggregate_insights[key] = round(max(p['Maximum'] for p in pts), 4)
+                    except Exception:
+                        pass
+
+        # Trend analysis
+        succeeded = [r for r in run_summaries if r['status'] == 'SUCCEEDED']
+        failed    = [r for r in run_summaries if r['status'] == 'FAILED']
+        durations = [r['duration_sec'] for r in succeeded]
+        costs     = [r['cost_usd'] for r in succeeded]
+
+        trends = {}
+        if len(durations) >= 2:
+            first_half  = sum(durations[:len(durations)//2]) / max(1, len(durations)//2)
+            second_half = sum(durations[len(durations)//2:]) / max(1, len(durations) - len(durations)//2)
+            trends['duration_trend'] = 'INCREASING' if second_half > first_half * 1.1 else 'DECREASING' if second_half < first_half * 0.9 else 'STABLE'
+            trends['duration_change_pct'] = round((second_half - first_half) / first_half * 100, 1) if first_half else 0
+
+        # Anomalies: runs more than 2x average duration
+        avg_dur = sum(durations) / len(durations) if durations else 0
+        anomalies = [r for r in succeeded if r['duration_sec'] > avg_dur * 2]
+
+        # Optimal config learning
+        if succeeded:
+            best_run = min(succeeded, key=lambda r: r['cost_usd'])
+        else:
+            best_run = None
+
+        print(f"      [TOOL] {len(runs)} runs: {len(succeeded)} success, {len(failed)} failed, "
+              f"avg_dur={avg_dur:.0f}s, trend={trends.get('duration_trend','N/A')}")
+
+        return {
+            'job_name':          job_name,
+            'total_runs':        len(runs),
+            'succeeded':         len(succeeded),
+            'failed':            len(failed),
+            'success_rate_pct':  round(len(succeeded) / len(runs) * 100, 1) if runs else 0,
+            'avg_duration_sec':  round(avg_dur, 1),
+            'avg_cost_usd':      round(sum(costs) / len(costs), 4) if costs else 0,
+            'total_cost_usd':    round(sum(r['cost_usd'] for r in run_summaries), 2),
+            'trends':            trends,
+            'anomaly_runs':      anomalies,
+            'best_run':          best_run,
+            'latest_run_metrics': aggregate_insights,
+            'run_history':       run_summaries,
+            'common_errors':     list({r['error'] for r in failed if r['error']})[:5],
+        }
+
+    except glue.exceptions.EntityNotFoundException:
+        print(f"      [TOOL] ERROR: Job not found: {job_name}")
+        return {'error': f'Job not found: {job_name}'}
+    except Exception as e:
+        print(f"      [TOOL] ERROR: {e}")
+        return {'error': str(e)}
+
+
+# =============================================================================
 # AGENT DEFINITIONS
 # =============================================================================
 
@@ -1291,25 +1832,91 @@ Format findings as:
 - Line X: [ISSUE] description - [FIX] recommendation"""
 
 
-COMPLIANCE_PROMPT = """You are a Compliance Agent. Check ETL configurations for:
+COMPLIANCE_PROMPT = """You are an advanced Compliance Agent responsible for security, data privacy, and regulatory compliance of ETL pipelines.
 
-1. Security: IAM roles, encryption, VPC settings
-2. Cost controls: Timeouts, max workers, auto-scaling
-3. Best practices: Logging, monitoring, error handling
-4. Data governance: Catalog usage, schema validation
+## Your Responsibilities
 
-Report any compliance gaps found."""
+### A. PII / Sensitive Data Scanning
+For each source and target table:
+1. Use scan_columns_for_pii to detect sensitive columns by name patterns
+2. Use derive_sensitive_data_via_query to confirm PII by sampling actual values with regex
+3. Classify findings under: GDPR, HIPAA, PCI-DSS, or general PII
+
+### B. Encryption Compliance
+For each table:
+1. Use check_data_encryption_compliance to verify:
+   - S3 bucket encryption (SSE-KMS or SSE-AES256)
+   - Whether Customer Managed Key (CMK) is used (required for HIPAA/PCI)
+   - Glue Data Catalog encryption at rest
+
+### C. Configuration Compliance
+Review the job config for:
+- Timeout set (prevent runaway jobs)
+- Worker count within allowed limits
+- VPC config (required for sensitive data environments)
+- Glue job security configuration (encryption mode)
+- IAM role least-privilege
+- CloudWatch logging enabled
+
+### D. Regulatory Risk Summary
+After scanning, produce a table:
+
+| Regulation | Triggered | Columns Affected | Risk Level | Required Action |
+|------------|-----------|-----------------|------------|-----------------|
+| GDPR       | Yes/No    | col1, col2      | HIGH/MED   | Pseudonymize    |
+| HIPAA      | Yes/No    | col3            | CRITICAL   | Encrypt + RBAC  |
+| PCI-DSS    | Yes/No    | col4            | HIGH       | Mask card data  |
+
+Always conclude with:
+- COMPLIANCE VERDICT: COMPLIANT / NON-COMPLIANT / NEEDS-REVIEW
+- Top 3 remediation actions ranked by risk"""
 
 
-LEARNING_PROMPT = """You are a Learning Agent. Analyze historical job runs to identify patterns.
+LEARNING_PROMPT = """You are an advanced Learning Agent that deeply analyzes Glue job execution history to surface patterns, anomalies, and optimization opportunities.
 
-Use get_glue_job_runs to fetch recent runs, then:
-1. Calculate average runtime and cost
-2. Identify failed runs and common errors
-3. Detect trends (growing data, increasing runtime)
-4. Learn optimal resource configurations
+## Your Analysis Steps
 
-Provide insights based on historical patterns."""
+### Step 1: Full Run History
+Use get_glue_job_run_history to retrieve all recent runs with:
+- Per-run duration, cost, worker config, success/failure
+- Trend direction (INCREASING / STABLE / DECREASING)
+- Anomaly runs (>2x average duration)
+- Best performing run config
+
+### Step 2: Deep Metrics for Latest Run
+Use get_glue_run_metrics with the latest run_id to get CloudWatch Spark metrics:
+- **Data processed**: bytes_read, bytes_written, records_read
+- **Shuffle**: shuffle_local_bytes + shuffle_remote_bytes (high shuffle = skew risk)
+- **Driver memory**: driver_heap_usage_pct (>85% = OOM risk, check for collect())
+- **Executor memory**: executor_heap_usage_avg (>80% = need bigger workers)
+- **Executor allocation**: max executors needed vs allocated (over/under-provisioning)
+- **Skew indicators**: shuffle_to_read_ratio > 5x = skew; lopsided executor heap
+
+### Step 3: Local Execution History
+Use load_execution_history to get stored simulation/execution records and merge with Glue data.
+
+### Step 4: Synthesize Learnings
+Produce a structured report:
+
+**PERFORMANCE TRENDS**
+- Duration: {trend} by {pct}% over last N runs
+- Cost: avg ${avg}/run, total ${total}/month
+
+**RESOURCE UTILIZATION**
+- Data read: X GB, written: Y GB, shuffle: Z GB
+- Driver heap peak: X% | Executor heap avg: Y%
+- Workers allocated: N, max needed: M (over/under by X)
+
+**SKEW ANALYSIS**
+- Shuffle ratio: Xx (threshold: 5x)
+- Skew flags detected: [list]
+
+**SPARK CONFIG OBSERVED**
+- List actual spark configs from the run
+
+**LEARNED OPTIMAL CONFIG**
+- Recommended workers, worker type, spark configs for next run
+- Based on best run and current trends"""
 
 
 DATA_QUALITY_PROMPT = """You are the Data Quality Agent. You validate data against quality rules.
@@ -1619,30 +2226,66 @@ Default validations to run:
 
     def _run_compliance_agent(self, config: Dict) -> Dict:
         current = config.get('current_config', {})
-        prompt = f"""Check compliance for job '{config.get('job_name')}':
+        source_tables = config.get('source_tables', [])
+        compliance_cfg = config.get('compliance', {})
 
-Current Config:
-  Workers: {current.get('NumberOfWorkers', current.get('workers', 'unknown'))}
-  Worker Type: {current.get('WorkerType', 'unknown')}
-  Timeout: {current.get('Timeout', 'not set')} minutes
+        table_list = '\n'.join(
+            f"  - {t.get('database','default')}.{t.get('table', t.get('name',''))} "
+            f"(location: {t.get('location','')})"
+            for t in source_tables
+        )
 
-Review for security, cost controls, and best practices."""
+        prompt = f"""Run full compliance analysis for job '{config.get('job_name')}'.
 
-        result = self._run_agent('compliance', COMPLIANCE_PROMPT, prompt, [])
-        return {'analysis': result}
+## JOB CONFIG
+  Workers:      {current.get('NumberOfWorkers', current.get('workers', 'unknown'))}
+  Worker Type:  {current.get('WorkerType', 'unknown')}
+  Timeout:      {current.get('Timeout', 'not set')} minutes
+  Encryption:   {compliance_cfg.get('require_encryption', 'not specified')}
+  VPC Required: {compliance_cfg.get('require_vpc', 'not specified')}
+  Max Workers:  {compliance_cfg.get('max_workers', 'not specified')}
+
+## SOURCE TABLES TO SCAN
+{table_list if table_list else '  (none specified)'}
+
+## STEPS
+1. For each source table above, call scan_columns_for_pii to detect sensitive columns by name
+2. For each source table, call derive_sensitive_data_via_query to validate with actual data samples
+3. For each source table, call check_data_encryption_compliance to verify S3/Catalog encryption
+4. Review job config for timeout, worker limits, VPC, logging
+5. Produce the REGULATORY RISK TABLE and COMPLIANCE VERDICT"""
+
+        tools = [scan_columns_for_pii, derive_sensitive_data_via_query, check_data_encryption_compliance]
+        result = self._run_agent('compliance', COMPLIANCE_PROMPT, prompt, tools)
+        return {'tables_scanned': len(source_tables), 'analysis': result}
 
     def _run_learning_agent(self, config: Dict) -> Dict:
         glue_job = config.get('glue_job_name', config.get('job_name', ''))
-        prompt = f"""Analyze historical data for job: {glue_job}
 
-1. Use load_execution_history to get stored execution records
-2. Use get_glue_job_runs to get recent Glue runs
-3. Identify patterns: avg duration, cost trends, failure rates
-4. Learn optimal resource configurations
-5. Detect anomalies or degradation"""
+        prompt = f"""Perform deep learning analysis for Glue job: '{glue_job}'
 
-        result = self._run_agent('learning', LEARNING_PROMPT, prompt,
-                                  [get_glue_job_runs, load_execution_history])
+## STEP 1 - FULL RUN HISTORY
+Call get_glue_job_run_history(job_name='{glue_job}', max_runs=20)
+This returns all runs with duration, cost, worker config, trends, anomalies, and latest CloudWatch metrics.
+
+## STEP 2 - DETAILED SPARK METRICS
+From the run history result, extract the latest successful run_id.
+Call get_glue_run_metrics(job_name='{glue_job}', run_id=<latest_run_id>)
+This fetches CloudWatch Spark metrics: bytes read/written, shuffle bytes, driver heap %, executor heap %, executor allocation.
+
+## STEP 3 - LOCAL HISTORY
+Call load_execution_history(job_name='{glue_job}', limit=20) to get local simulation records.
+
+## STEP 4 - SYNTHESIZE
+After calling all three tools, produce a complete LEARNING REPORT covering:
+- Performance trends (duration, cost trajectory)
+- Resource utilization (data volumes, memory pressure)
+- Skew analysis (shuffle ratio, hot executors)
+- Observed Spark configs
+- Recommended optimal config for next run"""
+
+        tools = [get_glue_job_run_history, get_glue_run_metrics, get_glue_job_runs, load_execution_history]
+        result = self._run_agent('learning', LEARNING_PROMPT, prompt, tools)
         return {'glue_job': glue_job, 'analysis': result}
 
     def _run_execution_agent(self, config: Dict, execute: bool = False) -> Dict:
