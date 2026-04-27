@@ -45,6 +45,10 @@ from strands_agents.log_agent import log_agent
 from strands_agents.query_agent import query_agent
 from strands_agents.tools.validation_tools import get_batch_summary, save_feedback
 from strands_agents.tools.holiday_tools import list_upcoming_holidays
+from strands_agents.tools.business_tools import (
+    fetch_critical_table_metadata,
+    fetch_business_calendar_events,
+)
 
 # ---------------------------------------------------------------------------
 # Model — Sonnet for orchestration-level reasoning
@@ -94,6 +98,17 @@ save_feedback(record_id, correct_classification, notes)
 list_upcoming_holidays(days_ahead, country)
     List upcoming public holidays.  Use when asked about upcoming holidays
     or when explaining why certain failures may be false positives.
+
+fetch_critical_table_metadata(table_name)
+    Look up a table in the critical-table registry — returns its medallion
+    layer (staging | datalake | base | master), criticality, source type,
+    SLA, required columns, and known FP patterns.  Use when the user asks
+    "is X critical?", "what layer is X?", "who owns X?".
+
+fetch_business_calendar_events(date_str, country)
+    Detect month-end, quarter-end, year-end, weekend, DST transitions, and
+    day-after-holiday events for a given date.  Use when the user asks
+    "is today month-end?" or to explain why volumes are off.
 
 ## Routing rules
 
@@ -159,5 +174,7 @@ orchestrator_agent = Agent(
         get_batch_summary,
         save_feedback,
         list_upcoming_holidays,
+        fetch_critical_table_metadata,
+        fetch_business_calendar_events,
     ],
 )

@@ -1,0 +1,298 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-04-26",
+  "comment": "Critical-table registry for Strands validation agent. Add one entry per table. The agent reads this at classification time to understand layer, source type, required columns, tolerances, and expected FP patterns.",
+
+  "tables": {
+
+    "stg_member_enrollment": {
+      "layer": "staging",
+      "database_name": "staging",
+      "source_type": "csv_lambda",
+      "schema_type": "all_string",
+      "criticality": "CRITICAL",
+      "business_domain": "membership",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 6,
+      "expected_daily_rows_min": 500,
+      "expected_daily_rows_max": 500000,
+      "row_count_tolerance_pct": 30,
+      "expected_columns": [
+        "member_id", "enrollment_date", "plan_code", "status",
+        "effective_date", "termination_date", "group_id", "product_code"
+      ],
+      "required_columns": ["member_id", "plan_code", "status", "effective_date"],
+      "allows_new_columns": true,
+      "downstream_tables": ["dl_member_enrollment", "base_member", "mst_membership"],
+      "fp_patterns": [
+        "STAGING_SCHEMA_EVOLUTION",
+        "STAGING_FILE_DELAY",
+        "STAGING_EMPTY_STRING_NULL",
+        "STAGING_REDELIVERY",
+        "STAGING_COLUMN_REORDER",
+        "CALENDAR_WEEKEND",
+        "CALENDAR_MONTH_END",
+        "INFRA_CRAWLER_LAG"
+      ],
+      "notes": "CSV delivered by upstream membership system via S3 PUT event → Lambda → staging. All columns loaded as STRING. New optional columns appear when source system adds fields."
+    },
+
+    "stg_policy_transaction": {
+      "layer": "staging",
+      "database_name": "staging",
+      "source_type": "csv_lambda",
+      "schema_type": "all_string",
+      "criticality": "CRITICAL",
+      "business_domain": "policy",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 4,
+      "expected_daily_rows_min": 200,
+      "expected_daily_rows_max": 1000000,
+      "row_count_tolerance_pct": 50,
+      "expected_columns": [
+        "policy_id", "transaction_type", "transaction_date", "amount",
+        "currency", "status", "agent_id", "product_code", "effective_date"
+      ],
+      "required_columns": ["policy_id", "transaction_type", "transaction_date", "amount"],
+      "allows_new_columns": true,
+      "downstream_tables": ["dl_policy_transaction", "base_policy", "mst_inforce_dashboard"],
+      "fp_patterns": [
+        "STAGING_SCHEMA_EVOLUTION",
+        "STAGING_FILE_DELAY",
+        "STAGING_PARTIAL_LOAD",
+        "STAGING_EMPTY_STRING_NULL",
+        "CALENDAR_MONTH_END",
+        "CALENDAR_QUARTER_END",
+        "CALENDAR_YEAR_END",
+        "CALENDAR_DAY_AFTER_HOLIDAY",
+        "STATISTICAL_WITHIN_3_SIGMA"
+      ],
+      "notes": "Policy transaction feed. Volume spikes at month-end and quarter-close are expected. Amount column is STRING in staging; type cast happens at base layer."
+    },
+
+    "stg_claims_feed": {
+      "layer": "staging",
+      "database_name": "staging",
+      "source_type": "csv_lambda",
+      "schema_type": "all_string",
+      "criticality": "HIGH",
+      "business_domain": "claims",
+      "owner_team": "claims-engineering",
+      "sla_load_by_hour_utc": 8,
+      "expected_daily_rows_min": 50,
+      "expected_daily_rows_max": 200000,
+      "row_count_tolerance_pct": 40,
+      "expected_columns": [
+        "claim_id", "member_id", "policy_id", "claim_date", "claim_type",
+        "diagnosis_code", "procedure_code", "billed_amount", "paid_amount", "status"
+      ],
+      "required_columns": ["claim_id", "member_id", "claim_date", "claim_type"],
+      "allows_new_columns": true,
+      "downstream_tables": ["dl_claims", "base_claims", "mst_life_summary"],
+      "fp_patterns": [
+        "STAGING_SCHEMA_EVOLUTION",
+        "STAGING_FILE_DELAY",
+        "STAGING_EMPTY_STRING_NULL",
+        "CALENDAR_WEEKEND",
+        "CALENDAR_PUBLIC_HOLIDAY",
+        "STATISTICAL_WITHIN_3_SIGMA"
+      ],
+      "notes": "Claims volume is naturally low on weekends and public holidays."
+    },
+
+    "dl_member_enrollment": {
+      "layer": "datalake",
+      "database_name": "datalake",
+      "source_type": "iceberg_from_staging",
+      "schema_type": "typed",
+      "criticality": "CRITICAL",
+      "business_domain": "membership",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 8,
+      "expected_daily_rows_min": 500,
+      "expected_daily_rows_max": 600000,
+      "row_count_tolerance_pct": 35,
+      "partition_keys": ["load_date"],
+      "downstream_tables": ["base_member", "mst_membership"],
+      "fp_patterns": [
+        "DATALAKE_BACKFILL_RUN",
+        "DATALAKE_PARTITION_ADD",
+        "DATALAKE_NULLABLE_EVOLUTION",
+        "DATALAKE_COMPACTION",
+        "CALENDAR_WEEKEND",
+        "STATISTICAL_WITHIN_3_SIGMA"
+      ],
+      "notes": "Iceberg table. Backfill runs are tagged with run_id prefix 'backfill_'. Compaction triggered weekly on Sundays."
+    },
+
+    "dl_policy_transaction": {
+      "layer": "datalake",
+      "database_name": "datalake",
+      "source_type": "iceberg_from_staging",
+      "schema_type": "typed",
+      "criticality": "CRITICAL",
+      "business_domain": "policy",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 10,
+      "expected_daily_rows_min": 200,
+      "expected_daily_rows_max": 1100000,
+      "row_count_tolerance_pct": 50,
+      "partition_keys": ["transaction_date"],
+      "downstream_tables": ["base_policy", "mst_inforce_dashboard"],
+      "fp_patterns": [
+        "DATALAKE_BACKFILL_RUN",
+        "DATALAKE_PARTITION_ADD",
+        "CALENDAR_MONTH_END",
+        "CALENDAR_QUARTER_END",
+        "CALENDAR_YEAR_END",
+        "STATISTICAL_DAY_OF_WEEK"
+      ],
+      "notes": "Transaction volume on Sundays is ~15% of weekday average — day-of-week pattern is established."
+    },
+
+    "base_member": {
+      "layer": "base",
+      "database_name": "base",
+      "source_type": "scd_type2_from_datalake",
+      "schema_type": "typed_and_cleansed",
+      "criticality": "CRITICAL",
+      "business_domain": "membership",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 12,
+      "expected_daily_rows_min": 1000,
+      "expected_daily_rows_max": 700000,
+      "row_count_tolerance_pct": 20,
+      "surrogate_key": "member_sk",
+      "natural_key": "member_id",
+      "scd_type": 2,
+      "downstream_tables": ["mst_membership"],
+      "fp_patterns": [
+        "BASE_SCD2_CLOSE",
+        "BASE_SURROGATE_GAP",
+        "BASE_REFERENCE_REFRESH",
+        "BASE_TOLERANCE_DRIFT",
+        "CALENDAR_MONTH_END",
+        "STATISTICAL_WITHIN_3_SIGMA"
+      ],
+      "notes": "SCD Type 2. valid_from / valid_to managed by the base layer job. Surrogate key gaps are deliberate (deleted members retain their sk but gap is not filled)."
+    },
+
+    "base_policy": {
+      "layer": "base",
+      "database_name": "base",
+      "source_type": "insert_overwrite_from_datalake",
+      "schema_type": "typed_and_cleansed",
+      "criticality": "CRITICAL",
+      "business_domain": "policy",
+      "owner_team": "data-engineering",
+      "sla_load_by_hour_utc": 14,
+      "expected_daily_rows_min": 500,
+      "expected_daily_rows_max": 900000,
+      "row_count_tolerance_pct": 25,
+      "downstream_tables": ["mst_inforce_dashboard", "mst_life_summary"],
+      "fp_patterns": [
+        "BASE_SCD2_CLOSE",
+        "BASE_REFERENCE_REFRESH",
+        "BASE_TOLERANCE_DRIFT",
+        "BASE_NEGATIVE_ADJUSTMENT",
+        "CALENDAR_QUARTER_END"
+      ],
+      "notes": "Premium amount can legitimately be negative (refund / adjustment). NOT_NULL on amount triggers false positive for refund records."
+    },
+
+    "base_claims": {
+      "layer": "base",
+      "database_name": "base",
+      "source_type": "insert_overwrite_from_datalake",
+      "schema_type": "typed_and_cleansed",
+      "criticality": "HIGH",
+      "business_domain": "claims",
+      "owner_team": "claims-engineering",
+      "sla_load_by_hour_utc": 14,
+      "expected_daily_rows_min": 50,
+      "expected_daily_rows_max": 250000,
+      "row_count_tolerance_pct": 40,
+      "downstream_tables": ["mst_life_summary"],
+      "fp_patterns": [
+        "BASE_REFERENCE_REFRESH",
+        "BASE_TOLERANCE_DRIFT",
+        "CALENDAR_PUBLIC_HOLIDAY",
+        "CALENDAR_WEEKEND",
+        "STATISTICAL_DAY_OF_WEEK"
+      ],
+      "notes": "Claim submissions are naturally sparse over weekends and holidays."
+    },
+
+    "mst_membership": {
+      "layer": "master",
+      "database_name": "master",
+      "source_type": "aggregated_from_base",
+      "schema_type": "business_ready",
+      "criticality": "CRITICAL",
+      "business_domain": "membership",
+      "owner_team": "analytics-engineering",
+      "sla_load_by_hour_utc": 18,
+      "expected_daily_rows_min": 1000,
+      "expected_daily_rows_max": 800000,
+      "row_count_tolerance_pct": 15,
+      "downstream_tables": ["reporting_layer", "bi_dashboards"],
+      "fp_patterns": [
+        "MASTER_MONTH_END_SPIKE",
+        "MASTER_QUARTER_CLOSE",
+        "MASTER_CROSS_SYSTEM_LAG",
+        "CALENDAR_MONTH_END",
+        "CALENDAR_QUARTER_END",
+        "STATISTICAL_WITHIN_3_SIGMA"
+      ],
+      "notes": "Feeds executive dashboards and regulatory reports. ESCALATE any TRUE_FAILURE immediately. Month-end corrections may push row counts 3x mid-month baseline."
+    },
+
+    "mst_inforce_dashboard": {
+      "layer": "master",
+      "database_name": "master",
+      "source_type": "aggregated_from_base",
+      "schema_type": "business_ready",
+      "criticality": "CRITICAL",
+      "business_domain": "policy",
+      "owner_team": "analytics-engineering",
+      "sla_load_by_hour_utc": 20,
+      "expected_daily_rows_min": 500,
+      "expected_daily_rows_max": 500000,
+      "row_count_tolerance_pct": 20,
+      "downstream_tables": ["regulatory_reports", "bi_dashboards"],
+      "fp_patterns": [
+        "MASTER_MONTH_END_SPIKE",
+        "MASTER_QUARTER_CLOSE",
+        "MASTER_YEAR_END_CUTOFF",
+        "MASTER_NEGATIVE_ADJUSTMENT",
+        "MASTER_CROSS_SYSTEM_LAG",
+        "CALENDAR_YEAR_END"
+      ],
+      "notes": "Premium inforce amounts can be negative for terminated policies with refund adjustments. This is a known business rule — NOT_NULL and positive-value rules are misconfigured for this table."
+    },
+
+    "mst_life_summary": {
+      "layer": "master",
+      "database_name": "master",
+      "source_type": "aggregated_from_base",
+      "schema_type": "business_ready",
+      "criticality": "CRITICAL",
+      "business_domain": "life_insurance",
+      "owner_team": "analytics-engineering",
+      "sla_load_by_hour_utc": 22,
+      "expected_daily_rows_min": 100,
+      "expected_daily_rows_max": 200000,
+      "row_count_tolerance_pct": 25,
+      "downstream_tables": ["actuarial_reports", "regulatory_reports"],
+      "fp_patterns": [
+        "MASTER_MONTH_END_SPIKE",
+        "MASTER_QUARTER_CLOSE",
+        "MASTER_YEAR_END_CUTOFF",
+        "MASTER_CROSS_SYSTEM_LAG",
+        "CALENDAR_QUARTER_END",
+        "CALENDAR_YEAR_END"
+      ],
+      "notes": "Actuarial data. Any TRUE_FAILURE must be ESCALATED to actuarial team within 1 hour. Year-end cutoff freezes the table for 3 business days — zero new rows is expected."
+    }
+  }
+}
