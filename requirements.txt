@@ -19,3 +19,8 @@ pydantic>=2.0.0
 # Validation Intelligence Framework
 pyathena>=3.0.0
 tabulate>=0.9.0
+
+# Strands Agents — AI-powered ETL validation analysis
+strands-agents>=0.1.0
+holidays>=0.46
+pytz>=2024.1
