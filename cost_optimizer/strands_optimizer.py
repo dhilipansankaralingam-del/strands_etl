@@ -830,8 +830,262 @@ def _save_local(report: Dict, output_dir: str, job_name: str) -> str:
     return str(fname)
 
 
-# =============================================================================
-# Interactive mode
+def _save_per_script_reports(
+    all_results: Dict[str, Any],
+    batch_summary: Dict,
+    output_dir: str,
+    job_name: str,
+) -> List[str]:
+    """
+    Save one JSON + one HTML per script, plus a batch-level JSON + HTML.
+    Returns list of all file paths written.
+    """
+    date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    ts_str   = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out      = Path(output_dir) / job_name / date_str
+    out.mkdir(parents=True, exist_ok=True)
+    written: List[str] = []
+
+    for script_path, result in all_results.items():
+        script_name = Path(script_path).stem
+
+        # Per-script JSON
+        json_path = out / f"{script_name}_{ts_str}.json"
+        json_path.write_text(json.dumps(result, indent=2, default=str))
+        written.append(str(json_path))
+
+        # Per-script HTML
+        html_path = out / f"{script_name}_{ts_str}.html"
+        html_path.write_text(_render_script_html(result, script_name, date_str))
+        written.append(str(html_path))
+
+    # Batch JSON
+    batch_json = out / f"batch_summary_{ts_str}.json"
+    batch_json.write_text(json.dumps({
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "job_name":       job_name,
+        "generated_at":   datetime.now(tz=timezone.utc).isoformat(),
+        "batch_summary":  batch_summary,
+        "scripts":        list(all_results.keys()),
+    }, indent=2, default=str))
+    written.append(str(batch_json))
+
+    # Batch HTML
+    batch_html = out / f"batch_summary_{ts_str}.html"
+    batch_html.write_text(_render_batch_html(batch_summary, all_results, job_name, date_str))
+    written.append(str(batch_html))
+
+    return written
+
+
+# ── HTML renderers ────────────────────────────────────────────────────────────
+
+def _sev_color(sev: str) -> str:
+    return {"critical": "#d32f2f", "high": "#f57c00",
+            "medium": "#fbc02d", "low": "#388e3c"}.get(sev.lower(), "#555")
+
+
+def _render_script_html(result: Dict, script_name: str, date_str: str) -> str:
+    s   = result.get("summary", {})
+    recs = result.get("all_recommendations", [])
+    mp  = result.get("multiplatform_comparison", [])
+    ann = result.get("line_annotations", [])
+
+    # ── Recommendations table rows ────────────────────────────────────────────
+    rec_rows = ""
+    for r in sorted(recs, key=lambda x: (x.get("priority", "P9"),)):
+        prio  = r.get("priority", "")
+        title = r.get("title", "")
+        desc  = r.get("description", r.get("implementation", ""))[:200]
+        sav   = r.get("estimated_savings_percent", 0)
+        pcolor = {"P0": "#d32f2f", "P1": "#f57c00", "P2": "#1565c0", "P3": "#555"}.get(prio, "#555")
+        rec_rows += (
+            f"<tr><td><span style='color:{pcolor};font-weight:700'>{prio}</span></td>"
+            f"<td>{title}</td><td>{desc}</td>"
+            f"<td style='text-align:center'>{sav}%</td></tr>\n"
+        )
+
+    # ── Multi-platform table rows ─────────────────────────────────────────────
+    mp_rows = ""
+    for i, p in enumerate(mp[:10]):
+        bg = "#e8f5e9" if i == 0 else ("#fff" if i % 2 == 0 else "#fafafa")
+        mp_rows += (
+            f"<tr style='background:{bg}'>"
+            f"<td>{'★ ' if i==0 else ''}{p['label']}</td>"
+            f"<td style='text-align:right'>${p['cost_per_run']:.3f}</td>"
+            f"<td style='text-align:right'>${p['annual_cost']:,.0f}</td>"
+            f"<td style='text-align:right'>{p.get('memory_per_node_gb','-')} GB</td>"
+            f"<td style='font-size:11px;color:#777'>{p.get('notes','')}</td></tr>\n"
+        )
+
+    # ── Line findings ─────────────────────────────────────────────────────────
+    finding_lines = [ln for ln in ann if "findings" in ln]
+    line_rows = ""
+    for ln in finding_lines[:200]:
+        for f in ln["findings"]:
+            sev = f["severity"]
+            col = _sev_color(sev)
+            line_rows += (
+                f"<tr><td style='text-align:center;font-weight:700'>{ln['line']}</td>"
+                f"<td><span style='color:{col};font-weight:700'>{sev.upper()}</span></td>"
+                f"<td>{f['description']}</td>"
+                f"<td style='font-family:monospace;font-size:11px'>{f['fix']}</td>"
+                f"<td style='font-family:monospace;font-size:11px;max-width:300px;overflow:hidden'>"
+                f"{ln['code'].strip()[:120]}</td></tr>\n"
+            )
+    if not line_rows:
+        line_rows = "<tr><td colspan='5' style='color:#388e3c;text-align:center'>No issues found</td></tr>"
+
+    cur  = s.get("current_cost_per_run", 0)
+    opt  = s.get("optimal_cost_per_run", 0)
+    pct  = s.get("potential_savings_percent", 0)
+    ann_sav = s.get("potential_annual_savings", 0)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PySpark Optimizer – {script_name}</title>
+<style>
+  body{{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222}}
+  h1{{background:#1a237e;color:#fff;padding:16px 24px;border-radius:8px;margin:0 0 20px}}
+  h2{{color:#1a237e;border-bottom:2px solid #1a237e;padding-bottom:4px;margin-top:28px}}
+  .cards{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
+  .card{{background:#fff;border-radius:8px;padding:16px 24px;flex:1;min-width:160px;
+          box-shadow:0 1px 4px rgba(0,0,0,.12)}}
+  .card .val{{font-size:28px;font-weight:700;color:#1a237e}}
+  .card .lbl{{font-size:12px;color:#666;margin-top:4px}}
+  .savings .val{{color:#2e7d32}}
+  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
+          overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}}
+  th{{background:#1a237e;color:#fff;padding:10px 12px;text-align:left;font-size:13px}}
+  td{{padding:8px 12px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top}}
+  tr:last-child td{{border-bottom:none}}
+  .footer{{margin-top:32px;font-size:11px;color:#999;text-align:center}}
+  details summary{{cursor:pointer;font-weight:600;color:#1a237e;padding:6px 0}}
+</style>
+</head>
+<body>
+<h1>PySpark Cost Optimizer — {script_name}</h1>
+<p style="color:#555">Generated: {date_str} &nbsp;|&nbsp; Region: {DEFAULT_REGION} &nbsp;|&nbsp; Model: {DEFAULT_MODEL_ID}</p>
+
+<div class="cards">
+  <div class="card"><div class="val">{s.get('anti_patterns_found',0)}</div><div class="lbl">Anti-patterns</div></div>
+  <div class="card"><div class="val">{s.get('critical_issues',0)}</div><div class="lbl">Critical issues</div></div>
+  <div class="card"><div class="val">${cur:.3f}</div><div class="lbl">Current cost/run</div></div>
+  <div class="card"><div class="val">${opt:.3f}</div><div class="lbl">Optimal cost/run</div></div>
+  <div class="card savings"><div class="val">{pct:.0f}%</div><div class="lbl">Potential savings</div></div>
+  <div class="card savings"><div class="val">${ann_sav:,.0f}</div><div class="lbl">Annual savings (est.)</div></div>
+</div>
+
+<h2>Recommendations</h2>
+<table>
+<thead><tr><th>Priority</th><th>Title</th><th>Description</th><th>Est. Savings</th></tr></thead>
+<tbody>{rec_rows}</tbody>
+</table>
+
+<h2>Multi-Cloud Cost Comparison</h2>
+<table>
+<thead><tr><th>Platform</th><th>Cost/Run</th><th>Annual Cost</th><th>Memory/Node</th><th>Notes</th></tr></thead>
+<tbody>{mp_rows}</tbody>
+</table>
+
+<h2>Line-by-Line Findings</h2>
+<details open>
+<summary>{len(finding_lines)} line(s) with issues</summary>
+<table style="margin-top:8px">
+<thead><tr><th>Line</th><th>Severity</th><th>Issue</th><th>Fix</th><th>Code</th></tr></thead>
+<tbody>{line_rows}</tbody>
+</table>
+</details>
+
+<div class="footer">strands_optimizer v{REPORT_SCHEMA_VERSION} — {DEFAULT_MODEL_ID}</div>
+</body>
+</html>"""
+
+
+def _render_batch_html(
+    batch_summary: Dict,
+    all_results: Dict[str, Any],
+    job_name: str,
+    date_str: str,
+) -> str:
+    # Top anti-patterns chart rows
+    ap_rows = ""
+    for ap in batch_summary.get("top_anti_patterns", [])[:10]:
+        bar_w = int(ap["count"] / max(batch_summary.get("top_anti_patterns", [{}])[0].get("count", 1), 1) * 200)
+        ap_rows += (
+            f"<tr><td>{ap['pattern']}</td><td>{ap['count']}</td>"
+            f"<td><div style='background:#1a237e;height:14px;width:{bar_w}px;border-radius:3px'></div></td></tr>\n"
+        )
+
+    # Per-script summary rows
+    script_rows = ""
+    for path, r in all_results.items():
+        s = r.get("summary", {})
+        name = Path(path).stem
+        ok   = "✔" if r.get("success") else "✖"
+        ap   = s.get("anti_patterns_found", 0)
+        crit = s.get("critical_issues", 0)
+        pct  = s.get("potential_savings_percent", 0)
+        sav  = s.get("potential_annual_savings", 0)
+        pcolor = "#d32f2f" if crit else ("#f57c00" if ap else "#2e7d32")
+        script_rows += (
+            f"<tr><td>{ok} {name}</td>"
+            f"<td style='text-align:center;color:{pcolor};font-weight:700'>{ap} ({crit} crit)</td>"
+            f"<td style='text-align:right'>{pct:.0f}%</td>"
+            f"<td style='text-align:right'>${sav:,.0f}</td></tr>\n"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PySpark Optimizer – Batch Summary – {job_name}</title>
+<style>
+  body{{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222}}
+  h1{{background:#1a237e;color:#fff;padding:16px 24px;border-radius:8px;margin:0 0 20px}}
+  h2{{color:#1a237e;border-bottom:2px solid #1a237e;padding-bottom:4px;margin-top:28px}}
+  .cards{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
+  .card{{background:#fff;border-radius:8px;padding:16px 24px;flex:1;min-width:140px;
+          box-shadow:0 1px 4px rgba(0,0,0,.12)}}
+  .card .val{{font-size:28px;font-weight:700;color:#1a237e}}
+  .card .lbl{{font-size:12px;color:#666;margin-top:4px}}
+  .savings .val{{color:#2e7d32}}
+  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
+          overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}}
+  th{{background:#1a237e;color:#fff;padding:10px 12px;text-align:left;font-size:13px}}
+  td{{padding:8px 12px;border-bottom:1px solid #eee;font-size:13px}}
+  tr:last-child td{{border-bottom:none}}
+  .footer{{margin-top:32px;font-size:11px;color:#999;text-align:center}}
+</style>
+</head>
+<body>
+<h1>PySpark Cost Optimizer — Batch Summary — {job_name}</h1>
+<p style="color:#555">Generated: {date_str} &nbsp;|&nbsp; Region: {DEFAULT_REGION}</p>
+
+<div class="cards">
+  <div class="card"><div class="val">{batch_summary.get('scripts_analyzed',0)}</div><div class="lbl">Scripts analysed</div></div>
+  <div class="card"><div class="val">{batch_summary.get('total_anti_patterns',0)}</div><div class="lbl">Total anti-patterns</div></div>
+  <div class="card savings"><div class="val">{batch_summary.get('avg_savings_percent',0):.0f}%</div><div class="lbl">Avg potential savings</div></div>
+  <div class="card savings"><div class="val">${batch_summary.get('total_potential_annual_savings_usd',0):,.0f}</div><div class="lbl">Total annual savings</div></div>
+</div>
+
+<h2>Per-Script Results</h2>
+<table>
+<thead><tr><th>Script</th><th>Anti-patterns</th><th>Savings %</th><th>Annual Savings</th></tr></thead>
+<tbody>{script_rows}</tbody>
+</table>
+
+<h2>Top Anti-patterns Across All Scripts</h2>
+<table>
+<thead><tr><th>Pattern</th><th>Count</th><th>Frequency</th></tr></thead>
+<tbody>{ap_rows}</tbody>
+</table>
+
+<div class="footer">strands_optimizer v{REPORT_SCHEMA_VERSION} — {DEFAULT_MODEL_ID}</div>
+</body>
+</html>"""
 # =============================================================================
 
 _INTERACTIVE_SYSTEM_PROMPT = """
@@ -960,6 +1214,14 @@ Examples:
 
     p.add_argument("--config", metavar="FILE",
                    help="JSON file with table definitions (omit for auto-detection)")
+    p.add_argument(
+        "--tables", nargs="+", metavar="DB.TABLE",
+        help=(
+            "One or more tables as db.table (e.g. sales_db.transactions customer_db.customers). "
+            "Resolved via Glue Catalog for accurate size/partition data. "
+            "Takes precedence over --config when both are given."
+        ),
+    )
     p.add_argument("--processing-mode", choices=["full", "delta"], default="full",
                    help="Processing mode: full (default) or delta/incremental")
     p.add_argument("--workers", type=int, default=None,
@@ -998,6 +1260,49 @@ def _load_config(config_path: str) -> List[Dict]:
     if isinstance(data, list):
         return data
     return data.get("tables", [data])
+
+
+def _resolve_table_args(table_args: List[str]) -> List[Dict]:
+    """
+    Convert CLI  --tables db.table [db.table ...]  to enriched table dicts.
+
+    Each entry is first looked up in the Glue Catalog for accurate size,
+    partition column, and file location; falls back to heuristics if Glue
+    is unavailable or the table is not found.
+    """
+    tables: List[Dict] = []
+    for entry in table_args:
+        entry = entry.strip()
+        if "." in entry:
+            db, tbl = entry.split(".", 1)
+        else:
+            db, tbl = "", entry
+
+        print(f"  Resolving table: {entry} ...", end=" ", flush=True)
+        info = _glue_table_info(db, tbl) if db else {}
+        if info:
+            source = info.get("source", "glue_catalog")
+            size_note = (
+                f"{info['size_gb']:.2f} GB" if "size_gb" in info
+                else f"{info.get('record_count', 0):,} rows (estimated)"
+            )
+            print(f"[{source}] {size_note}")
+        else:
+            info = _heuristic_table_info(tbl, db)
+            print(f"[heuristic] {info.get('record_count', 0):,} rows (name-based estimate)")
+
+        # Check for small-file problem on the resolved location
+        location = info.get("location", "")
+        if location.startswith("s3"):
+            sf = detect_small_file_problem(location=location, database=db, table_name=tbl)
+            if sf.get("has_problem"):
+                print(
+                    f"    ⚠ Small-file problem: {sf['file_count']} files, "
+                    f"avg {sf['avg_file_size_mb']:.1f} MB [{sf['severity'].upper()}]"
+                )
+
+        tables.append(info)
+    return tables
 
 
 def _run_one(
@@ -1099,9 +1404,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     job_name = args.job_name or default_job_name
 
-    # Load table config if provided
+    # Resolve input tables  (--tables takes priority over --config)
     config_tables: Optional[List[Dict]] = None
-    if args.config:
+    if args.tables:
+        print(f"\nResolving {len(args.tables)} table(s) from --tables arg:")
+        config_tables = _resolve_table_args(args.tables)
+        print(f"  → {len(config_tables)} table(s) resolved\n")
+    elif args.config:
         try:
             config_tables = _load_config(args.config)
             print(f"Loaded {len(config_tables)} table(s) from {args.config}")
@@ -1139,16 +1448,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         for ap in bsum.get("top_anti_patterns", [])[:5]:
             print(f"    {ap['count']:>3}×  {ap['pattern']}")
 
-    # Persist report
-    full_report = {
-        "schema_version":   REPORT_SCHEMA_VERSION,
-        "job_name":         job_name,
-        "generated_at":     datetime.now(tz=timezone.utc).isoformat(),
-        "batch_summary":    _build_batch_summary(all_results),
-        "individual_jobs":  all_results,
-        "small_file_flags": _state["small_file_flags"],
-    }
+    # ── Save per-script JSON + HTML, plus batch summary ──────────────────────
+    bsummary = _build_batch_summary(all_results)
+    written  = _save_per_script_reports(all_results, bsummary, args.output_dir, job_name)
 
+    print(f"\n  Output directory → {Path(args.output_dir) / job_name}")
+    for f in written:
+        ext  = Path(f).suffix
+        name = Path(f).name
+        icon = "📄" if ext == ".json" else "🌐"
+        print(f"    {icon}  {name}")
+
+    # ── Optionally also push to S3 ────────────────────────────────────────────
     if args.s3_bucket:
         s3r = save_results_to_s3(
             job_name  = job_name,
@@ -1156,14 +1467,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             s3_prefix = args.s3_prefix,
         )
         if s3r.get("success"):
-            print(f"\n  Report saved  → {s3r['s3_uri']}")
+            print(f"\n  S3 report      → {s3r['s3_uri']}")
         else:
             print(f"\n  [WARNING] S3 save failed: {s3r.get('error')}")
-            lp = _save_local(full_report, args.output_dir, job_name)
-            print(f"  Report saved locally → {lp}")
-    else:
-        lp = _save_local(full_report, args.output_dir, job_name)
-        print(f"\n  Report saved locally → {lp}")
 
     if args.interactive:
         interactive_mode()
