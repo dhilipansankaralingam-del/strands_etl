@@ -61,30 +61,39 @@ class AnalysisResult:
 class CostOptimizerAgent(ABC):
     """Base class for cost optimization agents."""
 
-    AGENT_NAME = "base_agent"
+    AGENT_NAME     = "base_agent"
+    DEFAULT_MODEL  = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+    DEFAULT_REGION = "us-west-2"
 
-    def __init__(self, use_llm: bool = False, model_id: str = None):
+    def __init__(self, use_llm: bool = False, model_id: str = None, region: str = None):
         """
         Initialize agent.
 
         Args:
-            use_llm: If True, use LLM for analysis. If False, use rule-based.
-            model_id: Bedrock model ID (e.g., 'us.anthropic.claude-sonnet-4-20250514-v1:0')
+            use_llm:  If True, use LLM for analysis. If False, use rule-based.
+            model_id: Bedrock model ID (default: Claude Sonnet 3.7, us-west-2).
+            region:   AWS region for Bedrock calls (default: us-west-2).
         """
-        self.use_llm = use_llm
-        self.model_id = model_id or "us.anthropic.claude-sonnet-4-20250514-v1:0"
-        self._agent = None
+        self.use_llm  = use_llm
+        self.model_id = model_id or self.DEFAULT_MODEL
+        self.region   = region   or self.DEFAULT_REGION
+        self._agent   = None
 
     def _get_llm_agent(self):
         """Lazy load LLM agent."""
         if self._agent is None and self.use_llm:
             try:
                 from strands import Agent
+                from strands.models import BedrockModel
                 from ..prompts.super_prompts import get_prompt
 
+                bedrock_model = BedrockModel(
+                    model_id       = self.model_id,
+                    region_name    = self.region,
+                )
                 self._agent = Agent(
-                    model=self.model_id,
-                    system_prompt=get_prompt(self.AGENT_NAME)
+                    model         = bedrock_model,
+                    system_prompt = get_prompt(self.AGENT_NAME)
                 )
             except ImportError:
                 raise ImportError(

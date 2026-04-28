@@ -84,6 +84,10 @@ SMALL_FILE_THRESHOLD_MB = 128   # Parquet/ORC files below this are "small"
 TINY_FILE_THRESHOLD_MB  = 10    # Extremely small - likely shuffle output
 MIN_SMALL_FILE_COUNT    = 10    # Need at least this many files to flag
 
+# Bedrock / AWS defaults
+DEFAULT_MODEL_ID = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+DEFAULT_REGION   = "us-west-2"
+
 PYSPARK_SIGNATURES = [
     r"from\s+pyspark",
     r"import\s+pyspark",
@@ -204,7 +208,7 @@ def _get_s3_object_sizes(bucket: str, prefix: str) -> List[int]:
     if not HAS_BOTO3:
         return []
     try:
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", region_name=DEFAULT_REGION)
         paginator = s3.get_paginator("list_objects_v2")
         sizes: List[int] = []
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -221,7 +225,7 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
     if not HAS_BOTO3 or not database or not table_name:
         return {}
     try:
-        glue = boto3.client("glue")
+        glue = boto3.client("glue", region_name=DEFAULT_REGION)
         tbl  = glue.get_table(DatabaseName=database, Name=table_name)["Table"]
         params = tbl.get("Parameters", {})
         sd     = tbl.get("StorageDescriptor", {})
@@ -581,7 +585,10 @@ def analyze_pyspark_script(
         detection = auto_detect_tables(script_path)
         tables = detection.get("tables", [])
 
-    orchestrator = CostOptimizationOrchestrator(use_llm=use_llm)
+    orchestrator = CostOptimizationOrchestrator(
+        use_llm  = use_llm,
+        model_id = DEFAULT_MODEL_ID,
+    )
     result = orchestrator.analyze_script(
         script_path     = script_path,
         source_tables   = tables,
@@ -697,7 +704,7 @@ def save_results_to_s3(
 
     key = f"{s3_prefix}/{job_name}/{date_str}/{ts_str}_report.json"
     try:
-        boto3.client("s3").put_object(
+        boto3.client("s3", region_name=DEFAULT_REGION).put_object(
             Bucket      = s3_bucket,
             Key         = key,
             Body        = json.dumps(payload, indent=2, default=str),
@@ -880,7 +887,17 @@ def interactive_mode() -> None:
             print(f"[echo] {user_input}")
         return
 
-    agent = Agent(system_prompt=_INTERACTIVE_SYSTEM_PROMPT, tools=_INTERACTIVE_TOOLS)
+    try:
+        from strands.models import BedrockModel
+        _model = BedrockModel(model_id=DEFAULT_MODEL_ID, region_name=DEFAULT_REGION)
+    except ImportError:
+        _model = DEFAULT_MODEL_ID  # older strands-agents: pass model_id string
+
+    agent = Agent(
+        model         = _model,
+        system_prompt = _INTERACTIVE_SYSTEM_PROMPT,
+        tools         = _INTERACTIVE_TOOLS,
+    )
 
     summary = get_analysis_summary()
     print("\n" + "=" * 65)
@@ -952,6 +969,10 @@ Examples:
                    help="Current Glue worker type (default G.2X)")
     p.add_argument("--use-llm", action="store_true",
                    help="Use Amazon Bedrock for deeper analysis (requires credentials)")
+    p.add_argument("--model-id", default=DEFAULT_MODEL_ID,
+                   help=f"Bedrock model ID (default: {DEFAULT_MODEL_ID})")
+    p.add_argument("--region", default=DEFAULT_REGION,
+                   help=f"AWS region for Bedrock/Glue/S3 calls (default: {DEFAULT_REGION})")
     p.add_argument("--s3-bucket", metavar="BUCKET",
                    help="S3 bucket to persist results")
     p.add_argument("--s3-prefix", default="optimizer-results",
@@ -1054,6 +1075,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         level  = logging.DEBUG if args.verbose else logging.WARNING,
         format = "%(levelname)s %(name)s %(message)s",
     )
+
+    # Apply region / model overrides at module level so all helpers pick them up
+    global DEFAULT_REGION, DEFAULT_MODEL_ID
+    DEFAULT_REGION   = args.region
+    DEFAULT_MODEL_ID = args.model_id
 
     # Collect scripts
     if args.script:
