@@ -5,6 +5,8 @@ from .size_analyzer import SizeAnalyzerAgent
 from .code_analyzer import CodeAnalyzerAgent
 from .resource_allocator import ResourceAllocatorAgent
 from .recommendations import RecommendationsAgent
+from .recommendation_applier import RecommendationApplierAgent
+from .job_generator import JobGeneratorAgent
 
 __all__ = [
     'CostOptimizerAgent',
@@ -14,5 +16,7 @@ __all__ = [
     'SizeAnalyzerAgent',
     'CodeAnalyzerAgent',
     'ResourceAllocatorAgent',
-    'RecommendationsAgent'
+    'RecommendationsAgent',
+    'RecommendationApplierAgent',
+    'JobGeneratorAgent',
 ]

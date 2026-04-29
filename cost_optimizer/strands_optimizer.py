@@ -757,6 +757,154 @@ def get_analysis_summary() -> Dict:
 
 
 # =============================================================================
+# Apply-recommendations tool
+# =============================================================================
+
+@strands_tool
+def apply_recommendations_to_script(
+    script_path: str,
+    output_path: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict:
+    """
+    Apply the optimization recommendations from the latest analysis to a script.
+
+    Fetches the cached analysis result for *script_path* (produced by
+    analyze_pyspark_script), runs RecommendationApplierAgent over the original
+    source, and writes the modified script to *output_path* (or
+    <original_stem>_optimized.py next to the original when omitted).
+
+    Args:
+        script_path: Path to the PySpark script previously analysed.
+        output_path: Where to write the fixed script (optional).
+        dry_run:     If True, return the changelog without writing any files.
+
+    Returns dict with:
+        success, fixes_applied, changelog, output_path, diff_summary
+    """
+    result = _state["scan_results"].get(script_path)
+    if not result:
+        return {
+            "error": (
+                f"No analysis found for '{script_path}'. "
+                "Run analyze_pyspark_script first."
+            )
+        }
+
+    try:
+        script_content = Path(script_path).read_text(errors="replace")
+    except OSError as exc:
+        return {"error": f"Cannot read '{script_path}': {exc}"}
+
+    try:
+        from .agents.recommendation_applier import RecommendationApplierAgent
+    except ImportError:
+        from cost_optimizer.agents.recommendation_applier import RecommendationApplierAgent
+
+    agent  = RecommendationApplierAgent(
+        use_llm  = False,
+        model_id = DEFAULT_MODEL_ID,
+        region   = DEFAULT_REGION,
+    )
+    tables = _state["detected_tables"].get(script_path, [])
+    out    = agent.apply(
+        script_path     = script_path,
+        script_content  = script_content,
+        analysis_result = result,
+        source_tables   = tables,
+    )
+
+    if not out["success"]:
+        return {"error": out.get("errors", ["unknown error"])[0]}
+
+    # Derive output path
+    if not output_path:
+        p           = Path(script_path)
+        output_path = str(p.parent / f"{p.stem}_optimized{p.suffix}")
+
+    if not dry_run:
+        Path(output_path).write_text(out["modified_script"])
+
+    # Build a compact diff summary
+    orig_lines = script_content.splitlines()
+    new_lines  = out["modified_script"].splitlines()
+    added      = sum(1 for l in new_lines if l not in set(orig_lines))
+    removed    = sum(1 for l in orig_lines if l not in set(new_lines))
+
+    return {
+        "success":       True,
+        "fixes_applied": out["fixes_applied"],
+        "output_path":   output_path if not dry_run else "(dry-run – not written)",
+        "dry_run":       dry_run,
+        "diff_summary":  {"lines_added": added, "lines_removed": removed},
+        "changelog":     out["changelog"],
+    }
+
+
+# =============================================================================
+# Job-generator tool
+# =============================================================================
+
+@strands_tool
+def generate_pyspark_job(
+    job_spec: Dict[str, Any],
+    reference_script_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+) -> Dict:
+    """
+    Generate a production-ready PySpark ETL job from a structured spec dict.
+
+    The spec describes source tables, joins, transformations, aggregations,
+    and the target table.  An optional *reference_script_path* can be provided
+    so the generator mirrors the coding style of an existing job.
+
+    Args:
+        job_spec:              Dict matching the JobGeneratorAgent spec format.
+        reference_script_path: Path to an existing PySpark script for style guidance.
+        output_path:           Where to write the generated script.  Defaults to
+                               generated_jobs/<job_name>.py.
+
+    Returns dict with:
+        success, generated_script, output_path, job_name, design_notes, errors
+    """
+    try:
+        from .agents.job_generator import JobGeneratorAgent
+    except ImportError:
+        from cost_optimizer.agents.job_generator import JobGeneratorAgent
+
+    reference = ""
+    if reference_script_path:
+        try:
+            reference = Path(reference_script_path).read_text(errors="replace")
+        except OSError as exc:
+            return {"error": f"Cannot read reference script '{reference_script_path}': {exc}"}
+
+    # Determine output path
+    job_name = job_spec.get("job_name", "generated_job")
+    if not output_path:
+        output_path = str(Path("generated_jobs") / f"{job_name}.py")
+
+    agent = JobGeneratorAgent(
+        use_llm  = HAS_STRANDS,   # use LLM when strands is available
+        model_id = DEFAULT_MODEL_ID,
+        region   = DEFAULT_REGION,
+    )
+    result = agent.generate(
+        job_spec         = job_spec,
+        reference_script = reference,
+        output_path      = output_path,
+    )
+
+    if result["success"]:
+        print(f"\n  Generated job: {output_path}")
+        lines = result["generated_script"].count("\n") + 1
+        print(f"  Script length: {lines} lines")
+        print(f"  Platform     : {result['platform']}")
+
+    return result
+
+
+# =============================================================================
 # Batch helpers
 # =============================================================================
 
@@ -1206,11 +1354,13 @@ Examples:
       --s3-bucket my-bucket --s3-prefix reports --interactive
 """,
     )
-    src = p.add_mutually_exclusive_group(required=True)
+    src = p.add_mutually_exclusive_group(required=False)
     src.add_argument("--scripts-dir", metavar="DIR",
                      help="Directory to scan for PySpark scripts")
     src.add_argument("--script", metavar="FILE",
                      help="Analyse a single .py script")
+    src.add_argument("--generate-job", metavar="SPEC_FILE",
+                     help="Generate a new PySpark job from a JSON spec file (skips analysis)")
 
     p.add_argument("--config", metavar="FILE",
                    help="JSON file with table definitions (omit for auto-detection)")
@@ -1249,6 +1399,25 @@ Examples:
                    help="Check detected S3 locations for small-file problems")
     p.add_argument("--show-lines", action="store_true",
                    help="Print annotated source with inline findings")
+
+    # ── Apply-fixes mode ─────────────────────────────────────────────────────
+    p.add_argument("--apply-fixes", action="store_true",
+                   help=(
+                       "After analysis, apply recommendations to each analysed script "
+                       "and write <script>_optimized.py alongside the original"
+                   ))
+    p.add_argument("--fixes-output-dir", default=None, metavar="DIR",
+                   help=(
+                       "Directory for optimized scripts from --apply-fixes "
+                       "(default: next to each original script)"
+                   ))
+
+    # ── Job-generation mode ──────────────────────────────────────────────────
+    p.add_argument("--reference-script", metavar="FILE",
+                   help="Reference PySpark script for style guidance when --generate-job is used")
+    p.add_argument("--output-script", metavar="FILE",
+                   help="Output path for the generated script (default: generated_jobs/<job_name>.py)")
+
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable debug logging")
     return p
@@ -1381,12 +1550,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         format = "%(levelname)s %(name)s %(message)s",
     )
 
+    # Validate: one of scripts-dir / script / generate-job must be provided
+    if not args.scripts_dir and not args.script and not args.generate_job:
+        parser.error("one of --scripts-dir, --script, or --generate-job is required")
+
     # Apply region / model overrides at module level so all helpers pick them up
     global DEFAULT_REGION, DEFAULT_MODEL_ID
     DEFAULT_REGION   = args.region
     DEFAULT_MODEL_ID = args.model_id
 
-    # Collect scripts
+    # ── Mode A: generate a new job from a spec file ───────────────────────────
+    if args.generate_job:
+        return _run_generate_mode(args)
+
+    # ── Mode B: analyse existing scripts ─────────────────────────────────────
     if args.script:
         scripts          = [args.script]
         default_job_name = Path(args.script).stem
@@ -1425,12 +1602,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     all_results: Dict[str, Any] = {}
     for script_path in scripts:
         result = _run_one(
-            script_path     = script_path,
-            tables          = config_tables or [],
-            processing_mode = args.processing_mode,
-            current_config  = current_config,
-            use_llm         = args.use_llm,
-            show_lines      = args.show_lines,
+            script_path       = script_path,
+            tables            = config_tables or [],
+            processing_mode   = args.processing_mode,
+            current_config    = current_config,
+            use_llm           = args.use_llm,
+            show_lines        = args.show_lines,
             check_small_files = args.small_files,
         )
         all_results[script_path] = result
@@ -1471,10 +1648,98 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             print(f"\n  [WARNING] S3 save failed: {s3r.get('error')}")
 
+    # ── Mode C: apply fixes to analysed scripts (post-analysis) ──────────────
+    if args.apply_fixes:
+        _run_apply_fixes(all_results, args)
+
     if args.interactive:
         interactive_mode()
 
     return 0
+
+
+def _run_generate_mode(args: argparse.Namespace) -> int:
+    """Handle --generate-job mode: read spec, call JobGeneratorAgent, write output."""
+    spec_path = args.generate_job
+    try:
+        with open(spec_path) as fh:
+            job_spec = json.load(fh)
+    except Exception as exc:
+        print(f"[ERROR] Cannot load job spec '{spec_path}': {exc}")
+        return 1
+
+    job_name   = job_spec.get("job_name", Path(spec_path).stem)
+    out_script = args.output_script or f"generated_jobs/{job_name}.py"
+
+    reference = ""
+    if args.reference_script:
+        try:
+            reference = Path(args.reference_script).read_text(errors="replace")
+            print(f"  Reference script: {args.reference_script}")
+        except OSError as exc:
+            print(f"[WARNING] Cannot read reference script: {exc}")
+
+    print(f"\n{'─'*65}")
+    print(f"  Generating PySpark job: {job_name}")
+    print(f"  Platform              : {job_spec.get('platform', 'glue')}")
+    print(f"  Processing mode       : {job_spec.get('processing_mode', 'full')}")
+    print(f"  Source tables         : {len(job_spec.get('source_tables', []))}")
+    print(f"{'─'*65}")
+
+    result = generate_pyspark_job(
+        job_spec              = job_spec,
+        reference_script_path = args.reference_script,
+        output_path           = out_script,
+    )
+
+    if not result.get("success"):
+        print(f"[ERROR] {result.get('errors', ['Generation failed'])[0]}")
+        return 1
+
+    lines = result.get("generated_script", "").count("\n") + 1
+    print(f"\n  Generated script  → {out_script}  ({lines} lines)")
+    for note in result.get("design_notes", []):
+        print(f"  Note: {note}")
+
+    return 0
+
+
+def _run_apply_fixes(all_results: Dict[str, Any], args: argparse.Namespace) -> None:
+    """Apply recommendations to each successfully analysed script."""
+    print(f"\n{'─'*65}")
+    print("  APPLYING FIXES")
+    print(f"{'─'*65}")
+
+    for script_path, result in all_results.items():
+        if not result.get("success"):
+            print(f"  Skipping {script_path} (analysis failed)")
+            continue
+
+        if args.fixes_output_dir:
+            out = str(
+                Path(args.fixes_output_dir)
+                / f"{Path(script_path).stem}_optimized{Path(script_path).suffix}"
+            )
+        else:
+            p   = Path(script_path)
+            out = str(p.parent / f"{p.stem}_optimized{p.suffix}")
+
+        fix_result = apply_recommendations_to_script(
+            script_path = script_path,
+            output_path = out,
+            dry_run     = False,
+        )
+        if fix_result.get("success"):
+            n = fix_result.get("fixes_applied", 0)
+            print(f"  {Path(script_path).name:<40}  {n:>3} fix(es)  → {out}")
+            for entry in fix_result.get("changelog", []):
+                fix_type = entry.get("fix", "")
+                desc     = entry.get("description", "")[:80]
+                line_no  = entry.get("line", "")
+                loc      = f" (L{line_no})" if line_no else ""
+                print(f"      • [{fix_type}]{loc} {desc}")
+        else:
+            print(f"  [ERROR] {Path(script_path).name}: {fix_result.get('error')}")
 
 
 if __name__ == "__main__":
