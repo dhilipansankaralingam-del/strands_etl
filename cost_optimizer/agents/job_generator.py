@@ -1,60 +1,69 @@
 """
 Job Generator Agent
 =====================
-Generates production-ready PySpark ETL jobs from a structured JSON spec
-and an optional reference script (for style / pattern guidance).
+Generates production-ready PySpark ETL jobs from a structured spec that combines
+a JSON field definition with a natural-language prompt, validation rules,
+optimization requirements, and volume assessment.
 
-Job Spec Format (JSON)
-----------------------
+Enhanced Job Spec Format (JSON)
+--------------------------------
 {
+  # ── Identity ──────────────────────────────────────────────────────────────
   "job_name":        "customer_monthly_revenue",
   "description":     "Join orders with products, compute monthly revenue by category",
   "platform":        "glue",           // glue | emr | spark | databricks
   "processing_mode": "delta",          // full | delta
-  "source_tables": [
-    {
-      "database": "sales_db",
-      "table":    "orders",
-      "alias":    "orders",
-      "filters":  ["order_date >= '2024-01-01'", "status = 'completed'"],
-      "columns":  ["order_id", "customer_id", "product_id", "amount", "order_date"],
-      "broadcast": false
-    },
-    {
-      "database": "product_db",
-      "table":    "products",
-      "alias":    "products",
-      "broadcast": true,
-      "columns":  ["product_id", "category", "name"]
-    }
+
+  # ── Natural-language prompt (dictates job logic step-by-step) ─────────────
+  "job_prompt": (
+    "1. Read orders (last 90 days, status=completed) and products tables. "
+    "2. Broadcast-join products onto orders on product_id. "
+    "3. Derive a month column by truncating order_date to month. "
+    "4. Aggregate revenue and order count per (month, category). "
+    "5. Deduplicate on (month, category) keeping latest updated_at. "
+    "6. Write to reports_db.monthly_revenue overwriting current month partition."
+  ),
+
+  # ── Validation rules (become assert statements in the generated job) ───────
+  "validation_rules": [
+    "output row count must be > 0",
+    "no null values in month or category columns",
+    "total_revenue must be >= 0 for all rows",
+    "output must not exceed 10× the previous run row count (anomaly guard)"
   ],
-  "joins": [
-    {"left": "orders", "right": "products", "on": "product_id", "type": "left"}
+
+  # ── Optimization requirements ──────────────────────────────────────────────
+  "optimization_requirements": [
+    "enable AQE with skewJoin threshold 64MB",
+    "broadcast products table (< 5M rows)",
+    "use dynamic partition overwrite to avoid full-table rewrites",
+    "cache aggregated result before the dedup window function"
   ],
-  "transformations": [
-    "derive month as date_trunc('month', order_date)",
-    "rename amount to revenue"
-  ],
-  "aggregations": {
-    "group_by": ["month", "category"],
-    "metrics":  [
-      "sum(revenue) as total_revenue",
-      "count(order_id) as order_count",
-      "avg(revenue) as avg_order_value"
-    ]
+
+  # ── Volume assessment (drives Spark config sizing) ─────────────────────────
+  "volume_assessment": {
+    "input_size_gb":          500,
+    "expected_output_rows":   1000000,
+    "data_skew_suspected":    true,
+    "daily_growth_gb":        5,
+    "join_strategy":          "broadcast",   // broadcast | sort_merge | shuffle_hash
+    "target_file_size_mb":    128,
+    "recommended_workers":    10,
+    "worker_type":            "G.2X"
   },
-  "target_table": {
-    "database":    "reports_db",
-    "table":       "monthly_revenue_by_category",
-    "partition_by": "month",
-    "write_mode":  "overwrite",
-    "format":      "parquet"
-  },
-  "spark_configs": {}   // optional overrides on top of defaults
+
+  # ── Structured fields (processed by rule-based template) ──────────────────
+  "source_tables": [...],
+  "joins":         [...],
+  "transformations": [...],
+  "aggregations":  {...},
+  "target_table":  {...},
+  "spark_configs": {}
 }
 
-Rule-based mode:  generates a complete PySpark/Glue template from the spec fields.
-LLM mode:         sends spec + reference script to Claude for a production-grade job.
+Rule-based mode:  generates a complete PySpark/Glue template from all spec fields.
+LLM mode:         sends the full spec (including job_prompt + validation_rules) to
+                  Claude for a production-grade, domain-aware job.
 """
 from __future__ import annotations
 
@@ -158,7 +167,7 @@ class JobGeneratorAgent(CostOptimizerAgent):
         self, input_data: AnalysisInput, context: Dict
     ) -> AnalysisResult:
         job_spec  = context.get("job_spec", {})
-        reference = input_data.script_content  # optional style reference
+        reference = input_data.script_content
 
         script = self._render_template(job_spec, reference)
 
@@ -179,38 +188,107 @@ class JobGeneratorAgent(CostOptimizerAgent):
         reference = input_data.script_content
         platform  = job_spec.get("platform", "glue")
 
+        # ── Natural-language prompt section ──────────────────────────────────
+        job_prompt = (job_spec.get("job_prompt") or "").strip()
+        prompt_section = ""
+        if job_prompt:
+            prompt_section = f"""
+## Job Creation Instructions (follow these steps exactly)
+{job_prompt}
+"""
+
+        # ── Validation rules section ──────────────────────────────────────────
+        validation_rules = job_spec.get("validation_rules", [])
+        validation_section = ""
+        if validation_rules:
+            rules_block = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(validation_rules))
+            validation_section = f"""
+## Validation Rules (generate assert/check statements for each)
+{rules_block}
+
+Each rule must appear as an explicit assert in the generated script, for example:
+  assert result_df.filter("total_revenue < 0").count() == 0, "total_revenue must be >= 0"
+  assert result_df.count() > 0, "output row count must be > 0"
+"""
+
+        # ── Optimization requirements section ─────────────────────────────────
+        opt_reqs = job_spec.get("optimization_requirements", [])
+        opt_section = ""
+        if opt_reqs:
+            opt_block = "\n".join(f"  • {r}" for r in opt_reqs)
+            opt_section = f"""
+## Optimization Requirements (implement ALL of these)
+{opt_block}
+"""
+
+        # ── Volume assessment section ─────────────────────────────────────────
+        vol = job_spec.get("volume_assessment", {})
+        vol_section = ""
+        if vol:
+            input_gb     = vol.get("input_size_gb", 0)
+            output_rows  = vol.get("expected_output_rows", 0)
+            skew         = vol.get("data_skew_suspected", False)
+            daily_gb     = vol.get("daily_growth_gb", 0)
+            join_strat   = vol.get("join_strategy", "sort_merge")
+            file_mb      = vol.get("target_file_size_mb", 128)
+            workers      = vol.get("recommended_workers", 10)
+            worker_type  = vol.get("worker_type", "G.2X")
+
+            vol_section = f"""
+## Volume Assessment (size the job accordingly)
+| Parameter                | Value                   |
+|--------------------------|-------------------------|
+| Input size               | {input_gb} GB           |
+| Expected output rows     | {output_rows:,}         |
+| Data skew suspected      | {skew}                  |
+| Daily growth             | {daily_gb} GB/day       |
+| Join strategy            | {join_strat}            |
+| Target output file size  | {file_mb} MB            |
+| Recommended workers      | {workers} × {worker_type}|
+
+Sizing guidance to apply:
+- Set spark.sql.shuffle.partitions = {max(200, input_gb * 4):.0f} (4 partitions/GB)
+- Set spark.sql.files.maxPartitionBytes = {file_mb * 1024 * 1024} ({file_mb} MB)
+- Use {workers} workers of type {worker_type}
+{"- Enable skewJoin AQE with factor=3, threshold=64MB" if skew else ""}
+{"- Apply broadcast hint for small lookup tables" if join_strat == "broadcast" else ""}
+"""
+
         ref_section = ""
         if reference.strip():
             ref_section = f"""
 ## Reference Script (follow this coding style and conventions)
 ```python
-{reference}
+{reference[:3000]}
 ```
 """
         return f"""
 You are a Senior PySpark Data Engineer. Generate a complete, production-ready PySpark ETL job
-based on the specification below.  The job must:
+based on the specification below.  The job must run on **{_PLATFORM_NOTES.get(platform, platform)}**.
 
-1. Run on **{_PLATFORM_NOTES.get(platform, platform)}**
-2. Include ALL recommended Spark configs (AQE, KryoSerializer, shuffle tuning)
-3. Apply broadcast() hints for tables marked broadcast=true or with < 500k rows
-4. Use .cache() strategically for DataFrames used in multiple places
-5. Include proper error handling and logging
-6. Follow PySpark best practices: predicate pushdown, column pruning, partition pruning
-7. Use `date_trunc`, `col`, `lit`, `when` from pyspark.sql.functions — never Python UDFs
-8. Add .coalesce(N) before write to control output file count
-9. Include inline comments explaining non-obvious logic
-
-## Job Specification
+## Job Specification (structured fields)
 ```json
-{json.dumps(job_spec, indent=2)}
+{json.dumps({k: v for k, v in job_spec.items()
+             if k not in ("job_prompt","validation_rules","optimization_requirements","volume_assessment")},
+            indent=2)}
 ```
-{ref_section}
+{prompt_section}{validation_section}{opt_section}{vol_section}{ref_section}
+## Mandatory code requirements
+1. Include ALL recommended Spark configs: AQE, KryoSerializer, skewJoin, shuffle tuning.
+2. Apply broadcast() hints for tables marked broadcast=true or volume_assessment says so.
+3. Use .cache() before DataFrames used by multiple actions.
+4. Add .coalesce(N) before every write (target {vol.get("target_file_size_mb", 128)} MB files).
+5. Follow PySpark best practices: predicate pushdown, column pruning, partition pruning.
+6. Use `date_trunc`, `col`, `lit`, `when`, `window` from pyspark.sql.functions — no Python UDFs.
+7. Add error handling and structured logging.
+8. Implement every validation_rule as an explicit assert statement.
+9. Set spark.sql.shuffle.partitions to the value derived from volume_assessment.
+
 ## Required Output Format
 Return ONLY a JSON object (no prose outside JSON):
 {{
   "generated_script": "<complete Python source code as a single string>",
-  "design_notes": ["<note 1>", "<note 2>"]
+  "design_notes": ["<note about key design decisions>"]
 }}
 
 The generated_script must be a complete, runnable .py file.
@@ -245,22 +323,47 @@ The generated_script must be a complete, runnable .py file.
     # ─── Template renderer ─────────────────────────────────────────────────────
 
     def _render_template(self, spec: Dict[str, Any], reference: str) -> str:
-        platform  = spec.get("platform", "glue").lower()
-        job_name  = spec.get("job_name", "generated_job")
-        desc      = spec.get("description", "Generated PySpark ETL job")
-        proc_mode = spec.get("processing_mode", "full")
-        tables    = spec.get("source_tables", [])
-        joins     = spec.get("joins", [])
-        xforms    = spec.get("transformations", [])
-        agg_spec  = spec.get("aggregations", {})
-        target    = spec.get("target_table", {})
-        extra_cfg = spec.get("spark_configs", {})
+        platform   = spec.get("platform", "glue").lower()
+        job_name   = spec.get("job_name", "generated_job")
+        desc       = spec.get("description", "Generated PySpark ETL job")
+        proc_mode  = spec.get("processing_mode", "full")
+        tables     = spec.get("source_tables", [])
+        joins      = spec.get("joins", [])
+        xforms     = spec.get("transformations", [])
+        agg_spec   = spec.get("aggregations", {})
+        target     = spec.get("target_table", {})
+        extra_cfg  = spec.get("spark_configs", {})
+        job_prompt = (spec.get("job_prompt") or "").strip()
+        val_rules  = spec.get("validation_rules", [])
+        opt_reqs   = spec.get("optimization_requirements", [])
+        vol        = spec.get("volume_assessment", {})
 
-        today     = date.today().isoformat()
+        # ── Volume-driven Spark config sizing ─────────────────────────────────
+        input_gb   = float(vol.get("input_size_gb", 0))
+        file_mb    = int(vol.get("target_file_size_mb", 128))
+        skew       = bool(vol.get("data_skew_suspected", False))
+        workers    = int(vol.get("recommended_workers", 10))
+        wtype      = vol.get("worker_type", "G.2X")
+        join_strat = vol.get("join_strategy", "sort_merge")
+
+        if input_gb > 0:
+            shuffle_parts = max(200, int(input_gb * 4))
+            extra_cfg.setdefault(
+                "spark.sql.shuffle.partitions", str(shuffle_parts)
+            )
+            extra_cfg.setdefault(
+                "spark.sql.files.maxPartitionBytes", str(file_mb * 1024 * 1024)
+            )
+        if skew:
+            extra_cfg.setdefault("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "3")
+            extra_cfg.setdefault(
+                "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "67108864"
+            )
+
+        today = date.today().isoformat()
 
         # ── Header ────────────────────────────────────────────────────────────
-        lines: List[str] = [
-            '"""',
+        header_lines = [
             f'{job_name}.py',
             f'{"=" * (len(job_name) + 3)}',
             f'{desc}',
@@ -268,9 +371,17 @@ The generated_script must be a complete, runnable .py file.
             f'Platform       : {_PLATFORM_NOTES.get(platform, platform)}',
             f'Processing mode: {proc_mode}',
             f'Generated by   : cost_optimizer.JobGeneratorAgent  ({today})',
-            f'"""',
-            "",
         ]
+        if input_gb > 0:
+            header_lines.append(f'Volume         : {input_gb} GB input, {workers}×{wtype} workers')
+        if job_prompt:
+            header_lines += ["", "Job Logic:", *[f"  {ln}" for ln in job_prompt.splitlines()[:10]]]
+        if val_rules:
+            header_lines += ["", "Validation Rules:"] + [f"  • {r}" for r in val_rules]
+        if opt_reqs:
+            header_lines += ["", "Optimization Requirements:"] + [f"  • {r}" for r in opt_reqs]
+
+        lines: List[str] = ['"""'] + header_lines + ['"""', ""]
 
         # ── Imports ───────────────────────────────────────────────────────────
         lines += [
@@ -317,6 +428,16 @@ The generated_script must be a complete, runnable .py file.
         if agg_spec:
             lines += ["", "# ── Aggregations " + "─" * 55]
             lines += self._aggregation_block(agg_spec, joins, tables)
+
+        # ── Validation assertions ─────────────────────────────────────────────
+        if val_rules:
+            base_var = "result_df" if (joins or agg_spec) else (
+                (tables[0].get("alias", tables[0].get("table", "source")) + "_df")
+                if tables else "df"
+            )
+            lines += ["", "    # ── Validation assertions ─────────────────────────────────"]
+            for rule in val_rules:
+                lines += self._validation_rule_to_assert(rule, base_var)
 
         # ── Write output ──────────────────────────────────────────────────────
         if target:
@@ -535,6 +656,42 @@ The generated_script must be a complete, runnable .py file.
             "    )",
             f'    log.info("After aggregation: %d rows", {base_var}.count())',
         ]
+        return lines
+
+    def _validation_rule_to_assert(self, rule: str, base_var: str) -> List[str]:
+        """Convert a natural-language validation rule into Python assert statements."""
+        r = rule.lower().strip()
+        lines = [f'    # Validation: {rule}']
+
+        if "row count" in r and "> 0" in r:
+            lines.append(
+                f'    assert {base_var}.count() > 0, "Validation failed: {rule}"'
+            )
+        elif "null" in r and "no null" in r:
+            # Try to extract column name from "no null values in X column"
+            m = re.search(r'in\s+(\w+)\s+col', r)
+            col = m.group(1) if m else "id"
+            lines.append(
+                f'    assert {base_var}.filter(F.col("{col}").isNull()).count() == 0, '
+                f'"Validation failed: {rule}"'
+            )
+        elif ">= 0" in r or "must be positive" in r or "non-negative" in r:
+            m = re.search(r'(\w+_\w+|\w+)\s+must', r)
+            col = m.group(1) if m else "value"
+            lines.append(
+                f'    assert {base_var}.filter(F.col("{col}") < 0).count() == 0, '
+                f'"Validation failed: {rule}"'
+            )
+        elif "not exceed" in r or "anomaly" in r:
+            lines += [
+                f'    _row_count = {base_var}.count()',
+                f'    assert _row_count < 10_000_000, '
+                f'"Validation failed: {rule} (got {{_row_count}} rows)"',
+            ]
+        else:
+            lines.append(
+                f'    # TODO: implement assertion for: {rule}'
+            )
         return lines
 
     def _write_block(self, target: Dict, platform: str) -> List[str]:

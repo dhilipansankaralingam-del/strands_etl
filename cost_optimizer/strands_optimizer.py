@@ -172,6 +172,43 @@ PLATFORM_CATALOG: Dict[str, Dict] = {
         "node_cost_usd": 0.066, "memory_gb": 4, "vcpu": 0.5,
         "notes": "$0.066/DCU-hour; auto-scales; no cluster mgmt",
     },
+    # ── Alternate / serverless query engines ─────────────────────────────────
+    "aws_athena": {
+        "label": "AWS Athena (Trino/Presto)", "cloud": "aws",
+        "pricing_model": "per_tb_scanned",
+        "cost_per_tb_usd": 5.0,
+        "memory_gb": 0, "vcpu": 0,   # serverless – no fixed node size
+        "notes": (
+            "$5/TB scanned; serverless Trino/Presto engine; ANSI SQL only; "
+            "no cluster mgmt; partition pruning & columnar formats reduce cost; "
+            "NOT suitable for multi-step PySpark transformations"
+        ),
+    },
+    "aws_lambda_etl": {
+        "label": "AWS Lambda (simple ETL)", "cloud": "aws",
+        "pricing_model": "per_gb_second",
+        "cost_per_gb_second": 0.0000166667,
+        "max_memory_gb": 10,
+        "max_duration_s": 900,
+        "memory_gb": 10, "vcpu": 6,
+        "notes": (
+            "$0.0000166667/GB-s; max 10 GB RAM / 15 min; "
+            "no Spark runtime; suitable for lightweight transforms < 10 GB data; "
+            "use Step Functions to chain; NOT suitable for heavy Spark jobs"
+        ),
+    },
+    "aws_emr_serverless": {
+        "label": "AWS EMR Serverless (Spark)", "cloud": "aws",
+        "pricing_model": "per_vcpu_memory_hour",
+        "cost_per_vcpu_hour": 0.052,
+        "cost_per_gb_hour": 0.0057,
+        "memory_gb": 0, "vcpu": 0,   # auto-scales
+        "notes": (
+            "$0.052/vCPU-h + $0.0057/GB-h; native PySpark; auto-scales; "
+            "no cluster to manage; pre-initialized capacity available; "
+            "billed per second; good replacement for Glue when cost is key"
+        ),
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,23 +356,80 @@ def _annotate_lines(script_content: str, anti_patterns: List[Dict]) -> List[Dict
 def _compute_platform_costs(
     workers: int, duration_hours: float, size_gb: float
 ) -> List[Dict]:
-    """Cost across every platform in PLATFORM_CATALOG, sorted ascending."""
+    """
+    Cost across every platform in PLATFORM_CATALOG, sorted ascending.
+
+    Supports three pricing models:
+      - node_cost_usd       (traditional cluster: workers × node_cost × hours)
+      - per_tb_scanned      (Athena: $5/TB)
+      - per_gb_second       (Lambda: GB-s)
+      - per_vcpu_memory_hour(EMR Serverless: vCPU-h + GB-h)
+    """
     out = []
     for key, p in PLATFORM_CATALOG.items():
-        cost = workers * p["node_cost_usd"] * duration_hours
-        # Add 1 master/driver for cluster-based platforms (skip serverless)
-        if "serverless" not in key and p["cloud"] in ("aws", "gcp", "azure"):
-            cost += p["node_cost_usd"] * duration_hours
+        model = p.get("pricing_model", "node_cost_usd")
+
+        if model == "per_tb_scanned":
+            # Athena: cost is purely based on data scanned
+            # Assume columnar format (Parquet) reduces scanned bytes by ~80%
+            effective_tb = max(size_gb, 0.1) / 1024 * 0.2  # columnar compression
+            cost = effective_tb * p["cost_per_tb_usd"]
+            pricing_note = f"${p['cost_per_tb_usd']}/TB scanned (assumes Parquet/ORC, ~80% reduction)"
+
+        elif model == "per_gb_second":
+            # Lambda: cost = memory_gb × duration_s × rate
+            mem_gb   = min(size_gb * 0.5, p.get("max_memory_gb", 10))  # heuristic
+            dur_s    = duration_hours * 3600
+            # Lambda has 15-min hard limit; large jobs must be chained
+            if dur_s > p.get("max_duration_s", 900):
+                invocations = max(1, int(dur_s / p["max_duration_s"]))
+                dur_s       = p["max_duration_s"]
+                cost = mem_gb * dur_s * p["cost_per_gb_second"] * invocations
+                pricing_note = (
+                    f"${p['cost_per_gb_second']}/GB-s × {mem_gb:.0f} GB × "
+                    f"{dur_s}s × {invocations} invocations (chained)"
+                )
+            else:
+                cost = mem_gb * dur_s * p["cost_per_gb_second"]
+                pricing_note = (
+                    f"${p['cost_per_gb_second']}/GB-s × {mem_gb:.0f} GB × {dur_s:.0f}s"
+                )
+
+        elif model == "per_vcpu_memory_hour":
+            # EMR Serverless: billed per vCPU-hour + GB-hour
+            # Heuristic: assume 4 vCPU + 16 GB per executor, scaled to workers
+            vcpus_used  = workers * 4
+            mem_gb_used = workers * 16
+            cost = (
+                vcpus_used  * p["cost_per_vcpu_hour"]  * duration_hours
+                + mem_gb_used * p["cost_per_gb_hour"]   * duration_hours
+            )
+            pricing_note = (
+                f"${p['cost_per_vcpu_hour']}/vCPU-h × {vcpus_used} vCPUs + "
+                f"${p['cost_per_gb_hour']}/GB-h × {mem_gb_used} GB"
+            )
+
+        else:
+            # Traditional node_cost_usd model
+            cost = workers * p["node_cost_usd"] * duration_hours
+            if "serverless" not in key and p["cloud"] in ("aws", "gcp", "azure"):
+                cost += p["node_cost_usd"] * duration_hours  # driver/master
+            pricing_note = (
+                f"${p['node_cost_usd']}/node-h × {workers} workers × {duration_hours:.2f}h"
+            )
+
         out.append({
             "platform_id":        key,
             "label":              p["label"],
             "cloud":              p["cloud"],
-            "cost_per_run":       round(cost, 3),
+            "pricing_model":      model,
+            "cost_per_run":       round(cost, 4),
             "annual_cost":        round(cost * 365, 0),
-            "cost_per_gb":        round(cost / max(size_gb, 0.1), 4),
-            "memory_per_node_gb": p["memory_gb"],
-            "vcpu_per_node":      p["vcpu"],
+            "cost_per_gb":        round(cost / max(size_gb, 0.1), 5),
+            "memory_per_node_gb": p.get("memory_gb", 0),
+            "vcpu_per_node":      p.get("vcpu", 0),
             "notes":              p["notes"],
+            "pricing_note":       pricing_note,
         })
     out.sort(key=lambda x: x["cost_per_run"])
     return out
@@ -1225,6 +1319,240 @@ def create_glue_job(
 
 
 # =============================================================================
+# Column Lineage tool
+# =============================================================================
+
+@strands_tool
+def analyze_column_lineage(
+    script_path: str,
+    output_dir: Optional[str] = None,
+) -> Dict:
+    """
+    Build a column-level data lineage graph for a PySpark script.
+
+    Tracks: withColumn, withColumnRenamed, select/alias, groupBy/agg,
+            join keys, drop, source tables, and write sinks.
+
+    Args:
+        script_path: Path to the PySpark script.
+        output_dir:  Optional directory to write lineage files
+                     (lineage.json, lineage.mmd, lineage.dot).
+
+    Returns dict with:
+        success, edges (list), sources, sinks, mermaid (str), dot (str)
+    """
+    try:
+        from .agents.column_lineage import ColumnLineageAgent
+    except ImportError:
+        from cost_optimizer.agents.column_lineage import ColumnLineageAgent
+
+    agent  = ColumnLineageAgent()
+    result = agent.analyze(script_path)
+
+    if result.get("success") and output_dir:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        stem = Path(script_path).stem
+        (out / f"{stem}_lineage.json").write_text(
+            json.dumps({"edges": result["edges"], "sources": result["sources"],
+                        "sinks": result["sinks"]}, indent=2)
+        )
+        if result.get("mermaid"):
+            (out / f"{stem}_lineage.mmd").write_text(result["mermaid"])
+        if result.get("dot"):
+            (out / f"{stem}_lineage.dot").write_text(result["dot"])
+        print(f"  Lineage files written to {output_dir}/")
+
+    print(f"  Edges   : {len(result.get('edges', []))}")
+    print(f"  Sources : {result.get('sources', [])}")
+    print(f"  Sinks   : {result.get('sinks', [])}")
+
+    return result
+
+
+# =============================================================================
+# Delta / Iceberg detector tool
+# =============================================================================
+
+@strands_tool
+def detect_delta_iceberg(
+    script_path: str,
+) -> Dict:
+    """
+    Detect Delta Lake or Apache Iceberg usage in a PySpark script and emit
+    tailored maintenance + optimization recommendations.
+
+    Covers: OPTIMIZE, ZORDER, VACUUM, auto-optimize, Change Data Feed (Delta);
+            rewrite_data_files, expire_snapshots, remove_orphan_files,
+            hidden partitioning, partition evolution (Iceberg).
+
+    Args:
+        script_path: Path to the PySpark script to inspect.
+
+    Returns dict with:
+        success, format_detected ("delta"|"iceberg"|"both"|"none"),
+        recommendations (list), maintenance_commands (list), code_snippets (dict)
+    """
+    try:
+        from .agents.delta_iceberg_detector import DeltaIcebergDetectorAgent
+    except ImportError:
+        from cost_optimizer.agents.delta_iceberg_detector import DeltaIcebergDetectorAgent
+
+    agent  = DeltaIcebergDetectorAgent()
+    result = agent.detect(script_path)
+
+    fmt = result.get("format_detected", "none")
+    print(f"\n  Format detected  : {fmt.upper()}")
+    if fmt != "none":
+        print(f"  Recommendations  : {len(result.get('recommendations', []))}")
+        for rec in result.get("recommendations", [])[:3]:
+            print(f"    [{rec.get('priority','P?')}] {rec.get('title','')}")
+        print(f"  Maintenance cmds : {len(result.get('maintenance_commands', []))}")
+    else:
+        print("  No Delta or Iceberg patterns detected.")
+
+    return result
+
+
+# =============================================================================
+# Spark event-log parser tool
+# =============================================================================
+
+@strands_tool
+def parse_spark_event_log(
+    log_path: str,
+    region: str = DEFAULT_REGION,
+) -> Dict:
+    """
+    Parse a Spark event log (JSONL) from a local path or S3 URI.
+
+    Extracts: stage durations, shuffle read/write GB, per-stage task skew
+    (max/median ratio), GC overhead %, peak executor memory MB, and identifies
+    bottleneck stages.
+
+    Args:
+        log_path: Local filesystem path or s3://bucket/key URI.
+        region:   AWS region for S3 access (default: us-west-2).
+
+    Returns dict with:
+        success, app_name, app_duration_ms, stage_durations, shuffle_read_gb,
+        shuffle_write_gb, task_skew, gc_overhead_pct, peak_executor_mb,
+        bottleneck_stages, findings, recommendations
+    """
+    try:
+        from .agents.spark_event_log_parser import SparkEventLogParser
+    except ImportError:
+        from cost_optimizer.agents.spark_event_log_parser import SparkEventLogParser
+
+    parser = SparkEventLogParser()
+    result = parser.parse(log_path, region=region)
+
+    if result.get("success"):
+        dur_min = result.get("app_duration_ms", 0) / 60000
+        print(f"\n  App              : {result.get('app_name', '')}")
+        print(f"  Duration         : {dur_min:.1f} min")
+        print(f"  Stages           : {result.get('stage_count', 0)}")
+        print(f"  Shuffle write    : {result.get('shuffle_write_gb', 0):.2f} GB")
+        print(f"  GC overhead      : {result.get('gc_overhead_pct', 0):.1f}%")
+        print(f"  Peak executor mem: {result.get('peak_executor_mb', 0):.0f} MB")
+        bn = result.get("bottleneck_stages", [])
+        if bn:
+            print(f"  Bottleneck stages:")
+            for b in bn[:3]:
+                print(f"    Stage {b['stage_id']} ({b.get('name','')[:40]}): "
+                      f"skew={b['skew_ratio']:.1f}x  issues={b['issues']}")
+        for finding in result.get("findings", [])[:3]:
+            print(f"  ⚠ {finding}")
+    else:
+        print(f"  [ERROR] {result.get('errors', ['Unknown error'])}")
+
+    return result
+
+
+# =============================================================================
+# Deploy tests to Glue tool
+# =============================================================================
+
+@strands_tool
+def deploy_tests_to_glue(
+    script_path: str,
+    glue_role_arn: str,
+    s3_bucket: str,
+    s3_prefix: str = "glue-test-scripts",
+    glue_job_name: Optional[str] = None,
+    glue_version: str = "4.0",
+    region: str = DEFAULT_REGION,
+    start_run: bool = False,
+    processing_mode: str = "full",
+    dry_run: bool = False,
+) -> Dict:
+    """
+    Generate a Glue-native validation job for a PySpark script, upload it to S3,
+    create/update the Glue job, and optionally trigger a run.
+
+    Unlike the local pytest runner, this deploys checks directly to Glue so they
+    run in the same environment as the production job.
+
+    Args:
+        script_path:    Local path to the script to validate.
+        glue_role_arn:  IAM role ARN for the test Glue job.
+        s3_bucket:      S3 bucket for the test script.
+        s3_prefix:      S3 key prefix (default: glue-test-scripts).
+        glue_job_name:  Override test job name (default: test_<stem>).
+        glue_version:   Glue version (default: 4.0).
+        region:         AWS region.
+        start_run:      If True, trigger a test job run immediately.
+        processing_mode: full | delta (affects incremental checks).
+        dry_run:        If True, generate the script without creating anything in AWS.
+
+    Returns dict with:
+        success, glue_job_name, action, s3_script_uri, local_test_file,
+        run_id (if started), cloudwatch_url
+    """
+    try:
+        from .agents.script_tester import ScriptTesterAgent
+    except ImportError:
+        from cost_optimizer.agents.script_tester import ScriptTesterAgent
+
+    try:
+        script_content = Path(script_path).read_text(errors="replace")
+    except OSError as exc:
+        return {"error": f"Cannot read '{script_path}': {exc}"}
+
+    tables = _state["detected_tables"].get(script_path, [])
+    if not tables:
+        tables = _state["scan_results"].get(script_path, {}).get("source_tables", [])
+
+    agent  = ScriptTesterAgent(use_llm=False)
+    result = agent.deploy_test_to_glue(
+        script_path     = script_path,
+        script_content  = script_content,
+        source_tables   = tables,
+        glue_role_arn   = glue_role_arn,
+        s3_bucket       = s3_bucket,
+        s3_prefix       = s3_prefix,
+        glue_job_name   = glue_job_name,
+        glue_version    = glue_version,
+        region          = region,
+        start_run       = start_run,
+        processing_mode = processing_mode,
+        dry_run         = dry_run,
+    )
+
+    job_n = result.get("glue_job_name", "")
+    action = result.get("action", "dry_run" if dry_run else "unknown")
+    print(f"\n  Glue test job {action}: {job_n}")
+    print(f"  Local test file : {result.get('local_test_file', '')}")
+    if not dry_run:
+        print(f"  S3 script URI   : {result.get('s3_script_uri', '')}")
+    if result.get("run_id"):
+        print(f"  Run ID          : {result['run_id']}")
+        print(f"  CloudWatch      : {result.get('cloudwatch_url', '')}")
+
+    return result
+
+
+# =============================================================================
 # Batch helpers
 # =============================================================================
 
@@ -1792,6 +2120,32 @@ Examples:
     p.add_argument("--glue-dry-run", action="store_true",
                    help="Print Glue job definition without creating anything in AWS")
 
+    # ── Deploy tests to Glue ─────────────────────────────────────────────────
+    p.add_argument("--deploy-tests-to-glue", action="store_true",
+                   help=(
+                       "Generate a Glue-native validation job and deploy it to AWS Glue "
+                       "(uses --glue-role-arn, --glue-script-bucket, --glue-version)"
+                   ))
+    p.add_argument("--start-test-run", action="store_true",
+                   help="Trigger the Glue test job run immediately after deployment")
+
+    # ── Column lineage ───────────────────────────────────────────────────────
+    p.add_argument("--lineage", action="store_true",
+                   help="After analysis, generate a column-level lineage graph (Mermaid + DOT)")
+    p.add_argument("--lineage-output-dir", default=None, metavar="DIR",
+                   help="Directory for lineage output files (default: <output-dir>/lineage/)")
+
+    # ── Delta/Iceberg detection ──────────────────────────────────────────────
+    p.add_argument("--detect-table-format", action="store_true",
+                   help="Detect Delta Lake / Iceberg usage and emit maintenance recommendations")
+
+    # ── Spark event-log parser ───────────────────────────────────────────────
+    p.add_argument("--spark-event-log", metavar="PATH_OR_S3_URI",
+                   help=(
+                       "Parse a Spark event log (JSONL) from a local path or S3 URI. "
+                       "Extracts stage durations, shuffle bytes, task skew, GC overhead."
+                   ))
+
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable debug logging")
     return p
@@ -2039,6 +2393,64 @@ def main(argv: Optional[List[str]] = None) -> int:
                 run              = True,
                 processing_mode  = args.processing_mode,
             )
+
+    # ── Mode D2: deploy tests as Glue validation job ──────────────────────────
+    if getattr(args, "deploy_tests_to_glue", False):
+        if not getattr(args, "glue_role_arn", None):
+            print("[ERROR] --glue-role-arn is required with --deploy-tests-to-glue")
+        elif not getattr(args, "glue_script_bucket", None):
+            print("[ERROR] --glue-script-bucket is required with --deploy-tests-to-glue")
+        else:
+            print(f"\n{'─'*65}")
+            print("  DEPLOYING GLUE VALIDATION JOB(S)")
+            print(f"{'─'*65}")
+            for script_path in all_results:
+                if not all_results[script_path].get("success"):
+                    continue
+                target = _resolved_script_path(script_path, args)
+                deploy_tests_to_glue(
+                    script_path     = target,
+                    glue_role_arn   = args.glue_role_arn,
+                    s3_bucket       = args.glue_script_bucket,
+                    s3_prefix       = getattr(args, "glue_script_prefix", "glue-test-scripts"),
+                    glue_version    = getattr(args, "glue_version", "4.0"),
+                    region          = args.region,
+                    start_run       = getattr(args, "start_test_run", False),
+                    processing_mode = args.processing_mode,
+                    dry_run         = getattr(args, "glue_dry_run", False),
+                )
+
+    # ── Mode F: column lineage graph ──────────────────────────────────────────
+    if getattr(args, "lineage", False):
+        print(f"\n{'─'*65}")
+        print("  COLUMN LINEAGE ANALYSIS")
+        print(f"{'─'*65}")
+        lin_dir = getattr(args, "lineage_output_dir", None) or str(
+            Path(args.output_dir) / job_name / "lineage"
+        )
+        for script_path in all_results:
+            analyze_column_lineage(
+                script_path = script_path,
+                output_dir  = lin_dir,
+            )
+
+    # ── Mode G: Delta/Iceberg detection ──────────────────────────────────────
+    if getattr(args, "detect_table_format", False):
+        print(f"\n{'─'*65}")
+        print("  DELTA / ICEBERG FORMAT DETECTION")
+        print(f"{'─'*65}")
+        for script_path in all_results:
+            detect_delta_iceberg(script_path=script_path)
+
+    # ── Mode H: Spark event-log parsing ──────────────────────────────────────
+    if getattr(args, "spark_event_log", None):
+        print(f"\n{'─'*65}")
+        print("  SPARK EVENT LOG ANALYSIS")
+        print(f"{'─'*65}")
+        parse_spark_event_log(
+            log_path = args.spark_event_log,
+            region   = args.region,
+        )
 
     # ── Mode E: create/update Glue job from optimized script ─────────────────
     if args.create_glue_job:

@@ -10,6 +10,9 @@ from .job_generator import JobGeneratorAgent
 from .glue_metrics_analyzer import GlueMetricsAnalyzer
 from .glue_job_creator import GlueJobCreatorAgent
 from .script_tester import ScriptTesterAgent
+from .column_lineage import ColumnLineageAgent
+from .delta_iceberg_detector import DeltaIcebergDetectorAgent
+from .spark_event_log_parser import SparkEventLogParser
 
 __all__ = [
     'CostOptimizerAgent',
@@ -25,4 +28,7 @@ __all__ = [
     'GlueMetricsAnalyzer',
     'GlueJobCreatorAgent',
     'ScriptTesterAgent',
+    'ColumnLineageAgent',
+    'DeltaIcebergDetectorAgent',
+    'SparkEventLogParser',
 ]

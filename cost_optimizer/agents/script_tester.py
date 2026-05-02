@@ -1,8 +1,8 @@
 """
 Script Tester Agent
 ====================
-Generates comprehensive pytest test cases for a (potentially optimized) PySpark
-script and can execute them against a local Spark session.
+Generates comprehensive PySpark test cases for a (potentially optimized) script
+and deploys them as a new AWS Glue validation job (rather than running locally).
 
 Test categories generated
 --------------------------
@@ -14,6 +14,15 @@ Test categories generated
   5. EdgeCases         — empty input, single-row input, duplicate keys
   6. IncrementalMode   — if processing_mode == delta, watermark filter is applied
   7. PerformanceChecks — cache/persist before multi-action, partitionBy present on write
+
+Execution path
+--------------
+  1. generate_tests()         — produces two files:
+       * <output_dir>/test_<stem>.py    (pytest file, for local debugging)
+       * <output_dir>/glue_test_<stem>.py (Glue-native validation job)
+  2. deploy_test_to_glue()   — uploads glue test job to S3, creates Glue job,
+                                optionally triggers a run; returns run_id + CW URL
+  3. run_tests()              — legacy local pytest runner (kept for backward compat)
 
 Rule-based mode: generates tests from static AST analysis + table schema inference.
 LLM mode       : Claude generates domain-aware tests with realistic mock data.
@@ -62,6 +71,38 @@ _SPARK_TYPES: Dict[str, str] = {
     "timestamp": "TimestampType()",
     "decimal":   "DecimalType(18, 2)",
 }
+
+
+# ─── Glue test job helpers ────────────────────────────────────────────────────
+_SPARK_TYPES_GLUE: Dict[str, str] = {
+    "string":    "StringType()",
+    "int":       "IntegerType()",
+    "integer":   "IntegerType()",
+    "long":      "LongType()",
+    "bigint":    "LongType()",
+    "double":    "DoubleType()",
+    "float":     "FloatType()",
+    "boolean":   "BooleanType()",
+    "bool":      "BooleanType()",
+    "date":      "DateType()",
+    "timestamp": "TimestampType()",
+}
+
+
+def _GLUE_SYNTH_VALUE(col_name: str, col_type: str) -> str:
+    """Return a Python literal for Glue test mock data."""
+    t = col_type.lower()
+    if t in ("date",):
+        return 'dt_date(2024, 1, 1)'
+    if t in ("timestamp",):
+        return "datetime(2024, 1, 1, 0, 0)"
+    if t in ("double", "float"):
+        return "1.0"
+    if t in ("int", "integer", "long", "bigint"):
+        return "1"
+    if t in ("boolean", "bool"):
+        return "True"
+    return f'"{col_name}_val"'
 
 
 class ScriptTesterAgent(CostOptimizerAgent):
@@ -133,7 +174,9 @@ class ScriptTesterAgent(CostOptimizerAgent):
         timeout_seconds: int = 300,
     ) -> Dict[str, Any]:
         """
-        Execute the generated test file with pytest.
+        Run the generated pytest file locally (kept for backward compatibility).
+
+        Prefer deploy_test_to_glue() for production validation.
 
         Returns dict with:
             success, total, passed, failed, errors_count, output, exit_code
@@ -162,12 +205,409 @@ class ScriptTesterAgent(CostOptimizerAgent):
                 "passed":       passed,
                 "failed":       failed,
                 "errors_count": errors_c,
-                "output":       output[-4000:],   # last 4000 chars
+                "output":       output[-4000:],
             }
         except subprocess.TimeoutExpired:
             return {"success": False, "error": f"Test run timed out after {timeout_seconds}s"}
         except FileNotFoundError:
             return {"success": False, "error": "pytest not found; install with: pip install pytest"}
+
+    def deploy_test_to_glue(
+        self,
+        script_path: str,
+        script_content: str,
+        source_tables: Optional[List[Dict]] = None,
+        glue_role_arn: str = "",
+        s3_bucket: str = "",
+        s3_prefix: str = "glue-test-scripts",
+        glue_job_name: Optional[str] = None,
+        glue_version: str = "4.0",
+        region: str = "us-east-1",
+        start_run: bool = False,
+        processing_mode: str = "full",
+        output_dir: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Generate a Glue-native validation job for *script_content*, upload it to S3,
+        create/update the Glue job, and optionally trigger a run.
+
+        Args
+        ----
+        script_path      : path of the script being tested (for naming)
+        script_content   : source code of the (optimized) script
+        source_tables    : table metadata for schema-aware checks
+        glue_role_arn    : IAM role ARN for the Glue test job
+        s3_bucket        : S3 bucket for the test script upload
+        s3_prefix        : S3 key prefix (default: glue-test-scripts)
+        glue_job_name    : override job name (default: test_<stem>)
+        glue_version     : Glue version (default: 4.0)
+        region           : AWS region
+        start_run        : trigger a job run immediately after create/update
+        processing_mode  : full | delta
+        output_dir       : local dir to save the generated Glue test script
+        dry_run          : if True, return job definition without creating anything
+
+        Returns
+        -------
+        success, glue_job_name, glue_test_script_path (S3), run_id (if started),
+        cloudwatch_url, local_test_file, errors
+        """
+        stem     = Path(script_path).stem
+        job_name = glue_job_name or f"test_{stem}"
+        today    = date.today().strftime("%Y%m%d")
+
+        # ── Generate the Glue-native test script ───────────────────────────────
+        source_tables = source_tables or []
+        structure     = self._parse_script_structure(script_content)
+        glue_test_code = self._render_glue_test_job(
+            structure, script_path, source_tables, processing_mode, script_content
+        )
+
+        # ── Save locally ───────────────────────────────────────────────────────
+        if output_dir:
+            out_dir = Path(output_dir)
+        else:
+            out_dir = Path(script_path).parent / "tests"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        local_glue_file = str(out_dir / f"glue_test_{stem}.py")
+        Path(local_glue_file).write_text(glue_test_code)
+
+        if dry_run:
+            return {
+                "success":         True,
+                "glue_job_name":   job_name,
+                "local_test_file": local_glue_file,
+                "dry_run":         True,
+                "glue_test_code_preview": glue_test_code[:500] + "…",
+                "errors":          [],
+            }
+
+        if not s3_bucket or not glue_role_arn:
+            return {
+                "success":         False,
+                "local_test_file": local_glue_file,
+                "errors":          ["s3_bucket and glue_role_arn are required for Glue deployment"],
+            }
+
+        try:
+            import boto3
+            s3_key     = f"{s3_prefix}/{job_name}/{today}/glue_test_{stem}.py"
+            s3_uri     = f"s3://{s3_bucket}/{s3_key}"
+            s3_client  = boto3.client("s3", region_name=region)
+            s3_client.put_object(
+                Bucket=s3_bucket,
+                Key=s3_key,
+                Body=glue_test_code.encode("utf-8"),
+                ContentType="text/x-python",
+            )
+
+            # ── Glue job definition ────────────────────────────────────────────
+            glue_client = boto3.client("glue", region_name=region)
+            job_def: Dict[str, Any] = {
+                "Name":           job_name,
+                "Description":    f"Validation job for {stem} – auto-generated by ScriptTesterAgent",
+                "Role":           glue_role_arn,
+                "ExecutionProperty": {"MaxConcurrentRuns": 1},
+                "Command": {
+                    "Name":           "glueetl",
+                    "ScriptLocation": s3_uri,
+                    "PythonVersion":  "3",
+                },
+                "DefaultArguments": {
+                    "--job-language":       "python",
+                    "--enable-metrics":     "true",
+                    "--enable-continuous-cloudwatch-log": "true",
+                    "--TempDir":            f"s3://{s3_bucket}/tmp/{job_name}/",
+                    "--job-bookmark-option":"job-bookmark-disable",
+                    "--conf": (
+                        "spark.sql.adaptive.enabled=true "
+                        "--conf spark.sql.adaptive.coalescePartitions.enabled=true"
+                    ),
+                },
+                "GlueVersion":      glue_version,
+                "WorkerType":       "G.1X",
+                "NumberOfWorkers":  2,
+                "Timeout":          60,
+                "MaxRetries":       0,
+            }
+
+            try:
+                glue_client.get_job(JobName=job_name)
+                glue_client.update_job(
+                    JobName=job_name,
+                    JobUpdate={k: v for k, v in job_def.items() if k != "Name"},
+                )
+                action = "updated"
+            except glue_client.exceptions.EntityNotFoundException:
+                glue_client.create_job(**job_def)
+                action = "created"
+
+            result: Dict[str, Any] = {
+                "success":         True,
+                "glue_job_name":   job_name,
+                "action":          action,
+                "s3_script_uri":   s3_uri,
+                "local_test_file": local_glue_file,
+                "errors":          [],
+            }
+
+            # ── Optionally trigger a run ───────────────────────────────────────
+            if start_run:
+                run_resp = glue_client.start_job_run(JobName=job_name)
+                run_id   = run_resp["JobRunId"]
+                cw_url   = (
+                    f"https://console.aws.amazon.com/cloudwatch/home?region={region}"
+                    f"#logsV2:log-groups/log-group/%2Faws-glue%2Fjobs%2Foutput"
+                    f"$3FlogStreamNameFilter$3D{job_name}"
+                )
+                result.update({
+                    "run_id":         run_id,
+                    "cloudwatch_url": cw_url,
+                })
+
+            return result
+
+        except Exception as exc:
+            return {
+                "success":         False,
+                "local_test_file": local_glue_file,
+                "errors":          [str(exc)],
+            }
+
+    # ─── Glue-native test job renderer ────────────────────────────────────────
+
+    def _render_glue_test_job(
+        self,
+        structure: Dict[str, Any],
+        script_path: str,
+        tables: List[Dict],
+        proc_mode: str,
+        original_code: str,
+    ) -> str:
+        """
+        Render a complete Glue ETL script that acts as a validation harness.
+        Each check raises AssertionError on failure, which causes the job to fail
+        with a descriptive message visible in CloudWatch.
+        """
+        script_name = Path(script_path).stem
+        today       = date.today().isoformat()
+        lines: List[str] = []
+
+        lines += [
+            '"""',
+            f"Glue Validation Job for: {script_name}",
+            f"Generated by cost_optimizer.ScriptTesterAgent on {today}",
+            "",
+            "Each validation check raises AssertionError on failure, which surfaces",
+            'in CloudWatch Logs as a FAILED marker (look for "VALIDATION FAILED").',
+            '"""',
+            "",
+            "import sys",
+            "import logging",
+            "from datetime import datetime, date as dt_date",
+            "from pyspark.sql import functions as F",
+            "from pyspark.sql.types import (",
+            "    StructType, StructField, StringType, IntegerType,",
+            "    LongType, DoubleType, FloatType, BooleanType,",
+            "    DateType, TimestampType,",
+            ")",
+            "",
+            "from awsglue.utils import getResolvedOptions",
+            "from awsglue.context import GlueContext",
+            "from awsglue.job import Job",
+            "from pyspark.context import SparkContext",
+            "",
+            "log = logging.getLogger(__name__)",
+            "logging.basicConfig(level=logging.INFO)",
+            "",
+            "# ── Glue bootstrap ──────────────────────────────────────────────────────────",
+            'args       = getResolvedOptions(sys.argv, ["JOB_NAME"])',
+            "sc         = SparkContext()",
+            "glueContext= GlueContext(sc)",
+            "spark      = glueContext.spark_session",
+            "job        = Job(glueContext)",
+            'job.init(args["JOB_NAME"], args)',
+            "",
+            "PASS_COUNT = 0",
+            "FAIL_COUNT = 0",
+            "",
+            "",
+            "def check(name, condition, message=''):",
+            '    """Run one validation check."""',
+            "    global PASS_COUNT, FAIL_COUNT",
+            "    if condition:",
+            '        log.info("VALIDATION PASSED: %s", name)',
+            "        PASS_COUNT += 1",
+            "    else:",
+            '        log.error("VALIDATION FAILED: %s – %s", name, message)',
+            "        FAIL_COUNT += 1",
+            "",
+            "",
+            "# ─── Script text for static checks ─────────────────────────────────────────",
+            f'SCRIPT_CODE = """{original_code[:4000]}"""',
+            "",
+        ]
+
+        # ── Static checks ──────────────────────────────────────────────────────
+        lines += [
+            "",
+            "# ─── 1. Static Checks ───────────────────────────────────────────────────────",
+            "import re",
+            "",
+            'check("AQE enabled",',
+            '    "adaptive.enabled" in SCRIPT_CODE,',
+            '    "spark.sql.adaptive.enabled must be set")',
+            "",
+            'check("KryoSerializer configured",',
+            '    "KryoSerializer" in SCRIPT_CODE,',
+            '    "spark.serializer=KryoSerializer should be set")',
+            "",
+            'check("No repartition(1)",',
+            '    not re.search(r"\\.repartition\\(\\s*1\\s*\\)", SCRIPT_CODE),',
+            '    "repartition(1) found – use coalesce(1)")',
+            "",
+            'check("shuffle.partitions configured",',
+            '    re.search(r"shuffle\\.partitions", SCRIPT_CODE),',
+            '    "spark.sql.shuffle.partitions should be configured")',
+            "",
+        ]
+
+        if structure.get("writes"):
+            lines += [
+                'check("coalesce before write",',
+                '    bool(re.search(r"\\.(coalesce|repartition)\\s*\\(", SCRIPT_CODE)),',
+                '    "coalesce() or repartition() should precede write")',
+                "",
+            ]
+
+        # ── DataFrame-level checks using mock data ─────────────────────────────
+        lines += [
+            "",
+            "# ─── 2. DataFrame Validation Checks ────────────────────────────────────────",
+            "",
+        ]
+
+        # Build mock DataFrames from table metadata
+        for tbl in tables[:3]:  # limit to first 3 tables
+            name  = tbl.get("table", "test")
+            alias = re.sub(r"[^a-z0-9_]", "_", name.lower())
+            cols  = tbl.get("columns", []) or [
+                {"name": "id",    "type": "string"},
+                {"name": "value", "type": "double"},
+            ]
+            schema_fields = ", ".join(
+                f'StructField("{c.get("name","col")}", '
+                f'{_SPARK_TYPES_GLUE.get(c.get("type","string").lower(), "StringType()")}, True)'
+                for c in cols[:6]
+            )
+            data_vals = ", ".join(
+                _GLUE_SYNTH_VALUE(c.get("name","col"), c.get("type","string"))
+                for c in cols[:6]
+            )
+            lines += [
+                f"schema_{alias} = StructType([{schema_fields}])",
+                f"df_{alias} = spark.createDataFrame([({data_vals}), ({data_vals})], schema_{alias})",
+                "",
+                f'check("{alias} DataFrame created",',
+                f"    df_{alias}.count() == 2,",
+                f'    "Mock {alias} DataFrame should have 2 rows")',
+                "",
+            ]
+
+        # ── Join preservation check ────────────────────────────────────────────
+        if len(tables) >= 2:
+            lines += [
+                "# Left join should preserve all left rows",
+                "schema_join = StructType([",
+                '    StructField("id",    StringType(), True),',
+                '    StructField("value", StringType(), True),',
+                "])",
+                'left_df  = spark.createDataFrame([("k1","a"), ("k2","b"), ("k3","c")], schema_join)',
+                'right_df = spark.createDataFrame([("k1","x")], schema_join)',
+                'joined   = left_df.join(right_df, on="id", how="left")',
+                'check("left join preserves all rows",',
+                '    joined.count() == 3,',
+                '    "Left join must preserve all left-table rows")',
+                "",
+            ]
+
+        # ── Null handling ──────────────────────────────────────────────────────
+        lines += [
+            "# Null join key should not crash",
+            "schema_null = StructType([",
+            '    StructField("id",    StringType(), True),',
+            '    StructField("value", DoubleType(), True),',
+            "])",
+            'null_df = spark.createDataFrame([("k1", 1.0), (None, 2.0)], schema_null)',
+            'result  = null_df.filter(F.col("id").isNotNull())',
+            'check("null filter does not crash",',
+            '    result.count() == 1,',
+            '    "Null filter should return 1 row")',
+            "",
+            "# Sum ignores nulls",
+            'null_agg = null_df.groupBy("id").agg(F.sum("value").alias("total"))',
+            'check("sum ignores nulls",',
+            '    null_agg.count() >= 1,',
+            '    "Aggregation with nulls should produce at least 1 row")',
+            "",
+        ]
+
+        # ── Edge cases ─────────────────────────────────────────────────────────
+        lines += [
+            "# Empty input should produce empty output",
+            "schema_empty = StructType([",
+            '    StructField("id",    StringType(), True),',
+            '    StructField("value", DoubleType(), True),',
+            "])",
+            "empty_df = spark.createDataFrame([], schema_empty)",
+            'result_empty = empty_df.filter("value > 0").groupBy("id").count()',
+            'check("empty input produces empty output",',
+            '    result_empty.count() == 0,',
+            '    "Empty input must produce empty output, not a crash")',
+            "",
+        ]
+
+        # ── Performance checks (static) ────────────────────────────────────────
+        lines += [
+            "# No bare .collect() on large DataFrames",
+            r'check("no collect on large DF",',
+            r'    not re.search(r"(\w+)\.collect\(\)\s*$", SCRIPT_CODE, re.MULTILINE)',
+            r'    or re.search(r"\.limit\(\d+\).*\.collect\(\)", SCRIPT_CODE),',
+            r'    "Naked .collect() on unbounded DataFrame found")',
+            "",
+        ]
+
+        if proc_mode == "delta":
+            lines += [
+                "# Delta mode: incremental filter must be present",
+                r'check("delta filter present",',
+                r'    bool(re.search(',
+                r'        r"(?i)(updated_at|modified_at|event_date|load_date)\s*[><=]", SCRIPT_CODE',
+                r'    )),',
+                r'    "Delta mode requires a timestamp filter to avoid full table re-scans")',
+                "",
+            ]
+
+        # ── Final summary ──────────────────────────────────────────────────────
+        lines += [
+            "",
+            "# ─── Final summary ──────────────────────────────────────────────────────────",
+            'log.info("=" * 60)',
+            'log.info("VALIDATION SUMMARY: %d passed, %d failed", PASS_COUNT, FAIL_COUNT)',
+            'log.info("=" * 60)',
+            "",
+            "if FAIL_COUNT > 0:",
+            '    raise AssertionError(',
+            '        f"Validation job failed: {FAIL_COUNT} check(s) did not pass. "',
+            '        "Review CloudWatch logs for details."',
+            "    )",
+            "",
+            "job.commit()",
+            'log.info("All validation checks passed.")',
+        ]
+
+        return "\n".join(lines)
 
     # ─── Rule-based analysis ──────────────────────────────────────────────────
 
