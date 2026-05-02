@@ -1095,6 +1095,136 @@ def generate_and_run_tests(
 
 
 # =============================================================================
+# Glue job creation tool
+# =============================================================================
+
+@strands_tool
+def create_glue_job(
+    script_path: str,
+    job_name: str,
+    s3_bucket: str,
+    iam_role_arn: str,
+    s3_script_prefix: str = "glue-scripts",
+    worker_type: str = "G.2X",
+    number_of_workers: int = 10,
+    glue_version: str = "4.0",
+    timeout_minutes: int = 2880,
+    max_retries: int = 1,
+    connections: Optional[List[str]] = None,
+    extra_job_args: Optional[Dict[str, Any]] = None,
+    tags: Optional[Dict[str, str]] = None,
+    start_after_create: bool = False,
+    generate_docs: bool = True,
+    dry_run: bool = False,
+) -> Dict:
+    """
+    Upload an (optimized) PySpark script to S3 and create or update an AWS Glue job.
+
+    Also generates Markdown documentation for the job.  If worker_recommendation
+    is present in the cached analysis result (from --apply-fixes with --glue-metrics),
+    the recommended worker count and type are applied automatically.
+
+    Args:
+        script_path:          Local path to the PySpark script to deploy.
+        job_name:             AWS Glue job name.
+        s3_bucket:            S3 bucket for the script.
+        iam_role_arn:         IAM role ARN for the Glue job.
+        s3_script_prefix:     S3 key prefix (default: glue-scripts).
+        worker_type:          G.1X | G.2X | G.4X | G.8X (default: G.2X).
+        number_of_workers:    Worker count (default: 10).
+        glue_version:         Glue version (default: 4.0).
+        timeout_minutes:      Job timeout in minutes (default: 2880 = 48 h).
+        max_retries:          Retry count on failure (default: 1).
+        connections:          Glue connection names list.
+        extra_job_args:       Additional default job arguments.
+        tags:                 AWS resource tags dict.
+        start_after_create:   If True, trigger a job run immediately.
+        generate_docs:        If True, write a Markdown doc file alongside the script.
+        dry_run:              If True, return the payload without calling AWS.
+
+    Returns dict with:
+        success, action (created|updated|dry_run), job_name, s3_script_uri,
+        console_url, worker_type, number_of_workers, docs_path, run_id (if started)
+    """
+    try:
+        from .agents.glue_job_creator import GlueJobCreatorAgent
+    except ImportError:
+        from cost_optimizer.agents.glue_job_creator import GlueJobCreatorAgent
+
+    # Pull metric-based worker recommendation from cached state if available
+    worker_rec: Optional[Dict] = None
+    analysis   = _state["scan_results"].get(script_path, {})
+    cached_rec = analysis.get("worker_recommendation")
+    if cached_rec and cached_rec.get("changed"):
+        worker_rec = cached_rec
+        print(
+            f"  [Metric tuning] {cached_rec['current_workers']}×{cached_rec['current_worker_type']}"
+            f" → {cached_rec['recommended_workers']}×{cached_rec['recommended_type']}"
+        )
+
+    creator = GlueJobCreatorAgent(region=DEFAULT_REGION)
+    result  = creator.create_or_update(
+        script_local_path   = script_path,
+        job_name            = job_name,
+        s3_bucket           = s3_bucket,
+        iam_role_arn        = iam_role_arn,
+        s3_script_prefix    = s3_script_prefix,
+        worker_type         = worker_type,
+        number_of_workers   = number_of_workers,
+        glue_version        = glue_version,
+        timeout_minutes     = timeout_minutes,
+        max_retries         = max_retries,
+        connections         = connections or [],
+        extra_job_args      = extra_job_args or {},
+        tags                = tags or {},
+        worker_recommendation = worker_rec,
+        dry_run             = dry_run,
+    )
+
+    if not result.get("success"):
+        return result
+
+    print(f"\n  Glue job {result['action']}: {job_name}")
+    print(f"  Script S3 URI  : {result['s3_script_uri']}")
+    print(f"  Workers        : {result['number_of_workers']}×{result['worker_type']}")
+    print(f"  Console        : {result['console_url']}")
+
+    # Generate documentation
+    docs_path = None
+    if generate_docs:
+        script_content = ""
+        try:
+            script_content = Path(script_path).read_text(errors="replace")
+        except OSError:
+            pass
+
+        tables = _state["detected_tables"].get(script_path, [])
+        doc_md = creator.generate_job_documentation(
+            job_name        = job_name,
+            script_content  = script_content,
+            job_definition  = result.get("job_definition", {}),
+            source_tables   = tables,
+            analysis_result = analysis,
+        )
+        docs_path = str(Path(script_path).parent / f"README_{job_name}.md")
+        Path(docs_path).write_text(doc_md)
+        print(f"  Documentation  : {docs_path}")
+
+    # Optionally start a job run
+    run_id = None
+    if start_after_create and not dry_run:
+        run_result = creator.start_job_run(job_name=job_name)
+        if run_result.get("success"):
+            run_id = run_result["run_id"]
+            print(f"  Run ID         : {run_id}")
+            print(f"  CloudWatch     : {run_result.get('cloudwatch_url', '')}")
+        else:
+            print(f"  [WARNING] Could not start run: {run_result.get('errors')}")
+
+    return {**result, "docs_path": docs_path, "run_id": run_id}
+
+
+# =============================================================================
 # Batch helpers
 # =============================================================================
 
@@ -1634,6 +1764,34 @@ Examples:
     p.add_argument("--output-script", metavar="FILE",
                    help="Output path for the generated script (default: generated_jobs/<job_name>.py)")
 
+    # ── Glue job deployment ──────────────────────────────────────────────────
+    p.add_argument("--create-glue-job", action="store_true",
+                   help=(
+                       "After analysis + apply-fixes, upload the optimized script to S3 "
+                       "and create/update an AWS Glue job"
+                   ))
+    p.add_argument("--glue-role-arn", metavar="ARN",
+                   help="IAM role ARN for the Glue job (required with --create-glue-job)")
+    p.add_argument("--glue-script-bucket", metavar="BUCKET",
+                   help="S3 bucket for Glue script upload")
+    p.add_argument("--glue-script-prefix", default="glue-scripts", metavar="PREFIX",
+                   help="S3 key prefix for script uploads (default: glue-scripts)")
+    p.add_argument("--glue-version", default="4.0",
+                   choices=["4.0", "3.0", "2.0"],
+                   help="Glue version (default: 4.0)")
+    p.add_argument("--glue-timeout", type=int, default=2880, metavar="MINUTES",
+                   help="Glue job timeout in minutes (default: 2880 = 48 h)")
+    p.add_argument("--glue-max-retries", type=int, default=1,
+                   help="Glue job max retries (default: 1)")
+    p.add_argument("--glue-connections", nargs="+", metavar="NAME",
+                   help="Glue connection names to attach to the job")
+    p.add_argument("--glue-tags", metavar="JSON",
+                   help='JSON string of AWS tags e.g. \'{"env":"prod","team":"data"}\'')
+    p.add_argument("--start-glue-run", action="store_true",
+                   help="Trigger a Glue job run immediately after create/update")
+    p.add_argument("--glue-dry-run", action="store_true",
+                   help="Print Glue job definition without creating anything in AWS")
+
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable debug logging")
     return p
@@ -1873,18 +2031,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\n{'─'*65}")
         print("  GENERATING & RUNNING TESTS")
         print(f"{'─'*65}")
-        # Prefer optimized script if apply-fixes was run
         for script_path in all_results:
-            target = script_path
-            if args.apply_fixes:
-                if args.fixes_output_dir:
-                    opt = Path(args.fixes_output_dir) / f"{Path(script_path).stem}_optimized{Path(script_path).suffix}"
-                else:
-                    p = Path(script_path)
-                    opt = p.parent / f"{p.stem}_optimized{p.suffix}"
-                if opt.exists():
-                    target = str(opt)
-
+            target = _resolved_script_path(script_path, args)
             generate_and_run_tests(
                 script_path      = target,
                 test_output_dir  = args.tests_output_dir,
@@ -1892,10 +2040,64 @@ def main(argv: Optional[List[str]] = None) -> int:
                 processing_mode  = args.processing_mode,
             )
 
+    # ── Mode E: create/update Glue job from optimized script ─────────────────
+    if args.create_glue_job:
+        if not args.glue_role_arn:
+            print("[ERROR] --glue-role-arn is required with --create-glue-job")
+        elif not args.glue_script_bucket:
+            print("[ERROR] --glue-script-bucket is required with --create-glue-job")
+        else:
+            print(f"\n{'─'*65}")
+            print("  DEPLOYING GLUE JOB(S)")
+            print(f"{'─'*65}")
+            glue_tags = {}
+            if getattr(args, "glue_tags", None):
+                try:
+                    glue_tags = json.loads(args.glue_tags)
+                except Exception:
+                    print(f"  [WARNING] Could not parse --glue-tags JSON; ignoring tags")
+
+            for script_path in all_results:
+                if not all_results[script_path].get("success"):
+                    continue
+                target   = _resolved_script_path(script_path, args)
+                gjob     = job_name if len(all_results) == 1 else Path(script_path).stem
+                gj_result= create_glue_job(
+                    script_path         = target,
+                    job_name            = gjob,
+                    s3_bucket           = args.glue_script_bucket,
+                    iam_role_arn        = args.glue_role_arn,
+                    s3_script_prefix    = args.glue_script_prefix,
+                    worker_type         = args.worker_type,
+                    number_of_workers   = args.current_workers,
+                    glue_version        = args.glue_version,
+                    timeout_minutes     = args.glue_timeout,
+                    max_retries         = args.glue_max_retries,
+                    connections         = args.glue_connections or [],
+                    tags                = glue_tags,
+                    start_after_create  = args.start_glue_run,
+                    generate_docs       = True,
+                    dry_run             = args.glue_dry_run,
+                )
+                if not gj_result.get("success"):
+                    print(f"  [ERROR] {gj_result.get('errors', ['unknown'])}")
+
     if args.interactive:
         interactive_mode()
 
     return 0
+
+
+def _resolved_script_path(script_path: str, args: argparse.Namespace) -> str:
+    """Return the optimized script path if --apply-fixes was used, else original."""
+    if not getattr(args, "apply_fixes", False):
+        return script_path
+    if getattr(args, "fixes_output_dir", None):
+        opt = Path(args.fixes_output_dir) / f"{Path(script_path).stem}_optimized{Path(script_path).suffix}"
+    else:
+        p   = Path(script_path)
+        opt = p.parent / f"{p.stem}_optimized{p.suffix}"
+    return str(opt) if opt.exists() else script_path
 
 
 def _run_generate_mode(args: argparse.Namespace) -> int:

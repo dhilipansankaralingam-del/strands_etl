@@ -8,6 +8,7 @@ from .recommendations import RecommendationsAgent
 from .recommendation_applier import RecommendationApplierAgent
 from .job_generator import JobGeneratorAgent
 from .glue_metrics_analyzer import GlueMetricsAnalyzer
+from .glue_job_creator import GlueJobCreatorAgent
 from .script_tester import ScriptTesterAgent
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     'RecommendationApplierAgent',
     'JobGeneratorAgent',
     'GlueMetricsAnalyzer',
+    'GlueJobCreatorAgent',
     'ScriptTesterAgent',
 ]
