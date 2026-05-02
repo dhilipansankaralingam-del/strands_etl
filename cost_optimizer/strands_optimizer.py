@@ -765,22 +765,38 @@ def apply_recommendations_to_script(
     script_path: str,
     output_path: Optional[str] = None,
     dry_run: bool = False,
+    glue_metrics: Optional[Dict[str, Any]] = None,
+    current_workers: int = 10,
+    current_worker_type: str = "G.2X",
+    executor_memory_gb: float = 4.0,
 ) -> Dict:
     """
     Apply the optimization recommendations from the latest analysis to a script.
 
     Fetches the cached analysis result for *script_path* (produced by
     analyze_pyspark_script), runs RecommendationApplierAgent over the original
-    source, and writes the modified script to *output_path* (or
-    <original_stem>_optimized.py next to the original when omitted).
+    source, and writes the modified script to *output_path*.
+
+    When *glue_metrics* is provided (raw CloudWatch metric dict from
+    fetch_glue_metrics or a JSON file), the agent also tunes:
+      - spark.executor.memory and spark.executor.memoryOverhead (from JVM heap)
+      - spark.memory.fraction (from heap pressure)
+      - spark.executor.cores (from CPU utilisation)
+      - spark.dynamicAllocation (from worker utilisation ratio)
+      - number_of_workers recommendation (emitted in changelog)
 
     Args:
-        script_path: Path to the PySpark script previously analysed.
-        output_path: Where to write the fixed script (optional).
-        dry_run:     If True, return the changelog without writing any files.
+        script_path:          Path to the PySpark script previously analysed.
+        output_path:          Where to write the fixed script (optional).
+        dry_run:              If True, return the changelog without writing files.
+        glue_metrics:         Raw Glue CloudWatch metric dict.
+        current_workers:      Current worker count (baseline for right-sizing).
+        current_worker_type:  Current Glue worker type (G.1X … G.8X).
+        executor_memory_gb:   Current executor memory in GB.
 
     Returns dict with:
-        success, fixes_applied, changelog, output_path, diff_summary
+        success, fixes_applied, changelog, output_path, diff_summary,
+        worker_recommendation, metric_findings
     """
     result = _state["scan_results"].get(script_path)
     if not result:
@@ -808,10 +824,14 @@ def apply_recommendations_to_script(
     )
     tables = _state["detected_tables"].get(script_path, [])
     out    = agent.apply(
-        script_path     = script_path,
-        script_content  = script_content,
-        analysis_result = result,
-        source_tables   = tables,
+        script_path               = script_path,
+        script_content            = script_content,
+        analysis_result           = result,
+        source_tables             = tables,
+        glue_metrics              = glue_metrics,
+        current_workers           = current_workers,
+        current_worker_type       = current_worker_type,
+        current_executor_memory_gb= executor_memory_gb,
     )
 
     if not out["success"]:
@@ -825,19 +845,32 @@ def apply_recommendations_to_script(
     if not dry_run:
         Path(output_path).write_text(out["modified_script"])
 
-    # Build a compact diff summary
+    # Compact diff summary
     orig_lines = script_content.splitlines()
     new_lines  = out["modified_script"].splitlines()
     added      = sum(1 for l in new_lines if l not in set(orig_lines))
     removed    = sum(1 for l in orig_lines if l not in set(new_lines))
 
+    # Print metric findings if any
+    for finding in out.get("metric_findings", []):
+        print(f"  [Metric] {finding}")
+    w_rec = out.get("worker_recommendation")
+    if w_rec and w_rec.get("changed"):
+        print(
+            f"  [Worker] {w_rec['current_workers']}×{w_rec['current_worker_type']} → "
+            f"{w_rec['recommended_workers']}×{w_rec['recommended_type']}: "
+            + "; ".join(w_rec.get("reason", []))
+        )
+
     return {
-        "success":       True,
-        "fixes_applied": out["fixes_applied"],
-        "output_path":   output_path if not dry_run else "(dry-run – not written)",
-        "dry_run":       dry_run,
-        "diff_summary":  {"lines_added": added, "lines_removed": removed},
-        "changelog":     out["changelog"],
+        "success":               True,
+        "fixes_applied":         out["fixes_applied"],
+        "output_path":           output_path if not dry_run else "(dry-run – not written)",
+        "dry_run":               dry_run,
+        "diff_summary":          {"lines_added": added, "lines_removed": removed},
+        "changelog":             out["changelog"],
+        "worker_recommendation": out.get("worker_recommendation"),
+        "metric_findings":       out.get("metric_findings", []),
     }
 
 
@@ -900,6 +933,163 @@ def generate_pyspark_job(
         lines = result["generated_script"].count("\n") + 1
         print(f"  Script length: {lines} lines")
         print(f"  Platform     : {result['platform']}")
+
+    return result
+
+
+# =============================================================================
+# Glue metrics tool
+# =============================================================================
+
+@strands_tool
+def fetch_glue_metrics(
+    job_name: str,
+    run_id: str,
+    metrics_file: Optional[str] = None,
+) -> Dict:
+    """
+    Retrieve Glue CloudWatch metrics for a specific job run.
+
+    Either fetches live from CloudWatch (requires boto3 + cloudwatch:GetMetricData)
+    or loads a pre-exported JSON file (*metrics_file*).
+
+    Supported metrics:
+      glue.ALL.jvm.heap.usage
+      glue.driver.system.cpuSystemLoad
+      glue.ALL.system.cpuSystemLoad
+      glue.driver.workerutilized
+      glue.driver.aggregate.numCompletedStages
+      glue.driver.ExecutorAllocationManager.executors.numberAllExecutors
+
+    Returns dict with:
+        success, raw_metrics, analysis, spark_config_overrides,
+        worker_recommendation, findings
+    """
+    try:
+        from .agents.glue_metrics_analyzer import GlueMetricsAnalyzer
+    except ImportError:
+        from cost_optimizer.agents.glue_metrics_analyzer import GlueMetricsAnalyzer
+
+    analyzer = GlueMetricsAnalyzer()
+
+    # Load raw metrics
+    if metrics_file:
+        try:
+            import json as _json
+            with open(metrics_file) as fh:
+                raw = _json.load(fh)
+        except Exception as exc:
+            return {"error": f"Cannot load metrics file '{metrics_file}': {exc}"}
+    elif HAS_BOTO3:
+        raw = analyzer.fetch_from_cloudwatch(job_name, run_id, region=DEFAULT_REGION)
+        if "error" in raw:
+            return raw
+    else:
+        return {"error": "Provide --glue-metrics FILE or install boto3 for live CloudWatch fetch"}
+
+    # Parse + analyse
+    parsed   = analyzer.parse_metrics(raw)
+    analysis = analyzer.analyze(parsed)
+    overrides= analyzer.get_spark_config_overrides(analysis)
+    worker_r = analyzer.get_worker_recommendation(analysis, current_workers=10)
+
+    return {
+        "success":               True,
+        "job_name":              job_name,
+        "run_id":                run_id,
+        "raw_metrics":           raw,
+        "analysis":              analysis,
+        "spark_config_overrides": overrides,
+        "worker_recommendation": worker_r,
+        "findings":              analysis.get("findings", []),
+    }
+
+
+# =============================================================================
+# Script tester tool
+# =============================================================================
+
+@strands_tool
+def generate_and_run_tests(
+    script_path: str,
+    test_output_dir: Optional[str] = None,
+    run: bool = True,
+    processing_mode: str = "full",
+) -> Dict:
+    """
+    Generate pytest test cases for a PySpark script and optionally execute them.
+
+    Uses the cached analysis result (from analyze_pyspark_script) to populate
+    table metadata.  Runs tests against a local Spark session (no AWS needed).
+
+    Args:
+        script_path:     Path to the (optimized) PySpark script.
+        test_output_dir: Directory for the generated test file.  Defaults to
+                         <script_dir>/tests/.
+        run:             If True, execute the tests immediately after generation.
+        processing_mode: 'full' or 'delta' (affects incremental test category).
+
+    Returns dict with:
+        success, test_file_path, test_count, test_categories,
+        run_result (if run=True)
+    """
+    try:
+        from .agents.script_tester import ScriptTesterAgent
+    except ImportError:
+        from cost_optimizer.agents.script_tester import ScriptTesterAgent
+
+    try:
+        script_content = Path(script_path).read_text(errors="replace")
+    except OSError as exc:
+        return {"error": f"Cannot read '{script_path}': {exc}"}
+
+    tables = _state["detected_tables"].get(script_path, [])
+
+    # Also pull source_tables from analysis if not in state
+    analysis = _state["scan_results"].get(script_path, {})
+    if not tables:
+        tables = analysis.get("source_tables", [])
+
+    if test_output_dir:
+        p           = Path(script_path)
+        test_path   = str(Path(test_output_dir) / f"test_{p.stem}.py")
+    else:
+        test_path   = None   # ScriptTesterAgent will default to tests/ next to script
+
+    agent  = ScriptTesterAgent(
+        use_llm  = HAS_STRANDS,
+        model_id = DEFAULT_MODEL_ID,
+        region   = DEFAULT_REGION,
+    )
+    gen = agent.generate_tests(
+        script_path     = script_path,
+        script_content  = script_content,
+        source_tables   = tables,
+        output_path     = test_path,
+        processing_mode = processing_mode,
+    )
+
+    if not gen.get("success"):
+        return gen
+
+    print(f"\n  Test file → {gen['test_file_path']}")
+    print(f"  Tests     : {gen.get('test_count', 0)}")
+    print(f"  Categories: {', '.join(gen.get('test_categories', []))}")
+
+    result = {**gen}
+
+    if run:
+        print("  Running tests …")
+        run_result = agent.run_tests(gen["test_file_path"])
+        result["run_result"] = run_result
+        status = "PASSED" if run_result.get("success") else "FAILED"
+        total  = run_result.get("total",  0)
+        passed = run_result.get("passed", 0)
+        failed = run_result.get("failed", 0)
+        print(f"  Result : {status}  ({passed}/{total} passed, {failed} failed)")
+        if run_result.get("failed", 0) > 0:
+            print("\n  Test output (last 2000 chars):")
+            print(run_result.get("output", "")[-2000:])
 
     return result
 
@@ -1412,6 +1602,32 @@ Examples:
                        "(default: next to each original script)"
                    ))
 
+    # ── Glue metrics for memory/executor/worker tuning ───────────────────────
+    p.add_argument("--glue-metrics", metavar="FILE",
+                   help=(
+                       "JSON file with Glue CloudWatch metrics from a previous run "
+                       "(glue.ALL.jvm.heap.usage, glue.driver.system.cpuSystemLoad, "
+                       "glue.driver.workerutilized, etc.). Used to tune executor "
+                       "memory, driver settings, and worker count in --apply-fixes mode."
+                   ))
+    p.add_argument("--glue-job-name", metavar="NAME",
+                   help="Glue job name for live CloudWatch metric fetch (used with --apply-fixes)")
+    p.add_argument("--glue-run-id", metavar="RUN_ID",
+                   help="Glue job run ID for live CloudWatch metric fetch")
+    p.add_argument("--current-workers", type=int, default=10,
+                   help="Current number_of_workers baseline for metric-based tuning (default: 10)")
+    p.add_argument("--executor-memory-gb", type=float, default=4.0,
+                   help="Current executor memory in GB for metric-based tuning (default: 4.0)")
+
+    # ── Test generation mode ─────────────────────────────────────────────────
+    p.add_argument("--run-tests", action="store_true",
+                   help=(
+                       "After analysis (and optional --apply-fixes), generate pytest "
+                       "test cases for each script and run them against a local Spark session"
+                   ))
+    p.add_argument("--tests-output-dir", default=None, metavar="DIR",
+                   help="Directory for generated test files (default: tests/ next to each script)")
+
     # ── Job-generation mode ──────────────────────────────────────────────────
     p.add_argument("--reference-script", metavar="FILE",
                    help="Reference PySpark script for style guidance when --generate-job is used")
@@ -1652,6 +1868,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.apply_fixes:
         _run_apply_fixes(all_results, args)
 
+    # ── Mode D: generate + run tests for each (optionally optimized) script ──
+    if args.run_tests:
+        print(f"\n{'─'*65}")
+        print("  GENERATING & RUNNING TESTS")
+        print(f"{'─'*65}")
+        # Prefer optimized script if apply-fixes was run
+        for script_path in all_results:
+            target = script_path
+            if args.apply_fixes:
+                if args.fixes_output_dir:
+                    opt = Path(args.fixes_output_dir) / f"{Path(script_path).stem}_optimized{Path(script_path).suffix}"
+                else:
+                    p = Path(script_path)
+                    opt = p.parent / f"{p.stem}_optimized{p.suffix}"
+                if opt.exists():
+                    target = str(opt)
+
+            generate_and_run_tests(
+                script_path      = target,
+                test_output_dir  = args.tests_output_dir,
+                run              = True,
+                processing_mode  = args.processing_mode,
+            )
+
     if args.interactive:
         interactive_mode()
 
@@ -1704,11 +1944,32 @@ def _run_generate_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_glue_metrics(args: argparse.Namespace) -> Optional[Dict]:
+    """Load Glue metrics from file or return None."""
+    if getattr(args, "glue_metrics", None):
+        try:
+            with open(args.glue_metrics) as fh:
+                raw = json.load(fh)
+            print(f"  Loaded Glue metrics from {args.glue_metrics} ({len(raw)} metric(s))")
+            return raw
+        except Exception as exc:
+            print(f"  [WARNING] Could not load Glue metrics: {exc}")
+    return None
+
+
 def _run_apply_fixes(all_results: Dict[str, Any], args: argparse.Namespace) -> None:
     """Apply recommendations to each successfully analysed script."""
     print(f"\n{'─'*65}")
     print("  APPLYING FIXES")
     print(f"{'─'*65}")
+
+    glue_metrics = _load_glue_metrics(args)
+    if glue_metrics:
+        print(f"  Tuning from Glue metrics: {', '.join(glue_metrics.keys())}")
+
+    cur_workers = getattr(args, "current_workers", 10)
+    cur_type    = getattr(args, "worker_type", "G.2X")
+    cur_mem_gb  = getattr(args, "executor_memory_gb", 4.0)
 
     for script_path, result in all_results.items():
         if not result.get("success"):
@@ -1725,16 +1986,20 @@ def _run_apply_fixes(all_results: Dict[str, Any], args: argparse.Namespace) -> N
             out = str(p.parent / f"{p.stem}_optimized{p.suffix}")
 
         fix_result = apply_recommendations_to_script(
-            script_path = script_path,
-            output_path = out,
-            dry_run     = False,
+            script_path         = script_path,
+            output_path         = out,
+            dry_run             = False,
+            glue_metrics        = glue_metrics,
+            current_workers     = cur_workers,
+            current_worker_type = cur_type,
+            executor_memory_gb  = cur_mem_gb,
         )
         if fix_result.get("success"):
             n = fix_result.get("fixes_applied", 0)
             print(f"  {Path(script_path).name:<40}  {n:>3} fix(es)  → {out}")
             for entry in fix_result.get("changelog", []):
                 fix_type = entry.get("fix", "")
-                desc     = entry.get("description", "")[:80]
+                desc     = entry.get("description", "")[:90]
                 line_no  = entry.get("line", "")
                 loc      = f" (L{line_no})" if line_no else ""
                 print(f"      • [{fix_type}]{loc} {desc}")

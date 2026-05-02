@@ -6,6 +6,8 @@ Applies optimization recommendations to existing PySpark scripts.
 Rule-based mode
   - Injects recommended Spark configs (AQE, KryoSerializer, shuffle tuning)
     into the SparkSession builder chain
+  - Merges Glue CloudWatch metric-derived config overrides (heap, CPU, worker
+    utilisation) when glue_metrics are supplied
   - Replaces .repartition(1) with .coalesce(1) (no full shuffle needed)
   - Adds .coalesce() hint comment before write operations lacking one
   - Adds broadcast() hints for small / flagged tables inside .join() calls
@@ -14,8 +16,8 @@ Rule-based mode
   - Inserts .cache() before DataFrames used by multiple actions
 
 LLM mode
-  - Sends full script + analysis results to Claude; receives a complete
-    rewritten script with every recommendation applied and a changelog.
+  - Sends full script + analysis results + metric findings to Claude; receives
+    a complete rewritten script with every recommendation applied and a changelog.
 """
 from __future__ import annotations
 
@@ -58,15 +60,36 @@ class RecommendationApplierAgent(CostOptimizerAgent):
         script_content: str,
         analysis_result: Dict[str, Any],
         source_tables: Optional[List[Dict]] = None,
+        glue_metrics: Optional[Dict[str, Any]] = None,
+        current_workers: int = 10,
+        current_worker_type: str = "G.2X",
+        current_executor_memory_gb: float = 4.0,
     ) -> Dict[str, Any]:
         """
         Apply recommendations to *script_content*.
+
+        Args:
+            script_path:               Original script file path.
+            script_content:            Source code to transform.
+            analysis_result:           Output from analyze_pyspark_script().
+            source_tables:             Table metadata for broadcast-hint logic.
+            glue_metrics:              Raw Glue CloudWatch metrics dict.  When
+                                       supplied, memory / CPU / worker settings
+                                       are tuned from actual job telemetry.
+                                       Accepts time-series or pre-aggregated form
+                                       (see GlueMetricsAnalyzer.parse_metrics).
+            current_workers:           Current number_of_workers (used for
+                                       worker recommendation baseline).
+            current_worker_type:       Current Glue worker type (G.1X … G.8X).
+            current_executor_memory_gb: Current executor memory in GB.
 
         Returns:
             modified_script  – transformed source code (str)
             original_script  – unchanged original (str)
             changelog        – list of fix dicts {line, fix, description, ...}
             fixes_applied    – total number of fixes (int)
+            worker_recommendation – dict from GlueMetricsAnalyzer (may be None)
+            metric_findings  – human-readable metric insights (list[str])
             success          – bool
             errors           – list[str]
         """
@@ -75,16 +98,31 @@ class RecommendationApplierAgent(CostOptimizerAgent):
             script_content  = script_content,
             source_tables   = source_tables or [],
             processing_mode = "full",
-            current_config  = {},
+            current_config  = {
+                "number_of_workers":    current_workers,
+                "worker_type":          current_worker_type,
+                "executor_memory_gb":   current_executor_memory_gb,
+            },
         )
-        result = self.analyze(input_data, context={"analysis_result": analysis_result})
+        result = self.analyze(
+            input_data,
+            context={
+                "analysis_result":           analysis_result,
+                "glue_metrics":              glue_metrics or {},
+                "current_workers":           current_workers,
+                "current_worker_type":       current_worker_type,
+                "current_executor_memory_gb": current_executor_memory_gb,
+            },
+        )
         return {
-            "success":         result.success,
-            "modified_script": result.analysis.get("modified_script", script_content),
-            "original_script": script_content,
-            "changelog":       result.recommendations,
-            "fixes_applied":   result.analysis.get("fixes_count", 0),
-            "errors":          result.errors,
+            "success":               result.success,
+            "modified_script":       result.analysis.get("modified_script", script_content),
+            "original_script":       script_content,
+            "changelog":             result.recommendations,
+            "fixes_applied":         result.analysis.get("fixes_count", 0),
+            "worker_recommendation": result.analysis.get("worker_recommendation"),
+            "metric_findings":       result.analysis.get("metric_findings", []),
+            "errors":                result.errors,
         }
 
     # ─── Rule-based core ──────────────────────────────────────────────────────
@@ -97,7 +135,59 @@ class RecommendationApplierAgent(CostOptimizerAgent):
         analysis  = context.get("analysis_result", {})
         changelog: List[Dict] = []
 
-        code = self._inject_spark_configs(code, changelog)
+        # ── Glue metrics → config overrides + worker recommendation ───────────
+        metric_overrides: Dict[str, str] = {}
+        worker_rec: Optional[Dict]       = None
+        metric_findings: List[str]       = []
+        raw_metrics = context.get("glue_metrics", {})
+
+        if raw_metrics:
+            try:
+                from .glue_metrics_analyzer import GlueMetricsAnalyzer
+                analyzer        = GlueMetricsAnalyzer()
+                parsed          = analyzer.parse_metrics(raw_metrics)
+                metric_analysis = analyzer.analyze(parsed)
+                metric_findings = metric_analysis.get("findings", [])
+
+                cur_mem_gb      = float(context.get("current_executor_memory_gb", 4.0))
+                metric_overrides = analyzer.get_spark_config_overrides(
+                    metric_analysis, current_executor_memory_gb=cur_mem_gb
+                )
+                worker_rec = analyzer.get_worker_recommendation(
+                    metric_analysis,
+                    current_workers     = int(context.get("current_workers", 10)),
+                    current_worker_type = context.get("current_worker_type", "G.2X"),
+                )
+                if metric_overrides:
+                    changelog.append({
+                        "fix":         "glue_metric_configs",
+                        "description": (
+                            f"Derived {len(metric_overrides)} Spark config adjustment(s) from "
+                            "Glue CloudWatch metrics (heap, CPU, worker utilisation)"
+                        ),
+                        "configs":     metric_overrides,
+                        "findings":    metric_findings,
+                    })
+                if worker_rec and worker_rec.get("changed"):
+                    changelog.append({
+                        "fix":         "worker_recommendation",
+                        "description": "; ".join(worker_rec.get("reason", [])),
+                        "current": {
+                            "workers":     worker_rec["current_workers"],
+                            "worker_type": worker_rec["current_worker_type"],
+                        },
+                        "recommended": {
+                            "workers":     worker_rec["recommended_workers"],
+                            "worker_type": worker_rec["recommended_type"],
+                        },
+                    })
+            except Exception as exc:
+                changelog.append({
+                    "fix":         "glue_metrics_error",
+                    "description": f"Metrics analysis skipped: {exc}",
+                })
+
+        code = self._inject_spark_configs(code, changelog, metric_overrides)
         code = self._fix_repartition_1(code, changelog)
         code = self._add_coalesce_before_write(code, changelog)
         code = self._add_broadcast_hints(code, tables, changelog)
@@ -110,10 +200,12 @@ class RecommendationApplierAgent(CostOptimizerAgent):
             agent_name      = self.AGENT_NAME,
             success         = True,
             analysis        = {
-                "modified_script": code,
-                "original_script": input_data.script_content,
-                "changelog":       changelog,
-                "fixes_count":     len(changelog),
+                "modified_script":       code,
+                "original_script":       input_data.script_content,
+                "changelog":             changelog,
+                "fixes_count":           len(changelog),
+                "worker_recommendation": worker_rec,
+                "metric_findings":       metric_findings,
             },
             recommendations = changelog,
         )
@@ -122,7 +214,27 @@ class RecommendationApplierAgent(CostOptimizerAgent):
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         import json
-        analysis = context.get("analysis_result", {})
+        analysis     = context.get("analysis_result", {})
+        raw_metrics  = context.get("glue_metrics", {})
+        cur_workers  = context.get("current_workers", 10)
+        cur_type     = context.get("current_worker_type", "G.2X")
+        cur_mem_gb   = context.get("current_executor_memory_gb", 4.0)
+
+        metric_section = ""
+        if raw_metrics:
+            metric_section = f"""
+## Glue CloudWatch Metrics (use these to tune memory/executor/driver settings)
+- Current configuration: {cur_workers} workers × {cur_type} ({cur_mem_gb} GB executor memory)
+```json
+{json.dumps(raw_metrics, indent=2, default=str)}
+```
+Interpret and apply:
+- glue.ALL.jvm.heap.usage  > 0.80 → increase executor memory, enable compression
+- glue.ALL.system.cpuSystemLoad < 0.30 → workers are idle; reduce count or increase executor.cores
+- glue.ALL.system.cpuSystemLoad > 0.80 → CPU bottleneck; add workers or reduce executor.cores
+- glue.driver.workerutilized vs numberAllExecutors → right-size number_of_workers
+- Emit recommended number_of_workers and worker_type in the changelog.
+"""
         return f"""
 You are a Senior PySpark Engineer tasked with applying optimization recommendations
 to the following script.  Produce a COMPLETE, runnable, modified version of the script
@@ -142,15 +254,17 @@ with every recommendation applied, followed by a JSON changelog.
 ```json
 {json.dumps(input_data.source_tables, indent=2)}
 ```
-
+{metric_section}
 ## Required Changes (apply ALL of these)
 1. Inject AQE Spark configs into the SparkSession builder.
-2. Replace `.repartition(1)` with `.coalesce(1)` where appropriate.
-3. Add `broadcast()` hints for small tables (< 500k rows) inside `.join()` calls.
-4. Add `.cache()` before DataFrames used by multiple actions.
-5. Add `.coalesce(N)` before write operations lacking one.
-6. Replace UDFs with equivalent pyspark.sql.functions where feasible.
-7. Apply every `code_refactoring` entry from the analysis JSON above.
+2. If Glue metrics are provided above, tune executor.memory, executor.memoryOverhead,
+   memory.fraction, dynamicAllocation, and executor.cores accordingly.
+3. Replace `.repartition(1)` with `.coalesce(1)` where appropriate.
+4. Add `broadcast()` hints for small tables (< 500k rows) inside `.join()` calls.
+5. Add `.cache()` before DataFrames used by multiple actions.
+6. Add `.coalesce(N)` before write operations lacking one.
+7. Replace UDFs with equivalent pyspark.sql.functions where feasible.
+8. Apply every `code_refactoring` entry from the analysis JSON above.
 
 ## Output Format
 Return a JSON object with:
@@ -158,14 +272,29 @@ Return a JSON object with:
   "modified_script": "<complete modified Python source>",
   "changelog": [
     {{"line": <int>, "fix": "<type>", "description": "<what changed and why>"}}
-  ]
+  ],
+  "worker_recommendation": {{
+    "recommended_workers": <int>,
+    "recommended_type": "<G.1X|G.2X|G.4X|G.8X>",
+    "reason": "<one sentence>"
+  }}
 }}
 """
 
     # ─── Individual fix helpers ────────────────────────────────────────────────
 
-    def _inject_spark_configs(self, code: str, log: List[Dict]) -> str:
-        """Insert recommended Spark configs after the SparkSession builder chain."""
+    def _inject_spark_configs(
+        self,
+        code: str,
+        log: List[Dict],
+        metric_overrides: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Insert recommended Spark configs after the SparkSession builder chain.
+        Base _SPARK_CONFIGS are merged with *metric_overrides* (metrics take priority).
+        """
+        effective_configs = {**_SPARK_CONFIGS, **(metric_overrides or {})}
+
         lines = code.splitlines()
 
         # Find last line of the SparkSession builder (.getOrCreate / .enableHiveSupport)
@@ -183,7 +312,7 @@ Return a JSON object with:
                     "SparkSession builder not found – add these configs manually:\n"
                     + "\n".join(
                         f'spark.conf.set("{k}", "{v}")'
-                        for k, v in _SPARK_CONFIGS.items()
+                        for k, v in effective_configs.items()
                     )
                 ),
             })
@@ -191,7 +320,7 @@ Return a JSON object with:
 
         # Which configs are already set?
         existing = set(re.findall(r'spark\.conf\.set\(["\']([^"\']+)', code))
-        missing  = {k: v for k, v in _SPARK_CONFIGS.items() if k not in existing}
+        missing  = {k: v for k, v in effective_configs.items() if k not in existing}
         if not missing:
             return code
 

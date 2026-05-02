@@ -7,6 +7,8 @@ from .resource_allocator import ResourceAllocatorAgent
 from .recommendations import RecommendationsAgent
 from .recommendation_applier import RecommendationApplierAgent
 from .job_generator import JobGeneratorAgent
+from .glue_metrics_analyzer import GlueMetricsAnalyzer
+from .script_tester import ScriptTesterAgent
 
 __all__ = [
     'CostOptimizerAgent',
@@ -19,4 +21,6 @@ __all__ = [
     'RecommendationsAgent',
     'RecommendationApplierAgent',
     'JobGeneratorAgent',
+    'GlueMetricsAnalyzer',
+    'ScriptTesterAgent',
 ]
