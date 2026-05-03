@@ -1,0 +1,79 @@
+{
+  "_comment": "Pass this file with: --config config/optimizer_tables_config.json",
+  "_usage": "Each table entry overrides auto-detection. Only 'table' is required; add fields you know for accurate recommendations.",
+
+  "tables": [
+    {
+      "_comment_required": "--- MINIMUM (table name only) ---",
+      "table":            "orders",
+      "database":         "ecommerce_db"
+    },
+    {
+      "_comment_recommended": "--- RECOMMENDED (add sizes you know) ---",
+      "table":            "transactions",
+      "database":         "sales_db",
+      "size_gb":          120.5,
+      "record_count":     450000000,
+      "column_count":     38,
+      "format":           "parquet",
+      "partition_column": "event_date",
+      "location":         "s3://my-bucket/sales/transactions/"
+    },
+    {
+      "_comment_full": "--- FULL (all supported fields) ---",
+      "table":            "customers",
+      "database":         "ecommerce_db",
+
+      "size_gb":          2.4,
+      "record_count":     5000000,
+      "column_count":     22,
+      "format":           "parquet",
+
+      "partition_column": "signup_month",
+      "location":         "s3://my-bucket/ecommerce/customers/",
+
+      "has_skew":         false,
+
+      "processing_mode":  "full",
+
+      "columns": [
+        {"name": "customer_id",   "type": "string"},
+        {"name": "name",          "type": "string"},
+        {"name": "region",        "type": "string"},
+        {"name": "signup_month",  "type": "string"},
+        {"name": "total_orders",  "type": "long"}
+      ]
+    },
+    {
+      "_comment_skewed": "--- SKEWED FACT TABLE ---",
+      "table":            "clickstream_events",
+      "database":         "web_db",
+      "size_gb":          850.0,
+      "record_count":     9000000000,
+      "column_count":     15,
+      "format":           "parquet",
+      "partition_column": "event_date",
+      "has_skew":         true,
+      "location":         "s3://my-bucket/web/clickstream/"
+    },
+    {
+      "_comment_small_dim": "--- SMALL DIMENSION TABLE (broadcast candidate) ---",
+      "table":            "product_dim",
+      "database":         "ecommerce_db",
+      "size_gb":          0.04,
+      "record_count":     80000,
+      "column_count":     12,
+      "format":           "parquet"
+    },
+    {
+      "_comment_s3_direct": "--- DIRECT S3 READ (no Glue catalog) ---",
+      "table":            "raw_ingest",
+      "database":         "",
+      "location":         "s3://raw-bucket/ingest/2025/",
+      "size_gb":          45.0,
+      "record_count":     200000000,
+      "column_count":     8,
+      "format":           "json"
+    }
+  ]
+}

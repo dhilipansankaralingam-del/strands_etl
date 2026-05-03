@@ -2189,11 +2189,48 @@ Examples:
 
 
 def _load_config(config_path: str) -> List[Dict]:
+    """
+    Load table metadata from a config JSON file.
+
+    Accepts three formats:
+    1. Plain list:  [ {"table": "orders", "size_gb": 10}, ... ]
+    2. Optimizer format:  {"tables": [ ... ]}
+    3. Workload format (etl_config.json style):
+         {"workload": {"data_sources": [ {"database": "db", "table": "t"}, ... ] }}
+    """
     with open(config_path) as fh:
         data = json.load(fh)
+
+    # Format 1: bare list
     if isinstance(data, list):
         return data
-    return data.get("tables", [data])
+
+    # Format 2: optimizer {"tables": [...]}
+    if "tables" in data:
+        return data["tables"]
+
+    # Format 3: workload format – extract from data_sources
+    workload = data.get("workload", {})
+    data_sources = workload.get("data_sources", [])
+    if data_sources:
+        tables: List[Dict] = []
+        for src in data_sources:
+            entry: Dict[str, Any] = {
+                "table":    src.get("table", ""),
+                "database": src.get("database", ""),
+            }
+            # Carry over size/record hints if present in the workload file
+            for key in ("size_gb", "record_count", "column_count", "format",
+                        "partition_column", "location", "has_skew"):
+                if key in src:
+                    entry[key] = src[key]
+            if entry["table"]:
+                tables.append(entry)
+        if tables:
+            return tables
+
+    # Fallback: treat the whole object as a single table entry
+    return [data]
 
 
 def _resolve_table_args(table_args: List[str]) -> List[Dict]:
