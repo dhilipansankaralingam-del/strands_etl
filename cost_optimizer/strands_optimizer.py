@@ -2185,6 +2185,13 @@ Examples:
 
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable debug logging")
+    p.add_argument("--show-prompts", action="store_true",
+                   help=(
+                       "Print full LLM prompt and response text for every agent call. "
+                       "Without this flag only the first 400 chars are shown. "
+                       "Always shows: call type (strands/bedrock_direct), model, region, "
+                       "token counts, and any AWS credential/permission errors."
+                   ))
     return p
 
 
@@ -2370,9 +2377,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     args   = parser.parse_args(argv)
 
     logging.basicConfig(
-        level  = logging.DEBUG if args.verbose else logging.WARNING,
-        format = "%(levelname)s %(name)s %(message)s",
+        level  = logging.DEBUG if args.verbose else logging.INFO,
+        format = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt= "%H:%M:%S",
     )
+
+    # Enable full prompt/response display when --show-prompts or --verbose is passed
+    show_prompts = getattr(args, "show_prompts", False) or args.verbose
+    try:
+        from .agents.base import set_llm_verbose as _set_llm_verbose
+    except ImportError:
+        try:
+            from cost_optimizer.agents.base import set_llm_verbose as _set_llm_verbose
+        except ImportError:
+            _set_llm_verbose = None
+    if _set_llm_verbose:
+        _set_llm_verbose(show_prompts)
 
     # Validate: one of scripts-dir / script / generate-job must be provided
     if not args.scripts_dir and not args.script and not args.generate_job:

@@ -7,11 +7,137 @@ Supports both rule-based and LLM-powered analysis.
 """
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+
+_log = logging.getLogger("strands_optimizer.llm")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM verbosity flag
+#   False (default) → print one-line call header + first 300 chars of prompt/response
+#   True            → print full prompt and full response text
+# Set via set_llm_verbose(True) or by passing --show-prompts on the CLI.
+# ─────────────────────────────────────────────────────────────────────────────
+
+LLM_VERBOSE: bool = False
+
+
+def set_llm_verbose(flag: bool) -> None:
+    global LLM_VERBOSE
+    LLM_VERBOSE = flag
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Print helpers — bordered box style consistent with the rest of the CLI output
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BOX_W = 68   # total width of the bordered LLM call box
+
+
+def _box_top(label: str) -> None:
+    inner = f" LLM CALL [{label}] "
+    fill  = _BOX_W - len(inner) - 2
+    print(f"\n  ┌{'─' * (len(inner)//2)}{inner}{'─' * (fill - len(inner)//2)}┐")
+
+
+def _box_row(key: str, value: str) -> None:
+    line = f"  {key}: {value}"
+    pad  = max(0, _BOX_W - len(line) - 1)
+    print(f"  │{line[2:]:<{_BOX_W-4}}│")
+
+
+def _box_divider(label: str = "") -> None:
+    if label:
+        inner = f" {label} "
+        fill  = _BOX_W - len(inner) - 4
+        print(f"  ├{'─' * 2}{inner}{'─' * fill}┤")
+    else:
+        print(f"  ├{'─' * (_BOX_W - 4)}┤")
+
+
+def _box_text(text: str, max_chars: Optional[int] = None) -> None:
+    """Print text lines inside the box, optionally truncating."""
+    if max_chars and len(text) > max_chars:
+        text = text[:max_chars] + f"\n  ... [{len(text) - max_chars:,} more chars hidden — use --show-prompts to see all]"
+    for raw_line in text.splitlines():
+        # wrap long lines
+        while len(raw_line) > _BOX_W - 6:
+            print(f"  │ {raw_line[:_BOX_W-6]} │")
+            raw_line = raw_line[_BOX_W-6:]
+        print(f"  │ {raw_line:<{_BOX_W-4}} │")
+
+
+def _box_bottom() -> None:
+    print(f"  └{'─' * (_BOX_W - 4)}┘")
+
+
+def _box_error(source: str, exc_type: str, message: str, hints: List[str]) -> None:
+    """Print a red-flagged error block inside the LLM call box."""
+    _box_divider("ERROR")
+    _box_text(f"[FAILED] {source} → {exc_type}")
+    _box_text(f"Message : {message}")
+    for hint in hints:
+        _box_text(f"  → {hint}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AWS error → actionable hint mapper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _aws_error_hints(error_code: str, region: str = "", model_id: str = "") -> List[str]:
+    """Return a list of actionable fix hints for a given botocore error code."""
+    hints: List[str] = []
+    ec = error_code.lower()
+
+    if "credentials" in ec or ec == "nocredentialserror":
+        hints += [
+            "No AWS credentials found.",
+            "Set env vars: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_SESSION_TOKEN",
+            "Or configure a profile:  aws configure  (then use --region and AWS_PROFILE)",
+            "Or attach an IAM role if running on EC2/ECS/Lambda.",
+        ]
+    elif "accessdenied" in ec or "notauthorized" in ec:
+        hints += [
+            f"IAM principal lacks permission to call bedrock:InvokeModel.",
+            f"Add to your IAM policy:",
+            f'  {{"Effect":"Allow","Action":"bedrock:InvokeModel",',
+            f'   "Resource":"arn:aws:bedrock:{region or "*"}::foundation-model/*"}}',
+            "Also ensure Bedrock model access is enabled in the AWS Console → Bedrock → Model access.",
+        ]
+    elif "resourcenotfound" in ec or "validationexception" in ec:
+        hints += [
+            f"Model ID not found or not available in region '{region}'.",
+            f"Requested model : {model_id}",
+            "Check:  aws bedrock list-foundation-models --region " + (region or "us-west-2"),
+            "For cross-region inference use the 'us.' prefix, e.g.:",
+            "  us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        ]
+    elif "throttling" in ec:
+        hints += [
+            "Request rate limit hit (ThrottlingException).",
+            "Bedrock on-demand default: ~1 req/sec for Claude Sonnet.",
+            "Options: add retry logic, request a quota increase in AWS Service Quotas,",
+            "or switch to Provisioned Throughput.",
+        ]
+    elif "serviceunavailable" in ec or "internalservererror" in ec:
+        hints += [
+            "Transient AWS service error — safe to retry.",
+            "If persistent: check https://health.aws.amazon.com/ for Bedrock outages.",
+        ]
+    elif "endpointresolution" in ec or "connect" in ec:
+        hints += [
+            f"Cannot reach Bedrock endpoint in region '{region}'.",
+            "Check: network connectivity, VPC endpoint config, firewall rules.",
+            "Verify the region is correct:  --region " + (region or "us-west-2"),
+        ]
+    else:
+        hints.append(f"Unexpected AWS error code: {error_code}")
+
+    return hints
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,8 +151,6 @@ class _TokenTracker:
     Provides per-operation breakdown and session totals expressed as a
     percentage of a configurable daily budget.
     """
-    # Conservative daily budgets (on-demand Bedrock, developer account).
-    # Override via TOKEN_TRACKER.daily_input_budget / daily_output_budget.
     daily_input_budget:  int = 1_000_000   # 1 M input tokens / day
     daily_output_budget: int =   200_000   # 200 K output tokens / day
 
@@ -41,10 +165,11 @@ class _TokenTracker:
 
     def record(
         self,
-        operation:    str,
-        input_tokens: int,
+        operation:     str,
+        input_tokens:  int,
         output_tokens: int,
-        estimated:    bool = False,
+        estimated:     bool = False,
+        call_type:     str  = "unknown",
     ) -> None:
         """Record one LLM call and print a one-line summary immediately."""
         self.ops.append({
@@ -52,11 +177,12 @@ class _TokenTracker:
             "input_tokens":  input_tokens,
             "output_tokens": output_tokens,
             "estimated":     estimated,
+            "call_type":     call_type,
         })
         est_flag = " ~est" if estimated else ""
         pct_in   = min(100.0, self.total_input / self.daily_input_budget * 100)
         print(
-            f"  [LLM] {operation:<28}  "
+            f"  [LLM/{call_type}] {operation:<24}  "
             f"in={input_tokens:>6,}  out={output_tokens:>5,}{est_flag}  "
             f"session={self.total_input:>7,} in  ({pct_in:.1f}% of daily budget)"
         )
@@ -84,34 +210,34 @@ class _TokenTracker:
         """Print a full token usage table at the end of a session."""
         if not self.ops:
             return
-        w = 65
+        w = 72
         print(f"\n{'─' * w}")
         print("  LLM TOKEN USAGE SUMMARY")
         print(f"{'─' * w}")
-        hdr = f"  {'Operation':<28}  {'Input':>8}  {'Output':>7}  {'Est?':>5}"
-        print(hdr)
-        print(f"  {'─' * 28}  {'─' * 8}  {'─' * 7}  {'─' * 5}")
+        print(f"  {'Operation':<28}  {'Via':<14}  {'Input':>8}  {'Output':>7}  {'Est?':>5}")
+        print(f"  {'─'*28}  {'─'*14}  {'─'*8}  {'─'*7}  {'─'*5}")
         for op in self.ops:
             est = "yes" if op["estimated"] else "no"
             print(
-                f"  {op['operation']:<28}  "
+                f"  {op['operation']:<28}  {op.get('call_type','?'):<14}  "
                 f"{op['input_tokens']:>8,}  {op['output_tokens']:>7,}  {est:>5}"
             )
-        print(f"  {'─' * 28}  {'─' * 8}  {'─' * 7}")
-        print(f"  {'TOTAL':<28}  {self.total_input:>8,}  {self.total_output:>7,}")
+        print(f"  {'─'*28}  {'─'*14}  {'─'*8}  {'─'*7}")
+        print(f"  {'TOTAL':<28}  {'':14}  {self.total_input:>8,}  {self.total_output:>7,}")
         pct_in  = min(100.0, self.total_input  / self.daily_input_budget  * 100)
         pct_out = min(100.0, self.total_output / self.daily_output_budget * 100)
         print(f"\n  Estimated cost   : ${self.estimated_cost_usd:.4f} USD")
-        print(f"  Daily budget used: {pct_in:.1f}% input ({self.total_input:,} / "
-              f"{self.daily_input_budget:,})  |  "
-              f"{pct_out:.1f}% output ({self.total_output:,} / {self.daily_output_budget:,})")
+        print(
+            f"  Daily budget used: {pct_in:.1f}% input  "
+            f"({self.total_input:,} / {self.daily_input_budget:,} tokens)  |  "
+            f"{pct_out:.1f}% output  "
+            f"({self.total_output:,} / {self.daily_output_budget:,} tokens)"
+        )
         if any(o["estimated"] for o in self.ops):
             print(
-                "  * 'Est?' = yes: token count approximated from text length (~4 chars = 1 token).\n"
-                "    Causes: (a) strands-agents installed but metrics.accumulated_usage unavailable\n"
-                "            (b) strands not installed AND boto3 bedrock-runtime call failed.\n"
-                "    Fix: ensure strands-agents>=0.1 is installed and AWS credentials allow\n"
-                "    bedrock:InvokeModel — then exact counts will appear (Est? = no)."
+                "  * Est?=yes — token count approximated (~4 chars = 1 token).\n"
+                "    Cause: strands metrics.accumulated_usage unavailable or boto3 usage field missing.\n"
+                "    Fix  : ensure strands-agents is installed and bedrock:InvokeModel is permitted."
             )
 
 
@@ -243,51 +369,78 @@ class CostOptimizerAgent(ABC):
 
     def _analyze_with_llm(self, input_data: AnalysisInput, context: Dict) -> AnalysisResult:
         """
-        Call the LLM for analysis, tracking exact token usage.
+        Call the LLM for analysis, logging every step and tracking token usage.
 
-        Strategy:
-        1. Try the strands Agent (when strands-agents is installed).
-        2. Fall back to a direct boto3 bedrock-runtime call, which always
-           returns exact token counts in the response body.
-        3. If both are unavailable, fall back to rule-based analysis.
+        Call order:
+          1. strands Agent  (when strands-agents is installed)
+          2. boto3 bedrock-runtime direct call  (when strands is absent)
+          3. rule-based fallback  (when both LLM paths fail)
+
+        Use --show-prompts / set_llm_verbose(True) to see full prompt + response text.
         """
-        prompt = self._build_llm_prompt(input_data, context)
-        response_text  = ""
-        input_tokens   = 0
-        output_tokens  = 0
-        estimated      = False  # True when counts are character-length estimates
+        prompt        = self._build_llm_prompt(input_data, context)
+        response_text = ""
+        input_tokens  = 0
+        output_tokens = 0
+        estimated     = False
+        call_type     = "unknown"
+
+        # ── Print call header (always visible) ───────────────────────────────
+        _box_top("?")   # placeholder — redrawn with real call_type below
+        print(f"  │ {'Agent':<10}: {self.AGENT_NAME:<{_BOX_W-18}} │")
+        print(f"  │ {'Model':<10}: {self.model_id:<{_BOX_W-18}} │")
+        print(f"  │ {'Region':<10}: {self.region:<{_BOX_W-18}} │")
+        print(f"  │ {'Prompt':<10}: {len(prompt):,} chars (~{len(prompt)//4:,} tokens est)  │")
+
+        # ── Show prompt ───────────────────────────────────────────────────────
+        _box_divider("PROMPT")
+        _box_text(prompt, max_chars=None if LLM_VERBOSE else 400)
 
         # ── Attempt 1: strands Agent ──────────────────────────────────────────
+        _box_divider("CALLING")
         try:
+            print(f"  │ Trying strands-agents SDK ...{' ' * (_BOX_W - 33)}│")
             agent    = self._get_llm_agent()   # raises ImportError if not installed
             response = agent(prompt)
+            call_type     = "strands"
             response_text = str(response)
+            print(f"  │ strands call SUCCESS{' ' * (_BOX_W - 24)}│")
+            _log.info("[LLM/strands] %s — call succeeded", self.AGENT_NAME)
 
-            # Strands exposes token counts at:
-            #   response.metrics.accumulated_usage['inputTokens']
-            #   response.metrics.accumulated_usage['outputTokens']
-            #   response.metrics.accumulated_usage['totalTokens']
+            # Extract token counts from response.metrics.accumulated_usage
             try:
                 usage         = response.metrics.accumulated_usage
                 input_tokens  = usage.get("inputTokens",  0)
                 output_tokens = usage.get("outputTokens", 0)
-                estimated     = (input_tokens == 0)  # only estimate if usage missing
-                if estimated:
-                    input_tokens  = max(1, len(prompt)        // 4)
-                    output_tokens = max(1, len(response_text) // 4)
-            except (AttributeError, TypeError):
-                # metrics or accumulated_usage not present (old strands version?)
+                if input_tokens == 0:
+                    raise ValueError("inputTokens=0 in accumulated_usage")
+            except (AttributeError, TypeError, ValueError) as metrics_exc:
+                print(f"  │ [WARN] metrics.accumulated_usage unavailable: {metrics_exc}{' ' * max(0, _BOX_W - 52 - len(str(metrics_exc)))}│")
+                _log.warning("[LLM/strands] token metrics unavailable: %s — estimating", metrics_exc)
                 input_tokens  = max(1, len(prompt)        // 4)
                 output_tokens = max(1, len(response_text) // 4)
                 estimated     = True
 
         except ImportError:
-            # ── Attempt 2: direct boto3 bedrock-runtime call ──────────────────
+            print(f"  │ strands-agents not installed — trying boto3 bedrock-runtime{' ' * (_BOX_W - 64)}│")
+            _log.info("[LLM] strands not installed, falling back to boto3 bedrock-runtime")
+
+            # ── Attempt 2: boto3 bedrock-runtime ─────────────────────────────
             try:
                 import boto3 as _boto3
-                import json   as _json
+                import json  as _json
 
-                client = _boto3.client("bedrock-runtime", region_name=self.region)
+                # Specific exception classes for fine-grained error messages
+                try:
+                    from botocore.exceptions import (
+                        NoCredentialsError       as _NoCreds,
+                        ClientError              as _ClientError,
+                        EndpointResolutionError  as _EndpointErr,
+                    )
+                except ImportError:
+                    _NoCreds, _ClientError, _EndpointErr = Exception, Exception, Exception
+
+                print(f"  │ Trying boto3 bedrock-runtime (region={self.region}){' ' * max(0, _BOX_W - 52 - len(self.region))}│")
 
                 try:
                     from ..prompts.super_prompts import get_prompt as _get_prompt
@@ -295,10 +448,11 @@ class CostOptimizerAgent(ABC):
                 except Exception:
                     system_prompt = (
                         "You are an expert AWS Glue / PySpark cost-optimization assistant. "
-                        "Respond with a JSON object."
+                        "Respond with a valid JSON object only."
                     )
 
-                body = _json.dumps({
+                client = _boto3.client("bedrock-runtime", region_name=self.region)
+                body   = _json.dumps({
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens":        8096,
                     "system":            system_prompt,
@@ -307,25 +461,66 @@ class CostOptimizerAgent(ABC):
 
                 resp      = client.invoke_model(modelId=self.model_id, body=body)
                 resp_body = _json.loads(resp["body"].read())
+                call_type = "bedrock_direct"
 
                 usage         = resp_body.get("usage", {})
                 input_tokens  = usage.get("input_tokens",  max(1, len(prompt) // 4))
                 output_tokens = usage.get("output_tokens", 0)
-                estimated     = "input_tokens" not in usage  # True only if missing
+                estimated     = "input_tokens" not in usage
 
                 content       = resp_body.get("content", [])
                 response_text = content[0].get("text", "") if content else ""
+                print(f"  │ boto3 bedrock-runtime call SUCCESS{' ' * (_BOX_W - 38)}│")
+                _log.info("[LLM/bedrock_direct] %s — call succeeded", self.AGENT_NAME)
 
-            except Exception as exc:
-                # Both strands and boto3 failed — fall back to rule-based
-                import logging as _logging
-                _logging.getLogger("strands_optimizer").warning(
-                    "LLM unavailable (%s); falling back to rule-based analysis.", exc
-                )
+            except _NoCreds as exc:
+                hints = _aws_error_hints("NoCredentialsError", self.region, self.model_id)
+                _box_error("boto3/bedrock", "NoCredentialsError", str(exc), hints)
+                _log.error("[LLM/bedrock_direct] NoCredentialsError: %s", exc)
+                _box_divider("FALLBACK")
+                print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
+                _box_bottom()
                 return self._analyze_rule_based(input_data, context)
 
-        # ── Record token usage in the session tracker ─────────────────────────
-        TOKEN_TRACKER.record(self.AGENT_NAME, input_tokens, output_tokens, estimated=estimated)
+            except _ClientError as exc:
+                code  = exc.response["Error"]["Code"]
+                msg   = exc.response["Error"]["Message"]
+                hints = _aws_error_hints(code, self.region, self.model_id)
+                _box_error("boto3/bedrock", code, msg, hints)
+                _log.error("[LLM/bedrock_direct] ClientError %s: %s", code, msg)
+                _box_divider("FALLBACK")
+                print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
+                _box_bottom()
+                return self._analyze_rule_based(input_data, context)
+
+            except _EndpointErr as exc:
+                hints = _aws_error_hints("EndpointResolutionError", self.region, self.model_id)
+                _box_error("boto3/bedrock", "EndpointResolutionError", str(exc), hints)
+                _log.error("[LLM/bedrock_direct] EndpointResolutionError: %s", exc)
+                _box_divider("FALLBACK")
+                print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
+                _box_bottom()
+                return self._analyze_rule_based(input_data, context)
+
+            except Exception as exc:
+                _box_error("boto3/bedrock", type(exc).__name__, str(exc),
+                           [f"Unexpected error — check logs for details."])
+                _log.error("[LLM/bedrock_direct] %s: %s", type(exc).__name__, exc, exc_info=True)
+                _box_divider("FALLBACK")
+                print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
+                _box_bottom()
+                return self._analyze_rule_based(input_data, context)
+
+        # ── Show response ─────────────────────────────────────────────────────
+        _box_divider("RESPONSE")
+        _box_text(response_text, max_chars=None if LLM_VERBOSE else 400)
+        _box_bottom()
+
+        # ── Record token usage ────────────────────────────────────────────────
+        TOKEN_TRACKER.record(
+            self.AGENT_NAME, input_tokens, output_tokens,
+            estimated=estimated, call_type=call_type,
+        )
 
         return self._parse_llm_response(response_text)
 
