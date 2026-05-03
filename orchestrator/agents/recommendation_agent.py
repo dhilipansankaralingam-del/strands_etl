@@ -224,6 +224,127 @@ def synthesise_recommendations(all_agent_results_json: str, runs_per_day: int = 
         return json.dumps({"error": str(exc)})
 
 
+@tool
+def generate_implementation_plan(all_agent_results_json: str) -> str:
+    """
+    Generate a phased implementation plan with effort estimates and success criteria.
+
+    Args:
+        all_agent_results_json: Combined JSON from all pipeline agents.
+
+    Returns:
+        JSON with phases, tasks, effort_days, owners, success_criteria, and timeline_weeks.
+    """
+    try:
+        results = json.loads(all_agent_results_json) if all_agent_results_json else {}
+
+        code_issues = len(results.get("code_analysis", {}).get("anti_patterns", []))
+        pii_issues  = len(results.get("compliance", {}).get("pii_columns", []))
+        dq_issues   = len(results.get("data_quality", {}).get("issues", []))
+        has_delta   = results.get("delta_iceberg", {}).get("delta_detected", False)
+
+        phases = [
+            {
+                "phase": 1,
+                "name": "Quick Wins (Week 1)",
+                "tasks": [
+                    {"task": "Enable AQE and KryoSerializer", "effort_days": 0.5,
+                     "owner": "Data Engineer", "impact": "high"},
+                    {"task": f"Fix {code_issues} anti-patterns (repartition→coalesce, remove UDFs)",
+                     "effort_days": max(1, code_issues * 0.25), "owner": "Data Engineer",
+                     "impact": "high"},
+                ],
+                "success_criteria": ["All AQE configs active", "Anti-patterns resolved"],
+            },
+            {
+                "phase": 2,
+                "name": "Compliance & Quality (Week 2-3)",
+                "tasks": [
+                    {"task": f"Mask {pii_issues} PII columns", "effort_days": max(1, pii_issues * 0.5),
+                     "owner": "Data Engineer + Legal", "impact": "critical"},
+                    {"task": f"Fix {dq_issues} data quality rules", "effort_days": max(1, dq_issues * 0.3),
+                     "owner": "Data Engineer", "impact": "high"},
+                ],
+                "success_criteria": ["PII masked before sink", "DQ score > 90"],
+            },
+            {
+                "phase": 3,
+                "name": "Infrastructure (Week 3-4)",
+                "tasks": [
+                    {"task": "Right-size Glue workers based on allocation report",
+                     "effort_days": 0.5, "owner": "Platform Engineer", "impact": "medium"},
+                    {"task": "Schedule Delta/Iceberg maintenance jobs" if has_delta else "Add table partitioning",
+                     "effort_days": 1.0, "owner": "Platform Engineer", "impact": "medium"},
+                ],
+                "success_criteria": ["Job cost reduced ≥ 20%", "Maintenance scheduled"],
+            },
+        ]
+
+        total_days = sum(t["effort_days"] for p in phases for t in p["tasks"])
+        return json.dumps({
+            "phases":            phases,
+            "total_effort_days": round(total_days, 1),
+            "timeline_weeks":    4,
+            "recommended_start": "Immediately — Phase 1 has no dependencies",
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def prioritise_findings(all_agent_results_json: str) -> str:
+    """
+    Aggregate findings from all agents and sort by business impact and effort.
+
+    Args:
+        all_agent_results_json: Combined JSON from all pipeline agents.
+
+    Returns:
+        JSON with prioritised_findings list sorted by priority score.
+    """
+    try:
+        results  = json.loads(all_agent_results_json) if all_agent_results_json else {}
+        findings = []
+
+        # Code anti-patterns
+        for ap in results.get("code_analysis", {}).get("anti_patterns", []):
+            findings.append({
+                "source": "CodeAnalyzer", "category": "performance",
+                "title": ap.get("pattern", ap.get("type", "anti-pattern")),
+                "severity": ap.get("severity", "medium"),
+                "effort": "low",
+                "priority_score": {"critical": 90, "high": 70, "medium": 50, "low": 30}.get(
+                    ap.get("severity", "medium").lower(), 50),
+            })
+
+        # PII compliance
+        for col in results.get("compliance", {}).get("pii_columns", []):
+            findings.append({
+                "source": "Compliance", "category": "compliance",
+                "title": f"PII column unmasked: {col.get('column', col) if isinstance(col, dict) else col}",
+                "severity": "critical", "effort": "medium", "priority_score": 95,
+            })
+
+        # Data quality
+        for issue in results.get("data_quality", {}).get("issues", []):
+            findings.append({
+                "source": "DataQuality", "category": "quality",
+                "title": issue.get("rule", str(issue)),
+                "severity": issue.get("severity", "medium") if isinstance(issue, dict) else "medium",
+                "effort": "low", "priority_score": 60,
+            })
+
+        findings.sort(key=lambda x: x["priority_score"], reverse=True)
+        return json.dumps({
+            "prioritised_findings": findings,
+            "total_findings":       len(findings),
+            "critical_count":       sum(1 for f in findings if f["severity"] == "critical"),
+            "high_count":           sum(1 for f in findings if f["severity"] == "high"),
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 def create_recommendation_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                                   region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for recommendation synthesis."""
@@ -231,5 +352,5 @@ def create_recommendation_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[synthesise_recommendations],
+        tools=[synthesise_recommendations, generate_implementation_plan, prioritise_findings],
     )

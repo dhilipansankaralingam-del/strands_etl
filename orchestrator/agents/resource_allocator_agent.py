@@ -264,6 +264,94 @@ def allocate_resources(
         return json.dumps({"error": str(exc)})
 
 
+@tool
+def recommend_flex_execution(
+    effective_size_gb: float,
+    job_sla_minutes: int = 60,
+    runs_per_day: int = 1,
+) -> str:
+    """
+    Recommend AWS Glue Flex vs Standard execution mode based on SLA and volume.
+
+    Args:
+        effective_size_gb: Effective processing volume in GB.
+        job_sla_minutes:   Maximum acceptable job duration in minutes (default 60).
+        runs_per_day:      Number of daily job runs.
+
+    Returns:
+        JSON with mode recommendation, estimated savings, and constraints.
+    """
+    try:
+        # Flex reduces cost by ~34% but can start with up to 10 min delay
+        flex_eligible = job_sla_minutes >= 30 and effective_size_gb < 500
+        # Estimate duration: ~2 GB/min per G.2X worker at 10 workers
+        est_duration = max(5, int(effective_size_gb / 20))
+        standard_cost_hr = 0.88 * 10  # G.2X x 10 workers
+        flex_cost_hr     = standard_cost_hr * 0.66
+        saving_per_run   = round((standard_cost_hr - flex_cost_hr) * (est_duration / 60), 2)
+        annual_savings   = round(saving_per_run * runs_per_day * 365, 0)
+
+        return json.dumps({
+            "recommended_mode":         "FLEX" if flex_eligible else "STANDARD",
+            "flex_eligible":            flex_eligible,
+            "reason": (
+                "SLA allows flex warm-up delay and volume is manageable"
+                if flex_eligible else
+                f"SLA is tight ({job_sla_minutes} min) or volume too large for Flex"
+            ),
+            "estimated_duration_min":   est_duration,
+            "standard_cost_per_run":    round(standard_cost_hr * (est_duration / 60), 2),
+            "flex_cost_per_run":        round(flex_cost_hr     * (est_duration / 60), 2),
+            "saving_per_run_usd":       saving_per_run,
+            "annual_savings_usd":       annual_savings,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def compare_spot_savings(
+    worker_type: str = "G.2X",
+    num_workers: int = 10,
+    estimated_duration_hours: float = 1.0,
+    runs_per_month: int = 30,
+) -> str:
+    """
+    Compare On-Demand vs Spot/Preemptible pricing for a given configuration.
+
+    Args:
+        worker_type:               Glue worker type (G.1X / G.2X / G.4X / G.8X).
+        num_workers:               Number of workers.
+        estimated_duration_hours:  Expected job duration in hours.
+        runs_per_month:            Monthly job run frequency.
+
+    Returns:
+        JSON with on_demand_cost, spot_cost, monthly_savings, risk_assessment.
+    """
+    try:
+        price     = _GLUE_PRICING.get(worker_type, _GLUE_PRICING["G.2X"])["cost"]
+        od_run    = round(price * num_workers * estimated_duration_hours, 2)
+        spot_run  = round(od_run * (1 - _SPOT_DISCOUNT), 2)
+        monthly_savings = round((od_run - spot_run) * runs_per_month, 2)
+        annual_savings  = round(monthly_savings * 12, 0)
+
+        return json.dumps({
+            "worker_type":            worker_type,
+            "num_workers":            num_workers,
+            "on_demand_cost_per_run": od_run,
+            "spot_cost_per_run":      spot_run,
+            "spot_discount_pct":      int(_SPOT_DISCOUNT * 100),
+            "monthly_savings_usd":    monthly_savings,
+            "annual_savings_usd":     annual_savings,
+            "risk_assessment":        "Spot instances may be interrupted — use checkpointing",
+            "recommendation":         (
+                "Use Spot for non-SLA-critical jobs; keep On-Demand for production SLAs"
+            ),
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 def create_resource_allocator_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                                      region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for resource allocation."""
@@ -271,5 +359,5 @@ def create_resource_allocator_agent(model_id: str = "us.anthropic.claude-3-7-son
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[allocate_resources],
+        tools=[allocate_resources, recommend_flex_execution, compare_spot_savings],
     )

@@ -184,6 +184,109 @@ def analyse_data_sizing(
         return json.dumps({"error": str(exc), "effective_size_gb": 100, "skew_risk_score": 20})
 
 
+@tool
+def estimate_shuffle_size(
+    tables_json: str,
+    join_keys_json: str = "[]",
+    processing_mode: str = "full",
+) -> str:
+    """
+    Estimate shuffle data volume and recommend spark.sql.shuffle.partitions.
+
+    Args:
+        tables_json:     JSON array of table descriptors.
+        join_keys_json:  JSON list of join key column names (for cardinality hints).
+        processing_mode: "full" or "delta".
+
+    Returns:
+        JSON with estimated_shuffle_gb, recommended_shuffle_partitions, skew_warning.
+    """
+    try:
+        tables     = json.loads(tables_json)
+        join_keys  = json.loads(join_keys_json) if join_keys_json else []
+        sizing     = _rule_based_sizing(tables, processing_mode, len(join_keys) or 1)
+        eff_gb     = sizing["effective_size_gb"]
+
+        # Shuffle ≈ 2× effective for sort-merge joins; broadcast saves it
+        shuffle_gb = round(eff_gb * 2.0, 2)
+        # Target ~128 MB per partition
+        target_mb  = 128
+        partitions = max(200, min(2000, int((shuffle_gb * 1024) / target_mb)))
+
+        skew_warning = None
+        low_card = ["status", "type", "flag", "category", "region"]
+        for key in join_keys:
+            if any(kw in key.lower() for kw in low_card):
+                skew_warning = f"Join key '{key}' appears low-cardinality — consider AQE skewJoin"
+                break
+
+        return json.dumps({
+            "estimated_shuffle_gb":             shuffle_gb,
+            "recommended_shuffle_partitions":   partitions,
+            "target_partition_size_mb":         target_mb,
+            "skew_warning":                     skew_warning,
+            "aqe_recommendation":               "Enable spark.sql.adaptive.coalescePartitions to auto-tune",
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def analyse_partition_efficiency(tables_json: str) -> str:
+    """
+    Evaluate partition strategy of each source table and recommend improvements.
+
+    Args:
+        tables_json: JSON array of table descriptors with optional partition_column,
+                     record_count, and format fields.
+
+    Returns:
+        JSON with per-table partition scores, issues, and recommended actions.
+    """
+    try:
+        tables = json.loads(tables_json)
+        results = []
+        for t in tables:
+            name    = t.get("table", t.get("name", "unknown"))
+            records = int(t.get("record_count", t.get("records", 0)))
+            part    = t.get("partition_column", "")
+            issues, recs = [], []
+
+            if not part:
+                issues.append("No partition column defined")
+                recs.append("Add a date/region partition column for pruning")
+                score = 20
+            else:
+                low_card = ["status", "flag", "type", "active", "boolean"]
+                if any(kw in part.lower() for kw in low_card):
+                    issues.append(f"Partition column '{part}' has low cardinality")
+                    recs.append("Use a higher-cardinality column (e.g. event_date, customer_id range)")
+                    score = 50
+                else:
+                    score = 90
+
+            if records > 1_000_000_000 and score >= 80:
+                recs.append("Consider Z-order or liquid clustering for 1B+ row tables")
+                score = min(score, 80)
+
+            results.append({
+                "table": name, "record_count": records,
+                "partition_column": part, "score": score,
+                "issues": issues, "recommendations": recs,
+            })
+
+        avg_score = int(sum(r["score"] for r in results) / max(len(results), 1))
+        return json.dumps({
+            "tables": results,
+            "average_partition_score": avg_score,
+            "overall_rating": ("excellent" if avg_score >= 80 else
+                               "good"      if avg_score >= 60 else
+                               "needs_improvement"),
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 # ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
@@ -194,5 +297,5 @@ def create_sizing_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[analyse_data_sizing],
+        tools=[analyse_data_sizing, estimate_shuffle_size, analyse_partition_efficiency],
     )
