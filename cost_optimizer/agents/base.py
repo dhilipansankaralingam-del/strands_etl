@@ -14,6 +14,105 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Session-level token usage tracker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _TokenTracker:
+    """
+    Accumulates Bedrock/LLM token usage across all agent calls in a session.
+
+    Provides per-operation breakdown and session totals expressed as a
+    percentage of a configurable daily budget.
+    """
+    # Conservative daily budgets (on-demand Bedrock, developer account).
+    # Override via TOKEN_TRACKER.daily_input_budget / daily_output_budget.
+    daily_input_budget:  int = 1_000_000   # 1 M input tokens / day
+    daily_output_budget: int =   200_000   # 200 K output tokens / day
+
+    # Claude Sonnet 3.7 on Bedrock on-demand pricing
+    _INPUT_COST_PER_MTOK  = 3.00   # $3.00 / 1M input tokens
+    _OUTPUT_COST_PER_MTOK = 15.00  # $15.00 / 1M output tokens
+
+    def __init__(self) -> None:
+        self.ops: List[Dict[str, Any]] = []
+
+    # ── recording ─────────────────────────────────────────────────────────────
+
+    def record(
+        self,
+        operation:    str,
+        input_tokens: int,
+        output_tokens: int,
+        estimated:    bool = False,
+    ) -> None:
+        """Record one LLM call and print a one-line summary immediately."""
+        self.ops.append({
+            "operation":     operation,
+            "input_tokens":  input_tokens,
+            "output_tokens": output_tokens,
+            "estimated":     estimated,
+        })
+        est_flag = " ~est" if estimated else ""
+        pct_in   = min(100.0, self.total_input / self.daily_input_budget * 100)
+        print(
+            f"  [LLM] {operation:<28}  "
+            f"in={input_tokens:>6,}  out={output_tokens:>5,}{est_flag}  "
+            f"session={self.total_input:>7,} in  ({pct_in:.1f}% of daily budget)"
+        )
+
+    # ── aggregates ────────────────────────────────────────────────────────────
+
+    @property
+    def total_input(self) -> int:
+        return sum(o["input_tokens"] for o in self.ops)
+
+    @property
+    def total_output(self) -> int:
+        return sum(o["output_tokens"] for o in self.ops)
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        return (
+            self.total_input  / 1_000_000 * self._INPUT_COST_PER_MTOK
+            + self.total_output / 1_000_000 * self._OUTPUT_COST_PER_MTOK
+        )
+
+    # ── summary ───────────────────────────────────────────────────────────────
+
+    def print_summary(self) -> None:
+        """Print a full token usage table at the end of a session."""
+        if not self.ops:
+            return
+        w = 65
+        print(f"\n{'─' * w}")
+        print("  LLM TOKEN USAGE SUMMARY")
+        print(f"{'─' * w}")
+        hdr = f"  {'Operation':<28}  {'Input':>8}  {'Output':>7}  {'Est?':>5}"
+        print(hdr)
+        print(f"  {'─' * 28}  {'─' * 8}  {'─' * 7}  {'─' * 5}")
+        for op in self.ops:
+            est = "yes" if op["estimated"] else "no"
+            print(
+                f"  {op['operation']:<28}  "
+                f"{op['input_tokens']:>8,}  {op['output_tokens']:>7,}  {est:>5}"
+            )
+        print(f"  {'─' * 28}  {'─' * 8}  {'─' * 7}")
+        print(f"  {'TOTAL':<28}  {self.total_input:>8,}  {self.total_output:>7,}")
+        pct_in  = min(100.0, self.total_input  / self.daily_input_budget  * 100)
+        pct_out = min(100.0, self.total_output / self.daily_output_budget * 100)
+        print(f"\n  Estimated cost   : ${self.estimated_cost_usd:.4f} USD")
+        print(f"  Daily budget used: {pct_in:.1f}% input ({self.total_input:,} / "
+              f"{self.daily_input_budget:,})  |  "
+              f"{pct_out:.1f}% output ({self.total_output:,} / {self.daily_output_budget:,})")
+        if any(o["estimated"] for o in self.ops):
+            print("  * 'Est?' = yes means token count estimated from text length "
+                  "(strands not installed; exact counts come from Bedrock direct calls)")
+
+
+TOKEN_TRACKER: _TokenTracker = _TokenTracker()
+
+
 @dataclass
 class AnalysisInput:
     """Input for cost analysis."""
@@ -138,17 +237,91 @@ class CostOptimizerAgent(ABC):
         pass
 
     def _analyze_with_llm(self, input_data: AnalysisInput, context: Dict) -> AnalysisResult:
-        """Use LLM agent for analysis."""
-        agent = self._get_llm_agent()
+        """
+        Call the LLM for analysis, tracking exact token usage.
 
-        # Build prompt with input data
+        Strategy:
+        1. Try the strands Agent (when strands-agents is installed).
+        2. Fall back to a direct boto3 bedrock-runtime call, which always
+           returns exact token counts in the response body.
+        3. If both are unavailable, fall back to rule-based analysis.
+        """
         prompt = self._build_llm_prompt(input_data, context)
+        response_text  = ""
+        input_tokens   = 0
+        output_tokens  = 0
+        estimated      = False  # True when counts are character-length estimates
 
-        # Call LLM
-        response = agent(prompt)
+        # ── Attempt 1: strands Agent ──────────────────────────────────────────
+        try:
+            agent    = self._get_llm_agent()   # raises ImportError if not installed
+            response = agent(prompt)
+            response_text = str(response)
 
-        # Parse response
-        return self._parse_llm_response(response)
+            # Try to extract token counts from the strands AgentResult object
+            input_tokens  = (
+                getattr(response, "input_tokens",  None)
+                or getattr(response, "inputTokens", None)
+                or 0
+            )
+            output_tokens = (
+                getattr(response, "output_tokens",  None)
+                or getattr(response, "outputTokens", None)
+                or 0
+            )
+            # If strands didn't expose counts, estimate from text length
+            if not input_tokens:
+                input_tokens  = max(1, len(prompt)        // 4)
+                output_tokens = max(1, len(response_text) // 4)
+                estimated = True
+
+        except ImportError:
+            # ── Attempt 2: direct boto3 bedrock-runtime call ──────────────────
+            try:
+                import boto3 as _boto3
+                import json   as _json
+
+                client = _boto3.client("bedrock-runtime", region_name=self.region)
+
+                try:
+                    from ..prompts.super_prompts import get_prompt as _get_prompt
+                    system_prompt = _get_prompt(self.AGENT_NAME)
+                except Exception:
+                    system_prompt = (
+                        "You are an expert AWS Glue / PySpark cost-optimization assistant. "
+                        "Respond with a JSON object."
+                    )
+
+                body = _json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens":        8096,
+                    "system":            system_prompt,
+                    "messages":          [{"role": "user", "content": prompt}],
+                })
+
+                resp      = client.invoke_model(modelId=self.model_id, body=body)
+                resp_body = _json.loads(resp["body"].read())
+
+                usage         = resp_body.get("usage", {})
+                input_tokens  = usage.get("input_tokens",  max(1, len(prompt) // 4))
+                output_tokens = usage.get("output_tokens", 0)
+                estimated     = "input_tokens" not in usage  # True only if missing
+
+                content       = resp_body.get("content", [])
+                response_text = content[0].get("text", "") if content else ""
+
+            except Exception as exc:
+                # Both strands and boto3 failed — fall back to rule-based
+                import logging as _logging
+                _logging.getLogger("strands_optimizer").warning(
+                    "LLM unavailable (%s); falling back to rule-based analysis.", exc
+                )
+                return self._analyze_rule_based(input_data, context)
+
+        # ── Record token usage in the session tracker ─────────────────────────
+        TOKEN_TRACKER.record(self.AGENT_NAME, input_tokens, output_tokens, estimated=estimated)
+
+        return self._parse_llm_response(response_text)
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """Build prompt for LLM analysis."""

@@ -1,6 +1,6 @@
 """Cost Optimizer Agents"""
 
-from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult, CodePatternMatcher
+from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult, CodePatternMatcher, TOKEN_TRACKER
 from .size_analyzer import SizeAnalyzerAgent
 from .code_analyzer import CodeAnalyzerAgent
 from .resource_allocator import ResourceAllocatorAgent
@@ -19,6 +19,7 @@ __all__ = [
     'AnalysisInput',
     'AnalysisResult',
     'CodePatternMatcher',
+    'TOKEN_TRACKER',
     'SizeAnalyzerAgent',
     'CodeAnalyzerAgent',
     'ResourceAllocatorAgent',

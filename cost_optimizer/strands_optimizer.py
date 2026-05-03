@@ -73,6 +73,14 @@ except ImportError:
     except ImportError:
         HAS_ORCHESTRATOR = False
 
+try:
+    from .agents.base import TOKEN_TRACKER
+except ImportError:
+    try:
+        from cost_optimizer.agents.base import TOKEN_TRACKER
+    except ImportError:
+        TOKEN_TRACKER = None  # type: ignore[assignment]
+
 log = logging.getLogger("strands_optimizer")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,13 +292,18 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
         )
 
         # If catalog stats are absent, estimate size by listing S3
+        file_count = 0
         if size_bytes == 0 and location.startswith("s3"):
             bkt, pfx = _parse_s3_path(location)
             sizes = _get_s3_object_sizes(bkt, pfx)
             if sizes:
+                file_count = len(sizes)
                 size_bytes = sum(sizes)
                 if record_count == 0:
                     record_count = max(1, size_bytes // 500)  # ~500 bytes/row guess
+
+        # Track whether we have real stats or are working blind
+        has_stats = size_bytes > 0 or record_count > 0
 
         info: Dict[str, Any] = {
             "database":         database,
@@ -301,9 +314,12 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
             "partition_column": partition_keys[0]["Name"] if partition_keys else None,
             "format":           fmt,
             "source":           "glue_catalog",
+            "has_stats":        has_stats,
         }
         if size_bytes:
             info["size_gb"] = round(size_bytes / (1024 ** 3), 3)
+        if file_count:
+            info["file_count"] = file_count
         return info
     except Exception as exc:
         log.debug("Glue catalog lookup failed for %s.%s: %s", database, table_name, exc)
@@ -560,13 +576,34 @@ def auto_detect_tables(script_path: str) -> Dict:
     enriched: List[Dict] = []
     for key, base in tables.items():
         if "location" in base and base.get("detect_method") == "s3_direct":
-            enriched.append({**base, "source": "s3_path"})
+            # For direct S3 reads, list objects to get real size + file count
+            s3_info: Dict[str, Any] = {**base, "source": "s3_path"}
+            try:
+                bkt, pfx = _parse_s3_path(base["location"])
+                sizes = _get_s3_object_sizes(bkt, pfx)
+                if sizes:
+                    s3_info["size_gb"]    = round(sum(sizes) / (1024 ** 3), 3)
+                    s3_info["file_count"] = len(sizes)
+                    s3_info["record_count"] = max(1, sum(sizes) // 500)
+                    s3_info["has_stats"]  = True
+                else:
+                    s3_info["has_stats"]  = False
+            except Exception:
+                s3_info["has_stats"] = False
+            enriched.append(s3_info)
         else:
             db  = base.get("database", "")
             tbl = base["table"]
             info = _glue_table_info(db, tbl) if db else {}
             if not info:
                 info = _heuristic_table_info(tbl, db)
+            elif not info.get("has_stats", True):
+                # Glue found the table but has no row/size stats — supplement
+                # record_count with a name-based heuristic so SizeAnalyzer
+                # gets a non-zero baseline rather than silently computing 0 GB.
+                heur = _heuristic_table_info(tbl, db)
+                info["record_count"]  = heur["record_count"]
+                info["size_source"]   = "glue_schema+name_heuristic"
             enriched.append({**base, **info})
 
     _state["detected_tables"][script_path] = enriched
@@ -2228,8 +2265,30 @@ def _run_one(
         print(f"  [ERROR] {result.get('error', 'Analysis failed')}")
         return result
 
+    # ── Table size confidence report ─────────────────────────────────────────
+    detected = _state["detected_tables"].get(script_path, [])
+    if detected:
+        real_count  = sum(1 for t in detected if t.get("has_stats", False))
+        est_count   = len(detected) - real_count
+        conf_label  = "HIGH" if real_count == len(detected) else (
+                      "MEDIUM" if real_count > 0 else "LOW")
+        print(f"\n  Table size data : {real_count}/{len(detected)} tables have real stats "
+              f"[confidence: {conf_label}]")
+        for t in detected:
+            tname  = t.get("table", "?")
+            src    = t.get("size_source", t.get("source", "unknown"))
+            has_s  = t.get("has_stats", False)
+            sz_lbl = (f"{t['size_gb']:.2f} GB" if "size_gb" in t
+                      else f"{t.get('record_count', 0):,} rows (est)")
+            fc     = f", {t['file_count']} files" if "file_count" in t else ""
+            flag   = "" if has_s else "  [ESTIMATED]"
+            print(f"    {'✓' if has_s else '~'} {tname:<30} {sz_lbl}{fc}  [{src}]{flag}")
+        if est_count:
+            print(f"  [!] {est_count} table(s) use estimated sizes. Pass --config tables.json "
+                  f"or run COMPUTE STATISTICS on Glue tables for accurate recommendations.")
+
     s = result.get("summary", {})
-    print(f"  Tables          : {len(tables or _state['detected_tables'].get(script_path, []))}")
+    print(f"\n  Tables          : {len(detected or tables or [])}")
     print(f"  Effective data  : {s.get('effective_data_size_gb', 0):.1f} GB")
     print(f"  Anti-patterns   : {s.get('anti_patterns_found', 0)} "
           f"(critical: {s.get('critical_issues', 0)})")
@@ -2496,6 +2555,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.interactive:
         interactive_mode()
+
+    # ── Print LLM token usage summary (only if any LLM calls were made) ───────
+    if args.use_llm and TOKEN_TRACKER is not None:
+        TOKEN_TRACKER.print_summary()
 
     return 0
 
