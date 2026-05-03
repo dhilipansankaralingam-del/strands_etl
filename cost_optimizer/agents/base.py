@@ -106,8 +106,13 @@ class _TokenTracker:
               f"{self.daily_input_budget:,})  |  "
               f"{pct_out:.1f}% output ({self.total_output:,} / {self.daily_output_budget:,})")
         if any(o["estimated"] for o in self.ops):
-            print("  * 'Est?' = yes means token count estimated from text length "
-                  "(strands not installed; exact counts come from Bedrock direct calls)")
+            print(
+                "  * 'Est?' = yes: token count approximated from text length (~4 chars = 1 token).\n"
+                "    Causes: (a) strands-agents installed but metrics.accumulated_usage unavailable\n"
+                "            (b) strands not installed AND boto3 bedrock-runtime call failed.\n"
+                "    Fix: ensure strands-agents>=0.1 is installed and AWS credentials allow\n"
+                "    bedrock:InvokeModel — then exact counts will appear (Est? = no)."
+            )
 
 
 TOKEN_TRACKER: _TokenTracker = _TokenTracker()
@@ -258,22 +263,23 @@ class CostOptimizerAgent(ABC):
             response = agent(prompt)
             response_text = str(response)
 
-            # Try to extract token counts from the strands AgentResult object
-            input_tokens  = (
-                getattr(response, "input_tokens",  None)
-                or getattr(response, "inputTokens", None)
-                or 0
-            )
-            output_tokens = (
-                getattr(response, "output_tokens",  None)
-                or getattr(response, "outputTokens", None)
-                or 0
-            )
-            # If strands didn't expose counts, estimate from text length
-            if not input_tokens:
+            # Strands exposes token counts at:
+            #   response.metrics.accumulated_usage['inputTokens']
+            #   response.metrics.accumulated_usage['outputTokens']
+            #   response.metrics.accumulated_usage['totalTokens']
+            try:
+                usage         = response.metrics.accumulated_usage
+                input_tokens  = usage.get("inputTokens",  0)
+                output_tokens = usage.get("outputTokens", 0)
+                estimated     = (input_tokens == 0)  # only estimate if usage missing
+                if estimated:
+                    input_tokens  = max(1, len(prompt)        // 4)
+                    output_tokens = max(1, len(response_text) // 4)
+            except (AttributeError, TypeError):
+                # metrics or accumulated_usage not present (old strands version?)
                 input_tokens  = max(1, len(prompt)        // 4)
                 output_tokens = max(1, len(response_text) // 4)
-                estimated = True
+                estimated     = True
 
         except ImportError:
             # ── Attempt 2: direct boto3 bedrock-runtime call ──────────────────
