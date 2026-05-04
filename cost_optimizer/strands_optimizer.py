@@ -716,6 +716,22 @@ def analyze_pyspark_script(
         detection = auto_detect_tables(script_path)
         tables = detection.get("tables", [])
 
+    # ── Always store resolved tables so _run_one / --small-files can use them
+    # regardless of whether they came from --config or auto-detection.
+    _state["detected_tables"][script_path] = tables
+
+    # ── Auto small-file scan for every table that has an S3 location ──────────
+    # Runs unconditionally (no --small-files flag needed) so the results are
+    # available to the recommendations context below.
+    for tbl in tables:
+        loc = tbl.get("location", "")
+        db  = tbl.get("database", "")
+        tn  = tbl.get("table", "")
+        if loc.startswith("s3") or (db and tn):
+            sf = detect_small_file_problem(location=loc, database=db, table_name=tn)
+            if sf.get("has_problem"):
+                tbl["_small_file_report"] = sf   # carry into orchestrator context
+
     orchestrator = CostOptimizationOrchestrator(
         use_llm  = use_llm,
         model_id = DEFAULT_MODEL_ID,
@@ -747,6 +763,45 @@ def analyze_pyspark_script(
         size_gb   = resource.get("effective_size_gb", 10.0)
         workers   = resource.get("optimal_config", {}).get("workers", 5)
         result["multiplatform_comparison"] = _compute_platform_costs(workers, duration, size_gb)
+
+        # ── Inject small-file recommendations into the unified rec list ────────
+        # These are based on real S3 file counts, not just code patterns, so
+        # they get their own P1 entries with concrete cost-impact numbers.
+        sf_recs: List[Dict] = []
+        for tbl in tables:
+            sf = tbl.get("_small_file_report")
+            if not sf or not sf.get("has_problem"):
+                continue
+            fc        = sf["file_count"]
+            avg_mb    = sf["avg_file_size_mb"]
+            sev       = sf["severity"]          # "warning" | "critical"
+            tname     = sf.get("table") or tbl.get("table", "?")
+            priority  = "P0" if sev == "critical" else "P1"
+            # Cost impact: each extra S3 LIST call and metadata overhead.
+            # Very rough: 1000 small files ≈ 10× more S3 API calls vs 100 ideal files.
+            overhead_factor = round(fc / max(fc / (size_gb * 8 + 1), 1), 1)
+            sf_recs.append({
+                "priority":              priority,
+                "category":              "small_files",
+                "title":                 f"Small-file problem: {tname}",
+                "description": (
+                    f"{fc:,} files averaging {avg_mb:.1f} MB "
+                    f"(threshold {SMALL_FILE_THRESHOLD_MB} MB). "
+                    f"Severity: {sev.upper()}. "
+                    f"Each Spark task reads one file — too many small files "
+                    f"causes excessive task overhead and S3 LIST cost."
+                ),
+                "fix":                   sf.get("recommendation", ""),
+                "estimated_savings_percent": 15 if sev == "warning" else 30,
+                "quick_win":             False,
+                "source":                "s3_scan",
+                "file_count":            fc,
+                "avg_file_size_mb":      avg_mb,
+            })
+        if sf_recs:
+            existing = result.get("all_recommendations", [])
+            result["all_recommendations"] = sf_recs + existing
+            result["small_file_issues"] = sf_recs
 
     _state["scan_results"][script_path] = result
     return result
@@ -2389,6 +2444,16 @@ def _run_one(
         print(f"\n  Top P0 recommendations:")
         for r in p0[:3]:
             print(f"    • {r.get('title', '')}")
+
+    # ── Small-file findings (always shown when detected, no flag required) ─────
+    sf_issues = result.get("small_file_issues", [])
+    if sf_issues:
+        print(f"\n  Small-file issues ({len(sf_issues)} table(s)):")
+        for sf in sf_issues:
+            sev_icon = "!!" if sf.get("estimated_savings_percent", 0) >= 30 else " !"
+            print(f"    [{sev_icon}] {sf['title']}")
+            print(f"         {sf['file_count']:,} files  avg {sf['avg_file_size_mb']:.1f} MB  "
+                  f"→ {sf.get('fix','')[:80]}")
 
     if show_lines and "line_annotations" in result:
         print(f"\n  Line-by-line findings:")
