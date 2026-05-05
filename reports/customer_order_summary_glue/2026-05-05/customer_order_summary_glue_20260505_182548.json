@@ -1,0 +1,1784 @@
+{
+  "success": true,
+  "script_path": "pyscript/customer_order_summary_glue.py",
+  "job_name": "customer_order_summary_glue",
+  "processing_mode": "full",
+  "analysis_timestamp": "2026-05-05T18:25:48.167118",
+  "total_analysis_time_seconds": 0.01,
+  "agents": {
+    "size_analyzer": {
+      "agent_name": "size_analyzer",
+      "success": true,
+      "analysis": {
+        "total_raw_size_gb": 10.24,
+        "total_compressed_size_gb": 2.56,
+        "effective_size_gb": 3.33,
+        "processing_mode": "full",
+        "delta_ratio": 1.0,
+        "join_amplification_factor": 1.3,
+        "skew_risk_score": 10,
+        "skew_risk_factors": [],
+        "partition_efficiency_score": 0,
+        "partition_recommendations": [
+          "Large table orders has no partition",
+          "Large table customer_order_summary has no partition"
+        ],
+        "tables_analyzed": 4,
+        "tables_detail": [
+          {
+            "table": "customers",
+            "database": "",
+            "record_count": 1000000,
+            "column_count": 30,
+            "format": "parquet",
+            "width_category": "medium",
+            "raw_size_bytes": 500000000,
+            "compressed_size_bytes": 125000000,
+            "compressed_size_gb": 0.12,
+            "skew_risk": "low",
+            "skew_reason": "",
+            "is_broadcast_candidate": false
+          },
+          {
+            "table": "orders",
+            "database": "",
+            "record_count": 10000000,
+            "column_count": 30,
+            "format": "parquet",
+            "width_category": "medium",
+            "raw_size_bytes": 5000000000,
+            "compressed_size_bytes": 1250000000,
+            "compressed_size_gb": 1.16,
+            "skew_risk": "low",
+            "skew_reason": "",
+            "is_broadcast_candidate": false
+          },
+          {
+            "table": "products",
+            "database": "",
+            "record_count": 1000000,
+            "column_count": 30,
+            "format": "parquet",
+            "width_category": "medium",
+            "raw_size_bytes": 500000000,
+            "compressed_size_bytes": 125000000,
+            "compressed_size_gb": 0.12,
+            "skew_risk": "low",
+            "skew_reason": "",
+            "is_broadcast_candidate": false
+          },
+          {
+            "table": "customer_order_summary",
+            "database": "",
+            "record_count": 10000000,
+            "column_count": 30,
+            "format": "parquet",
+            "width_category": "medium",
+            "raw_size_bytes": 5000000000,
+            "compressed_size_bytes": 1250000000,
+            "compressed_size_gb": 1.16,
+            "skew_risk": "low",
+            "skew_reason": "",
+            "is_broadcast_candidate": false
+          }
+        ],
+        "size_confidence": "high"
+      },
+      "recommendations": [
+        {
+          "priority": "P2",
+          "category": "architecture",
+          "title": "Improve Partition Strategy",
+          "description": "Several large tables lack partitioning. Add partitions to enable pruning.",
+          "estimated_savings_percent": 15
+        }
+      ],
+      "metrics": {
+        "total_tables": 4,
+        "effective_size_gb": 3.33,
+        "skew_risk_score": 10
+      },
+      "errors": [],
+      "execution_time_ms": 0.122
+    },
+    "code_analyzer": {
+      "agent_name": "code_analyzer",
+      "success": true,
+      "analysis": {
+        "anti_patterns": [],
+        "anti_pattern_count": 0,
+        "critical_issues": 0,
+        "complexity": {
+          "join_count": 3,
+          "window_function_count": 2,
+          "aggregation_count": 8,
+          "udf_count": 0,
+          "distinct_count": 0,
+          "sort_count": 1,
+          "union_count": 0,
+          "skew_risk_factors": [],
+          "complexity_score": 93
+        },
+        "optimizations": [
+          {
+            "category": "join_optimization",
+            "recommendation": "Add broadcast hints for small tables",
+            "implementation": "from pyspark.sql.functions import broadcast\ndf.join(broadcast(small_df), \"key\")",
+            "estimated_savings_percent": 15,
+            "effort": "low"
+          },
+          {
+            "category": "caching",
+            "recommendation": "Cache intermediate DataFrames used multiple times",
+            "implementation": "df = df.cache()\n# ... multiple actions ...\ndf.unpersist()",
+            "estimated_savings_percent": 30,
+            "effort": "low"
+          },
+          {
+            "category": "config_optimization",
+            "recommendation": "Enable Adaptive Query Execution",
+            "implementation": ".config(\"spark.sql.adaptive.enabled\", \"true\")",
+            "estimated_savings_percent": 20,
+            "effort": "low"
+          }
+        ],
+        "spark_configs": [
+          {
+            "config": "spark.sql.shuffle.partitions",
+            "current_value": "200 (default)",
+            "recommended_value": "50",
+            "reason": "Based on data size (3 GB)"
+          },
+          {
+            "config": "spark.sql.adaptive.enabled",
+            "current_value": "false",
+            "recommended_value": "true",
+            "reason": "Enables automatic query optimization"
+          },
+          {
+            "config": "spark.sql.adaptive.coalescePartitions.enabled",
+            "current_value": "false",
+            "recommended_value": "true",
+            "reason": "Auto-coalesces small partitions"
+          },
+          {
+            "config": "spark.sql.adaptive.skewJoin.enabled",
+            "current_value": "false",
+            "recommended_value": "true",
+            "reason": "Handles skewed joins automatically"
+          },
+          {
+            "config": "spark.sql.autoBroadcastJoinThreshold",
+            "current_value": "10MB",
+            "recommended_value": "100MB",
+            "reason": "Increase broadcast threshold to reduce shuffles"
+          }
+        ],
+        "skew_mitigations": [],
+        "optimization_score": 81,
+        "estimated_cost_reduction_percent": 65,
+        "lines_of_code": 213,
+        "code_quality_score": 100
+      },
+      "recommendations": [
+        {
+          "priority": "P1",
+          "category": "join_optimization",
+          "title": "Add broadcast hints for small tables",
+          "implementation": "from pyspark.sql.functions import broadcast\ndf.join(broadcast(small_df), \"key\")",
+          "estimated_savings_percent": 15
+        },
+        {
+          "priority": "P1",
+          "category": "caching",
+          "title": "Cache intermediate DataFrames used multiple times",
+          "implementation": "df = df.cache()\n# ... multiple actions ...\ndf.unpersist()",
+          "estimated_savings_percent": 30
+        },
+        {
+          "priority": "P1",
+          "category": "config_optimization",
+          "title": "Enable Adaptive Query Execution",
+          "implementation": ".config(\"spark.sql.adaptive.enabled\", \"true\")",
+          "estimated_savings_percent": 20
+        },
+        {
+          "priority": "P0",
+          "category": "config",
+          "title": "Apply Optimal Spark Configurations",
+          "description": "Update Spark configurations for better performance",
+          "configs": [
+            {
+              "config": "spark.sql.shuffle.partitions",
+              "current_value": "200 (default)",
+              "recommended_value": "50",
+              "reason": "Based on data size (3 GB)"
+            },
+            {
+              "config": "spark.sql.adaptive.enabled",
+              "current_value": "false",
+              "recommended_value": "true",
+              "reason": "Enables automatic query optimization"
+            },
+            {
+              "config": "spark.sql.adaptive.coalescePartitions.enabled",
+              "current_value": "false",
+              "recommended_value": "true",
+              "reason": "Auto-coalesces small partitions"
+            },
+            {
+              "config": "spark.sql.adaptive.skewJoin.enabled",
+              "current_value": "false",
+              "recommended_value": "true",
+              "reason": "Handles skewed joins automatically"
+            },
+            {
+              "config": "spark.sql.autoBroadcastJoinThreshold",
+              "current_value": "10MB",
+              "recommended_value": "100MB",
+              "reason": "Increase broadcast threshold to reduce shuffles"
+            }
+          ],
+          "estimated_savings_percent": 20
+        }
+      ],
+      "metrics": {
+        "anti_pattern_count": 0,
+        "critical_issues": 0,
+        "optimization_score": 81,
+        "join_count": 3,
+        "window_function_count": 2
+      },
+      "errors": [],
+      "execution_time_ms": 5.691
+    },
+    "resource_allocator": {
+      "agent_name": "resource_allocator",
+      "success": true,
+      "analysis": {
+        "current_config": {
+          "platform": "glue",
+          "workers": 10,
+          "worker_type": "G.2X",
+          "cost_per_run": 1.83,
+          "annual_cost": 668.5
+        },
+        "optimal_config": {
+          "platform": "aws_eks_karpenter",
+          "workers": 2,
+          "worker_type": "G.1X",
+          "emr_instance_type": "m5.xlarge",
+          "cost_per_run": 0.05,
+          "annual_cost": 16.98
+        },
+        "estimated_duration_hours": 0.21,
+        "effective_size_gb": 3.33,
+        "complexity_factor": 1.16,
+        "platform_comparison": [
+          {
+            "platform": "aws_eks_karpenter",
+            "label": "AWS EKS + Karpenter (Spot)",
+            "cost_per_run": 0.047,
+            "annual_cost": 16.98,
+            "savings_vs_current_percent": 97.5
+          },
+          {
+            "platform": "aws_emr_spot",
+            "label": "AWS EMR (Spot)",
+            "cost_per_run": 0.052,
+            "annual_cost": 18.87,
+            "savings_vs_current_percent": 97.2
+          },
+          {
+            "platform": "gcp_dataproc_spot",
+            "label": "GCP Dataproc (Spot)",
+            "cost_per_run": 0.091,
+            "annual_cost": 33.16,
+            "savings_vs_current_percent": 95.0
+          },
+          {
+            "platform": "aws_emr_ondemand",
+            "label": "AWS EMR (On-Demand)",
+            "cost_per_run": 0.172,
+            "annual_cost": 62.9,
+            "savings_vs_current_percent": 90.6
+          },
+          {
+            "platform": "aws_glue",
+            "label": "AWS Glue",
+            "cost_per_run": 0.183,
+            "annual_cost": 66.85,
+            "savings_vs_current_percent": 90.0
+          },
+          {
+            "platform": "azure_synapse",
+            "label": "Azure Synapse Spark",
+            "cost_per_run": 0.2,
+            "annual_cost": 72.93,
+            "savings_vs_current_percent": 89.1
+          },
+          {
+            "platform": "databricks_aws_spot",
+            "label": "Databricks on AWS (Spot)",
+            "cost_per_run": 0.216,
+            "annual_cost": 78.66,
+            "savings_vs_current_percent": 88.2
+          },
+          {
+            "platform": "azure_hdinsight",
+            "label": "Azure HDInsight",
+            "cost_per_run": 0.24,
+            "annual_cost": 87.51,
+            "savings_vs_current_percent": 86.9
+          },
+          {
+            "platform": "gcp_dataproc",
+            "label": "GCP Dataproc",
+            "cost_per_run": 0.303,
+            "annual_cost": 110.53,
+            "savings_vs_current_percent": 83.5
+          },
+          {
+            "platform": "databricks_aws",
+            "label": "Databricks on AWS",
+            "cost_per_run": 0.332,
+            "annual_cost": 121.01,
+            "savings_vs_current_percent": 81.9
+          }
+        ],
+        "savings": {
+          "rightsizing_per_run": 1.65,
+          "platform_per_run": 1.78,
+          "total_per_run": 1.78,
+          "percent": 97.5,
+          "annual_savings": 651.51
+        },
+        "resource_efficiency": {
+          "current_gb_per_worker": 0.3,
+          "optimal_gb_per_worker": 1.7,
+          "memory_utilization_estimate": "optimal"
+        }
+      },
+      "recommendations": [
+        {
+          "priority": "P1",
+          "category": "resource",
+          "title": "Reduce Worker Count",
+          "description": "Change from 10 to 2 workers",
+          "estimated_savings_usd": 1.65,
+          "implementation": "Set number_of_workers = 2"
+        },
+        {
+          "priority": "P1",
+          "category": "resource",
+          "title": "Change Worker Type",
+          "description": "Change from G.2X to G.1X",
+          "implementation": "Set worker_type = G.1X"
+        },
+        {
+          "priority": "P0",
+          "category": "architecture",
+          "title": "Migrate to Aws Eks Karpenter",
+          "description": "Save 98% ($652/year) by switching to aws_eks_karpenter",
+          "estimated_savings_usd": 651.51,
+          "implementation": "\n1. Convert Glue script to Spark (use convert_to_eks.py)\n2. Deploy to EKS with Karpenter\n3. Configure Karpenter NodePool for spot\n"
+        }
+      ],
+      "metrics": {
+        "current_cost": 1.8315000000000001,
+        "optimal_cost": 0.046528425000000005,
+        "savings_percent": 97.5,
+        "annual_savings": 651.5146248750001
+      },
+      "errors": [],
+      "execution_time_ms": 0.082
+    },
+    "recommendations": {
+      "agent_name": "recommendations",
+      "success": true,
+      "analysis": {
+        "executive_summary": {
+          "headline": "Potential 80% cost reduction identified",
+          "current_annual_spend": "$668",
+          "potential_annual_savings": "$535",
+          "critical_issues_count": 0,
+          "total_recommendations": 0,
+          "quick_wins_count": 0,
+          "top_findings": [
+            "Data size: 3 GB effective",
+            "Code optimization score: 81/100",
+            "Resource efficiency: 98% over-provisioned",
+            "Anti-patterns found: 0",
+            "Best platform: aws_eks_karpenter"
+          ]
+        },
+        "cost_analysis": {
+          "current_monthly_cost": 54.9,
+          "current_annual_cost": 667.95,
+          "potential_monthly_savings": 44.57,
+          "potential_annual_savings": 534.8,
+          "savings_percent": 80,
+          "confidence_level": "low"
+        },
+        "recommendations": [],
+        "recommendation_count_by_priority": {
+          "P0": 0,
+          "P1": 0,
+          "P2": 0,
+          "P3": 0
+        },
+        "implementation_roadmap": {
+          "phase_1": {
+            "name": "Quick Wins (Week 1-2)",
+            "duration": "2 weeks",
+            "actions": [],
+            "expected_savings_percent": 0,
+            "effort_hours": 0
+          },
+          "phase_2": {
+            "name": "Code Optimization (Week 3-4)",
+            "duration": "2 weeks",
+            "actions": [],
+            "expected_savings_percent": 0,
+            "effort_hours": 0
+          },
+          "phase_3": {
+            "name": "Architecture Changes (Month 2-3)",
+            "duration": "4-8 weeks",
+            "actions": [],
+            "expected_savings_percent": 0,
+            "effort_hours": 0
+          },
+          "phase_4": {
+            "name": "Long-term Improvements (Month 3+)",
+            "duration": "Ongoing",
+            "actions": [],
+            "expected_savings_percent": 0,
+            "effort_hours": 0
+          }
+        },
+        "risks": [],
+        "success_metrics": [
+          {
+            "metric": "Monthly Compute Cost",
+            "current_value": "$56",
+            "target_value": "$11",
+            "measurement": "AWS Cost Explorer, Glue job metrics"
+          },
+          {
+            "metric": "Job Duration (p50)",
+            "current_value": "Baseline TBD",
+            "target_value": "-20% from baseline",
+            "measurement": "CloudWatch metrics, Glue job history"
+          },
+          {
+            "metric": "Resource Utilization",
+            "current_value": "optimal",
+            "target_value": "60-80% utilization",
+            "measurement": "Spark UI, CloudWatch metrics"
+          },
+          {
+            "metric": "Anti-patterns Count",
+            "current_value": "0",
+            "target_value": "0",
+            "measurement": "Code analysis tool"
+          }
+        ],
+        "total_implementation_effort_hours": 0,
+        "total_implementation_cost": 0,
+        "expected_payback_months": 0.0
+      },
+      "recommendations": [],
+      "metrics": {
+        "total_recommendations": 0,
+        "p0_count": 0,
+        "potential_annual_savings": 534.8000000000001,
+        "savings_percent": 80
+      },
+      "errors": [],
+      "execution_time_ms": 0.079
+    }
+  },
+  "summary": {
+    "effective_data_size_gb": 3.33,
+    "current_cost_per_run": 1.83,
+    "optimal_cost_per_run": 0.05,
+    "potential_savings_percent": 80,
+    "potential_annual_savings": 534.8,
+    "anti_patterns_found": 0,
+    "critical_issues": 0,
+    "total_recommendations": 0,
+    "quick_wins": 0
+  },
+  "executive_summary": {
+    "headline": "Potential 80% cost reduction identified",
+    "current_annual_spend": "$668",
+    "potential_annual_savings": "$535",
+    "critical_issues_count": 0,
+    "total_recommendations": 0,
+    "quick_wins_count": 0,
+    "top_findings": [
+      "Data size: 3 GB effective",
+      "Code optimization score: 81/100",
+      "Resource efficiency: 98% over-provisioned",
+      "Anti-patterns found: 0",
+      "Best platform: aws_eks_karpenter"
+    ]
+  },
+  "implementation_roadmap": {
+    "phase_1": {
+      "name": "Quick Wins (Week 1-2)",
+      "duration": "2 weeks",
+      "actions": [],
+      "expected_savings_percent": 0,
+      "effort_hours": 0
+    },
+    "phase_2": {
+      "name": "Code Optimization (Week 3-4)",
+      "duration": "2 weeks",
+      "actions": [],
+      "expected_savings_percent": 0,
+      "effort_hours": 0
+    },
+    "phase_3": {
+      "name": "Architecture Changes (Month 2-3)",
+      "duration": "4-8 weeks",
+      "actions": [],
+      "expected_savings_percent": 0,
+      "effort_hours": 0
+    },
+    "phase_4": {
+      "name": "Long-term Improvements (Month 3+)",
+      "duration": "Ongoing",
+      "actions": [],
+      "expected_savings_percent": 0,
+      "effort_hours": 0
+    }
+  },
+  "all_recommendations": [
+    {
+      "priority": "P0",
+      "title": "JVM heap critical \u2014 upgrade memory or worker type",
+      "description": "Heap p90=98%, max=98%. OOM risk detected from Glue CloudWatch metrics.",
+      "implementation": "Upgrade worker type G.2X \u2192 G.4X; add spark.executor.memoryOverhead; enable G1GC.",
+      "estimated_impact": "Prevents OOM crashes; reduces retry cost",
+      "quick_win": false,
+      "source": "glue_metrics"
+    },
+    {
+      "priority": "P1",
+      "title": "Driver CPU overloaded (86% avg)",
+      "description": "Driver is doing heavy work \u2014 likely .collect(), .toPandas(), or complex DAG planning.",
+      "implementation": "Replace .collect() with .write(); avoid toPandas() on large DataFrames; use broadcast joins instead of driver-side merges.",
+      "estimated_impact": "Reduces driver bottleneck and OOM risk",
+      "quick_win": false,
+      "source": "glue_metrics"
+    },
+    {
+      "priority": "P1",
+      "title": "Workers over-provisioned \u2014 reduce from 20 \u2192 9",
+      "description": "Only 8.8 of 20 workers active on average (44% utilisation). Idle workers billed but doing no work.",
+      "implementation": "Set number_of_workers=9; enable spark.dynamicAllocation.",
+      "estimated_impact": "~56% worker cost reduction",
+      "quick_win": true,
+      "source": "glue_metrics"
+    },
+    {
+      "priority": "P1",
+      "title": "Stage velocity slow \u2014 possible data skew or shuffle bottleneck",
+      "description": "Only ? stages completed. Job likely stalled on one large task per stage.",
+      "implementation": "Enable AQE skewJoin; add salting to join keys with high cardinality; check shuffle read/write sizes per stage in Spark UI.",
+      "estimated_impact": "Can reduce job duration by 30-70% for skewed workloads",
+      "quick_win": false,
+      "source": "glue_metrics"
+    },
+    {
+      "priority": "P1",
+      "title": "Apply 11 metric-derived Spark config(s)",
+      "description": "Spark configs tuned from actual Glue CloudWatch runtime data.",
+      "implementation": "  spark.executor.memory = 12g\n  spark.executor.memoryOverhead = 3g\n  spark.memory.fraction = 0.80\n  spark.memory.storageFraction = 0.25\n  spark.rdd.compress = true\n  spark.shuffle.compress = true\n  spark.shuffle.spill.compress = true\n  spark.dynamicAllocation.enabled = true\n  spark.dynamicAllocation.shuffleTracking.enabled = true\n  spark.dynamicAllocation.maxExecutors = 8\n  spark.dynamicAllocation.minExecutors = 4",
+      "estimated_impact": "Right-sizes memory, CPU, and parallelism to actual workload",
+      "quick_win": true,
+      "source": "glue_metrics",
+      "spark_configs": {
+        "spark.executor.memory": "12g",
+        "spark.executor.memoryOverhead": "3g",
+        "spark.memory.fraction": "0.80",
+        "spark.memory.storageFraction": "0.25",
+        "spark.rdd.compress": "true",
+        "spark.shuffle.compress": "true",
+        "spark.shuffle.spill.compress": "true",
+        "spark.dynamicAllocation.enabled": "true",
+        "spark.dynamicAllocation.shuffleTracking.enabled": "true",
+        "spark.dynamicAllocation.maxExecutors": "8",
+        "spark.dynamicAllocation.minExecutors": "4"
+      }
+    }
+  ],
+  "line_annotations": [
+    {
+      "line": 1,
+      "code": "import sys"
+    },
+    {
+      "line": 2,
+      "code": "from awsglue.transforms import *"
+    },
+    {
+      "line": 3,
+      "code": "from awsglue.utils import getResolvedOptions"
+    },
+    {
+      "line": 4,
+      "code": "from pyspark.context import SparkContext"
+    },
+    {
+      "line": 5,
+      "code": "from awsglue.context import GlueContext"
+    },
+    {
+      "line": 6,
+      "code": "from awsglue.job import Job"
+    },
+    {
+      "line": 7,
+      "code": "from pyspark.sql.functions import *"
+    },
+    {
+      "line": 8,
+      "code": "from pyspark.sql.window import Window"
+    },
+    {
+      "line": 9,
+      "code": "from datetime import datetime"
+    },
+    {
+      "line": 10,
+      "code": "from awsglue.dynamicframe import DynamicFrame"
+    },
+    {
+      "line": 11,
+      "code": ""
+    },
+    {
+      "line": 12,
+      "code": "# Initialize Glue context"
+    },
+    {
+      "line": 13,
+      "code": "args = getResolvedOptions(sys.argv, ['JOB_NAME'])"
+    },
+    {
+      "line": 14,
+      "code": "sc = SparkContext()"
+    },
+    {
+      "line": 15,
+      "code": "glueContext = GlueContext(sc)"
+    },
+    {
+      "line": 16,
+      "code": "spark = glueContext.spark_session"
+    },
+    {
+      "line": 17,
+      "code": "job = Job(glueContext)"
+    },
+    {
+      "line": 18,
+      "code": "job.init(args['JOB_NAME'], args)"
+    },
+    {
+      "line": 19,
+      "code": ""
+    },
+    {
+      "line": 20,
+      "code": "# Define databases"
+    },
+    {
+      "line": 21,
+      "code": "source_db = \"ecommerce_db\""
+    },
+    {
+      "line": 22,
+      "code": "target_db = \"analytics_db\""
+    },
+    {
+      "line": 23,
+      "code": ""
+    },
+    {
+      "line": 24,
+      "code": "# Step 1: Read source tables from Glue Catalog"
+    },
+    {
+      "line": 25,
+      "code": "print(\"Reading source tables from Glue Catalog...\")"
+    },
+    {
+      "line": 26,
+      "code": ""
+    },
+    {
+      "line": 27,
+      "code": "# Read customers table"
+    },
+    {
+      "line": 28,
+      "code": "customers_df = glueContext.create_dynamic_frame.from_catalog("
+    },
+    {
+      "line": 29,
+      "code": "    database=source_db,"
+    },
+    {
+      "line": 30,
+      "code": "    table_name=\"customers\","
+    },
+    {
+      "line": 31,
+      "code": "    transformation_ctx=\"customers_df\""
+    },
+    {
+      "line": 32,
+      "code": ").toDF()"
+    },
+    {
+      "line": 33,
+      "code": ""
+    },
+    {
+      "line": 34,
+      "code": "# Read orders table"
+    },
+    {
+      "line": 35,
+      "code": "orders_df = glueContext.create_dynamic_frame.from_catalog("
+    },
+    {
+      "line": 36,
+      "code": "    database=source_db,"
+    },
+    {
+      "line": 37,
+      "code": "    table_name=\"orders\","
+    },
+    {
+      "line": 38,
+      "code": "    transformation_ctx=\"orders_df\""
+    },
+    {
+      "line": 39,
+      "code": ").toDF()"
+    },
+    {
+      "line": 40,
+      "code": ""
+    },
+    {
+      "line": 41,
+      "code": "# Read products table"
+    },
+    {
+      "line": 42,
+      "code": "products_df = glueContext.create_dynamic_frame.from_catalog("
+    },
+    {
+      "line": 43,
+      "code": "    database=source_db,"
+    },
+    {
+      "line": 44,
+      "code": "    table_name=\"products\","
+    },
+    {
+      "line": 45,
+      "code": "    transformation_ctx=\"products_df\""
+    },
+    {
+      "line": 46,
+      "code": ").toDF()"
+    },
+    {
+      "line": 47,
+      "code": ""
+    },
+    {
+      "line": 48,
+      "code": "print(f\"Customers: {customers_df.count()} records\")"
+    },
+    {
+      "line": 49,
+      "code": "print(f\"Orders: {orders_df.count()} records\")"
+    },
+    {
+      "line": 50,
+      "code": "print(f\"Products: {products_df.count()} records\")"
+    },
+    {
+      "line": 51,
+      "code": ""
+    },
+    {
+      "line": 52,
+      "code": "# Step 2: Apply filters as per config"
+    },
+    {
+      "line": 53,
+      "code": "print(\"Applying data filters...\")"
+    },
+    {
+      "line": 54,
+      "code": "customers_df.printSchema()"
+    },
+    {
+      "line": 55,
+      "code": "customers_filtered = customers_df.filter(col(\"active.boolean\") == True)"
+    },
+    {
+      "line": 56,
+      "code": ""
+    },
+    {
+      "line": 57,
+      "code": "orders_filtered = orders_df.filter("
+    },
+    {
+      "line": 58,
+      "code": "    (col(\"status\") == \"completed\") &"
+    },
+    {
+      "line": 59,
+      "code": "    (col(\"order_date\") >= \"2023-01-01\")"
+    },
+    {
+      "line": 60,
+      "code": ")"
+    },
+    {
+      "line": 61,
+      "code": ""
+    },
+    {
+      "line": 62,
+      "code": "products_filtered = products_df.filter(col(\"active.boolean\") == True)"
+    },
+    {
+      "line": 63,
+      "code": ""
+    },
+    {
+      "line": 64,
+      "code": "# Step 3: Perform joins"
+    },
+    {
+      "line": 65,
+      "code": "print(\"Performing table joins...\")"
+    },
+    {
+      "line": 66,
+      "code": ""
+    },
+    {
+      "line": 67,
+      "code": "# Join customers with orders"
+    },
+    {
+      "line": 68,
+      "code": "customer_orders = customers_filtered.join("
+    },
+    {
+      "line": 69,
+      "code": "    orders_filtered,"
+    },
+    {
+      "line": 70,
+      "code": "    customers_filtered.customer_id == orders_filtered.customer_id,"
+    },
+    {
+      "line": 71,
+      "code": "    \"inner\""
+    },
+    {
+      "line": 72,
+      "code": ").select("
+    },
+    {
+      "line": 73,
+      "code": "    customers_filtered.customer_id,"
+    },
+    {
+      "line": 74,
+      "code": "    customers_filtered.name.alias(\"customer_name\"),"
+    },
+    {
+      "line": 75,
+      "code": "    customers_filtered.email,"
+    },
+    {
+      "line": 76,
+      "code": "    customers_filtered.region,"
+    },
+    {
+      "line": 77,
+      "code": "    customers_filtered.signup_date,"
+    },
+    {
+      "line": 78,
+      "code": "    orders_filtered.order_id,"
+    },
+    {
+      "line": 79,
+      "code": "    orders_filtered.product_id,"
+    },
+    {
+      "line": 80,
+      "code": "    orders_filtered.order_date,"
+    },
+    {
+      "line": 81,
+      "code": "    orders_filtered.quantity,"
+    },
+    {
+      "line": 82,
+      "code": "    orders_filtered.total_amount,"
+    },
+    {
+      "line": 83,
+      "code": "    orders_filtered.status"
+    },
+    {
+      "line": 84,
+      "code": ")"
+    },
+    {
+      "line": 85,
+      "code": ""
+    },
+    {
+      "line": 86,
+      "code": "# Join with products"
+    },
+    {
+      "line": 87,
+      "code": "full_orders = customer_orders.join("
+    },
+    {
+      "line": 88,
+      "code": "    products_filtered,"
+    },
+    {
+      "line": 89,
+      "code": "    customer_orders.product_id == products_filtered.product_id,"
+    },
+    {
+      "line": 90,
+      "code": "    \"left\""
+    },
+    {
+      "line": 91,
+      "code": ").select("
+    },
+    {
+      "line": 92,
+      "code": "    customer_orders.customer_id,"
+    },
+    {
+      "line": 93,
+      "code": "    customer_orders.customer_name,"
+    },
+    {
+      "line": 94,
+      "code": "    customer_orders.region,"
+    },
+    {
+      "line": 95,
+      "code": "    customer_orders.order_id,"
+    },
+    {
+      "line": 96,
+      "code": "    customer_orders.product_id,"
+    },
+    {
+      "line": 97,
+      "code": "    customer_orders.order_date,"
+    },
+    {
+      "line": 98,
+      "code": "    customer_orders.quantity,"
+    },
+    {
+      "line": 99,
+      "code": "    customer_orders.total_amount,"
+    },
+    {
+      "line": 100,
+      "code": "    products_filtered.product_name,"
+    },
+    {
+      "line": 101,
+      "code": "    products_filtered.category,"
+    },
+    {
+      "line": 102,
+      "code": "    products_filtered.price,"
+    },
+    {
+      "line": 103,
+      "code": "    products_filtered.cost"
+    },
+    {
+      "line": 104,
+      "code": ")"
+    },
+    {
+      "line": 105,
+      "code": ""
+    },
+    {
+      "line": 106,
+      "code": "# Step 4: Calculate derived columns"
+    },
+    {
+      "line": 107,
+      "code": "print(\"Calculating derived columns...\")"
+    },
+    {
+      "line": 108,
+      "code": "full_orders.printSchema()"
+    },
+    {
+      "line": 109,
+      "code": ""
+    },
+    {
+      "line": 110,
+      "code": "# Calculate profit margin"
+    },
+    {
+      "line": 111,
+      "code": "full_orders = full_orders.withColumn("
+    },
+    {
+      "line": 112,
+      "code": "    \"profit_margin_pct\","
+    },
+    {
+      "line": 113,
+      "code": "    ((col(\"price.decimal\") - col(\"cost.decimal\")) / col(\"price.decimal\")) * 100"
+    },
+    {
+      "line": 114,
+      "code": ")"
+    },
+    {
+      "line": 115,
+      "code": ""
+    },
+    {
+      "line": 116,
+      "code": "# Step 5: Perform aggregations"
+    },
+    {
+      "line": 117,
+      "code": "print(\"Performing customer-level aggregations...\")"
+    },
+    {
+      "line": 118,
+      "code": ""
+    },
+    {
+      "line": 119,
+      "code": "customer_summary = full_orders.groupBy("
+    },
+    {
+      "line": 120,
+      "code": "    col(\"customer_id.int\").alias(\"customer_id\"),"
+    },
+    {
+      "line": 121,
+      "code": "    \"customer_name\","
+    },
+    {
+      "line": 122,
+      "code": "    \"region\""
+    },
+    {
+      "line": 123,
+      "code": ").agg("
+    },
+    {
+      "line": 124,
+      "code": "    count(\"order_id.int\").alias(\"total_orders\"),"
+    },
+    {
+      "line": 125,
+      "code": "    sum(\"quantity.int\").alias(\"total_quantity\"),"
+    },
+    {
+      "line": 126,
+      "code": "    sum(\"total_amount.decimal\").alias(\"total_revenue\"),"
+    },
+    {
+      "line": 127,
+      "code": "    avg(\"total_amount.decimal\").alias(\"avg_order_value\"),"
+    },
+    {
+      "line": 128,
+      "code": "    max(\"order_date\").alias(\"last_order_date\"),"
+    },
+    {
+      "line": 129,
+      "code": "    avg(\"profit_margin_pct\").alias(\"avg_profit_margin\")"
+    },
+    {
+      "line": 130,
+      "code": ")"
+    },
+    {
+      "line": 131,
+      "code": ""
+    },
+    {
+      "line": 132,
+      "code": "# Step 6: Calculate customer lifetime value"
+    },
+    {
+      "line": 133,
+      "code": "customer_summary = customer_summary.withColumn("
+    },
+    {
+      "line": 134,
+      "code": "    \"customer_lifetime_value\","
+    },
+    {
+      "line": 135,
+      "code": "    col(\"total_revenue\") * (1 + col(\"avg_profit_margin\") / 100)"
+    },
+    {
+      "line": 136,
+      "code": ")"
+    },
+    {
+      "line": 137,
+      "code": ""
+    },
+    {
+      "line": 138,
+      "code": "# Step 7: Find top category per customer"
+    },
+    {
+      "line": 139,
+      "code": "print(\"Finding top category per customer...\")"
+    },
+    {
+      "line": 140,
+      "code": ""
+    },
+    {
+      "line": 141,
+      "code": "# First, get category counts per customer"
+    },
+    {
+      "line": 142,
+      "code": "category_counts = full_orders.groupBy("
+    },
+    {
+      "line": 143,
+      "code": "    col(\"customer_id.int\").alias(\"customer_id\"), \"category\""
+    },
+    {
+      "line": 144,
+      "code": ").agg("
+    },
+    {
+      "line": 145,
+      "code": "    count(\"*\").alias(\"category_count\")"
+    },
+    {
+      "line": 146,
+      "code": ")"
+    },
+    {
+      "line": 147,
+      "code": ""
+    },
+    {
+      "line": 148,
+      "code": "# Use window function to rank categories"
+    },
+    {
+      "line": 149,
+      "code": "window_spec = Window.partitionBy(\"customer_id\").orderBy(desc(\"category_count\"))"
+    },
+    {
+      "line": 150,
+      "code": ""
+    },
+    {
+      "line": 151,
+      "code": "category_ranked = category_counts.withColumn("
+    },
+    {
+      "line": 152,
+      "code": "    \"rank\","
+    },
+    {
+      "line": 153,
+      "code": "    row_number().over(window_spec)"
+    },
+    {
+      "line": 154,
+      "code": ")"
+    },
+    {
+      "line": 155,
+      "code": ""
+    },
+    {
+      "line": 156,
+      "code": "# Get top category for each customer"
+    },
+    {
+      "line": 157,
+      "code": "top_categories = category_ranked.filter(col(\"rank\") == 1).select("
+    },
+    {
+      "line": 158,
+      "code": "    \"customer_id\","
+    },
+    {
+      "line": 159,
+      "code": "    \"category\""
+    },
+    {
+      "line": 160,
+      "code": ")"
+    },
+    {
+      "line": 161,
+      "code": ""
+    },
+    {
+      "line": 162,
+      "code": "# Join back to customer summary"
+    },
+    {
+      "line": 163,
+      "code": "customer_summary = customer_summary.join("
+    },
+    {
+      "line": 164,
+      "code": "    top_categories,"
+    },
+    {
+      "line": 165,
+      "code": "    \"customer_id\","
+    },
+    {
+      "line": 166,
+      "code": "    \"left\""
+    },
+    {
+      "line": 167,
+      "code": ").withColumnRenamed(\"category\", \"top_category\")"
+    },
+    {
+      "line": 168,
+      "code": ""
+    },
+    {
+      "line": 169,
+      "code": "# Step 8: Add processing timestamp"
+    },
+    {
+      "line": 170,
+      "code": "customer_summary = customer_summary.withColumn("
+    },
+    {
+      "line": 171,
+      "code": "    \"processed_at\","
+    },
+    {
+      "line": 172,
+      "code": "    current_timestamp()"
+    },
+    {
+      "line": 173,
+      "code": ")"
+    },
+    {
+      "line": 174,
+      "code": ""
+    },
+    {
+      "line": 175,
+      "code": "# Step 9: Write to target table"
+    },
+    {
+      "line": 176,
+      "code": "print(\"Writing results to target table...\")"
+    },
+    {
+      "line": 177,
+      "code": ""
+    },
+    {
+      "line": 178,
+      "code": "# Convert back to DynamicFrame for Glue catalog operations"
+    },
+    {
+      "line": 179,
+      "code": "output_dynamic_frame = DynamicFrame.fromDF("
+    },
+    {
+      "line": 180,
+      "code": "    customer_summary,"
+    },
+    {
+      "line": 181,
+      "code": "    glueContext,"
+    },
+    {
+      "line": 182,
+      "code": "    \"output_dynamic_frame\""
+    },
+    {
+      "line": 183,
+      "code": ")"
+    },
+    {
+      "line": 184,
+      "code": ""
+    },
+    {
+      "line": 185,
+      "code": "S3_OUTPUT_PATH = \"s3://strands-etl-data/ecommerce/target1/\""
+    },
+    {
+      "line": 186,
+      "code": "OUTPUT_FORMAT = \"parquet\""
+    },
+    {
+      "line": 187,
+      "code": "# Write to Glue catalog table"
+    },
+    {
+      "line": 188,
+      "code": "# glueContext.write_dynamic_frame.from_catalog("
+    },
+    {
+      "line": 189,
+      "code": "#     frame=output_dynamic_frame,"
+    },
+    {
+      "line": 190,
+      "code": "#     database=target_db,"
+    },
+    {
+      "line": 191,
+      "code": "#     table_name=\"customer_order_summary\","
+    },
+    {
+      "line": 192,
+      "code": "#     transformation_ctx=\"output_dynamic_frame\""
+    },
+    {
+      "line": 193,
+      "code": "# )"
+    },
+    {
+      "line": 194,
+      "code": ""
+    },
+    {
+      "line": 195,
+      "code": "glueContext.write_dynamic_frame.from_options("
+    },
+    {
+      "line": 196,
+      "code": "    frame=output_dynamic_frame,"
+    },
+    {
+      "line": 197,
+      "code": "    connection_type=\"s3\",  # Tells Glue the sink is S3"
+    },
+    {
+      "line": 198,
+      "code": "    connection_options={"
+    },
+    {
+      "line": 199,
+      "code": "        \"path\": S3_OUTPUT_PATH,"
+    },
+    {
+      "line": 200,
+      "code": "        "
+    },
+    {
+      "line": 201,
+      "code": "        # --- KEY SETTINGS TO CREATE THE TABLE ---"
+    },
+    {
+      "line": 202,
+      "code": "        \"enableUpdateCatalog\": True,  # This flag enables catalog interaction"
+    },
+    {
+      "line": 203,
+      "code": "        \"database\": target_db,"
+    },
+    {
+      "line": 204,
+      "code": "        \"table\": \"customer_order_summary\""
+    },
+    {
+      "line": 205,
+      "code": "    },"
+    },
+    {
+      "line": 206,
+      "code": "    format=OUTPUT_FORMAT, # Specifies the file format"
+    },
+    {
+      "line": 207,
+      "code": "    transformation_ctx=\"output_dynamic_frame\""
+    },
+    {
+      "line": 208,
+      "code": ")"
+    },
+    {
+      "line": 209,
+      "code": ""
+    },
+    {
+      "line": 210,
+      "code": "print(\"ETL job completed successfully!\")"
+    },
+    {
+      "line": 211,
+      "code": "print(f\"Processed {customer_summary.count()} customer records\")"
+    },
+    {
+      "line": 212,
+      "code": ""
+    },
+    {
+      "line": 213,
+      "code": "job.commit()"
+    }
+  ],
+  "multiplatform_comparison": [
+    {
+      "platform_id": "aws_athena",
+      "label": "AWS Athena (Trino/Presto)",
+      "cloud": "aws",
+      "pricing_model": "per_tb_scanned",
+      "cost_per_run": 0.0033,
+      "annual_cost": 1.0,
+      "cost_per_gb": 0.00098,
+      "memory_per_node_gb": 0,
+      "vcpu_per_node": 0,
+      "notes": "$5/TB scanned; serverless Trino/Presto engine; ANSI SQL only; no cluster mgmt; partition pruning & columnar formats reduce cost; NOT suitable for multi-step PySpark transformations",
+      "pricing_note": "$5.0/TB scanned (assumes Parquet/ORC, ~80% reduction)"
+    },
+    {
+      "platform_id": "aws_lambda_etl",
+      "label": "AWS Lambda (simple ETL)",
+      "cloud": "aws",
+      "pricing_model": "per_gb_second",
+      "cost_per_run": 0.021,
+      "annual_cost": 8.0,
+      "cost_per_gb": 0.0063,
+      "memory_per_node_gb": 10,
+      "vcpu_per_node": 6,
+      "notes": "$0.0000166667/GB-s; max 10 GB RAM / 15 min; no Spark runtime; suitable for lightweight transforms < 10 GB data; use Step Functions to chain; NOT suitable for heavy Spark jobs",
+      "pricing_note": "$1.66667e-05/GB-s \u00d7 2 GB \u00d7 756s"
+    },
+    {
+      "platform_id": "gcp_dataproc_serverless",
+      "label": "GCP Dataproc Serverless",
+      "cloud": "gcp",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.0277,
+      "annual_cost": 10.0,
+      "cost_per_gb": 0.00832,
+      "memory_per_node_gb": 4,
+      "vcpu_per_node": 0.5,
+      "notes": "$0.066/DCU-hour; auto-scales; no cluster mgmt",
+      "pricing_note": "$0.066/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_eks_karpenter",
+      "label": "AWS EKS + Karpenter (Spot)",
+      "cloud": "aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.0725,
+      "annual_cost": 26.0,
+      "cost_per_gb": 0.02176,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "Spot + Graviton; Karpenter bin-packs; no EMR fee",
+      "pricing_note": "$0.115/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_emr_spot",
+      "label": "AWS EMR (Spot m5.2xl)",
+      "cloud": "aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.0869,
+      "annual_cost": 32.0,
+      "cost_per_gb": 0.02611,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "~70% spot discount; subject to interruption",
+      "pricing_note": "$0.138/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "gcp_dataproc_spot",
+      "label": "GCP Dataproc (Spot n2-standard-8)",
+      "cloud": "gcp",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.0913,
+      "annual_cost": 33.0,
+      "cost_per_gb": 0.02743,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "~70% Spot discount on Compute Engine",
+      "pricing_note": "$0.145/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "databricks_aws_spot",
+      "label": "Databricks on AWS (Spot)",
+      "cloud": "databricks_aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.1113,
+      "annual_cost": 41.0,
+      "cost_per_gb": 0.03342,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "$0.15 DBU + spot EC2 ~$0.115 / h",
+      "pricing_note": "$0.265/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "azure_hdinsight",
+      "label": "Azure HDInsight (D4s_v3)",
+      "cloud": "azure",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.121,
+      "annual_cost": 44.0,
+      "cost_per_gb": 0.03632,
+      "memory_per_node_gb": 16,
+      "vcpu_per_node": 4,
+      "notes": "Pay-as-you-go; HDInsight surcharge included",
+      "pricing_note": "$0.192/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_emr_serverless",
+      "label": "AWS EMR Serverless (Spark)",
+      "cloud": "aws",
+      "pricing_model": "per_vcpu_memory_hour",
+      "cost_per_run": 0.1257,
+      "annual_cost": 46.0,
+      "cost_per_gb": 0.03774,
+      "memory_per_node_gb": 0,
+      "vcpu_per_node": 0,
+      "notes": "$0.052/vCPU-h + $0.0057/GB-h; native PySpark; auto-scales; no cluster to manage; pre-initialized capacity available; billed per second; good replacement for Glue when cost is key",
+      "pricing_note": "$0.052/vCPU-h \u00d7 8 vCPUs + $0.0057/GB-h \u00d7 32 GB"
+    },
+    {
+      "platform_id": "azure_synapse_spark",
+      "label": "Azure Synapse Spark",
+      "cloud": "azure",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.2016,
+      "annual_cost": 74.0,
+      "cost_per_gb": 0.06054,
+      "memory_per_node_gb": 28,
+      "vcpu_per_node": 4,
+      "notes": "Medium node pool; serverless; no cluster mgmt",
+      "pricing_note": "$0.32/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "databricks_azure_jobs",
+      "label": "Databricks on Azure (Jobs Compute)",
+      "cloud": "databricks_azure",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.215,
+      "annual_cost": 78.0,
+      "cost_per_gb": 0.06458,
+      "memory_per_node_gb": 28,
+      "vcpu_per_node": 4,
+      "notes": "$0.32 DBU + $0.192 VM",
+      "pricing_note": "$0.512/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "databricks_aws_jobs",
+      "label": "Databricks on AWS (Jobs Compute)",
+      "cloud": "databricks_aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.2243,
+      "annual_cost": 82.0,
+      "cost_per_gb": 0.06735,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "$0.15 DBU + $0.384 EC2 (m5.2xl) per node-hour",
+      "pricing_note": "$0.534/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_glue_g1x",
+      "label": "AWS Glue G.1X",
+      "cloud": "aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.2772,
+      "annual_cost": 101.0,
+      "cost_per_gb": 0.08324,
+      "memory_per_node_gb": 16,
+      "vcpu_per_node": 4,
+      "notes": "$0.44/DPU-hour; managed, no cluster overhead",
+      "pricing_note": "$0.44/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_emr_od",
+      "label": "AWS EMR (On-Demand m5.2xl)",
+      "cloud": "aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.2904,
+      "annual_cost": 106.0,
+      "cost_per_gb": 0.08722,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "EC2 $0.384 + EMR $0.077/h; add master node",
+      "pricing_note": "$0.461/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "gcp_dataproc_n2_8",
+      "label": "GCP Dataproc (n2-standard-8)",
+      "cloud": "gcp",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.3055,
+      "annual_cost": 112.0,
+      "cost_per_gb": 0.09176,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "Compute Engine $0.388 + Dataproc $0.097/h",
+      "pricing_note": "$0.485/node-h \u00d7 2 workers \u00d7 0.21h"
+    },
+    {
+      "platform_id": "aws_glue_g2x",
+      "label": "AWS Glue G.2X",
+      "cloud": "aws",
+      "pricing_model": "node_cost_usd",
+      "cost_per_run": 0.5544,
+      "annual_cost": 202.0,
+      "cost_per_gb": 0.16649,
+      "memory_per_node_gb": 32,
+      "vcpu_per_node": 8,
+      "notes": "$0.88/DPU-hour",
+      "pricing_note": "$0.88/node-h \u00d7 2 workers \u00d7 0.21h"
+    }
+  ],
+  "metric_findings": [
+    "CRITICAL: JVM heap peaked at 98% \u2013 OOM risk. Increase executor memory or upgrade worker type immediately.",
+    "Driver CPU overloaded (86% avg). Increase driver memory/cores or reduce collect()/toPandas() calls on driver.",
+    "Workers under-utilised: avg 8.8 / 24 allocated (37%). Reduce number_of_workers by ~63%.",
+    "Only 10 stages completed \u2013 job may have wide shuffle dependencies or be stuck. Check for data skew."
+  ],
+  "metric_analysis": {
+    "heap_pressure": "critical",
+    "cpu_driver_load": "overloaded",
+    "cpu_worker_load": "normal",
+    "worker_utilisation": "under",
+    "dynamic_alloc_scaling": "stable",
+    "stage_velocity": "slow",
+    "findings": [
+      "CRITICAL: JVM heap peaked at 98% \u2013 OOM risk. Increase executor memory or upgrade worker type immediately.",
+      "Driver CPU overloaded (86% avg). Increase driver memory/cores or reduce collect()/toPandas() calls on driver.",
+      "Workers under-utilised: avg 8.8 / 24 allocated (37%). Reduce number_of_workers by ~63%.",
+      "Only 10 stages completed \u2013 job may have wide shuffle dependencies or be stuck. Check for data skew."
+    ],
+    "raw_values": {
+      "heap_p90": 0.98,
+      "heap_max": 0.98,
+      "cpu_driver_avg": 0.861,
+      "cpu_worker_avg": 0.435,
+      "workers_avg": 8.78,
+      "executors_max": 24.0
+    },
+    "raw": {
+      "glue.ALL.jvm.heap.usage": {
+        "avg": 0.839,
+        "max": 0.98,
+        "min": 0.52,
+        "p90": 0.98,
+        "last": 0.89,
+        "n": 10
+      },
+      "glue.driver.system.cpuSystemLoad": {
+        "avg": 0.86125,
+        "max": 0.91,
+        "min": 0.82,
+        "p90": 0.91,
+        "last": 0.85,
+        "n": 8
+      },
+      "glue.ALL.system.cpuSystemLoad": {
+        "avg": 0.435,
+        "max": 0.85,
+        "min": 0.11,
+        "p90": 0.85,
+        "last": 0.11,
+        "n": 8
+      },
+      "glue.driver.workerutilized": {
+        "avg": 8.777777777777779,
+        "max": 20.0,
+        "min": 2.0,
+        "p90": 20.0,
+        "last": 2.0,
+        "n": 9
+      },
+      "glue.driver.aggregate.numCompletedStages": {
+        "avg": 7.666666666666667,
+        "max": 10.0,
+        "min": 0.0,
+        "p90": 10.0,
+        "last": 10.0,
+        "n": 9
+      },
+      "glue.driver.ExecutorAllocationManager.executors.numberAllExecutors": {
+        "avg": 20.375,
+        "max": 24.0,
+        "min": 14.0,
+        "p90": 24.0,
+        "last": 14.0,
+        "n": 8
+      }
+    }
+  },
+  "worker_recommendation": {
+    "current_workers": 20,
+    "recommended_workers": 9,
+    "current_worker_type": "G.2X",
+    "recommended_type": "G.4X",
+    "changed": true,
+    "reason": [
+      "Workers under-utilised (avg 8.8/20)",
+      "High JVM heap \u2192 upgrade worker type G.2X\u2192G.4X"
+    ]
+  },
+  "spark_config_overrides": {
+    "spark.executor.memory": "12g",
+    "spark.executor.memoryOverhead": "3g",
+    "spark.memory.fraction": "0.80",
+    "spark.memory.storageFraction": "0.25",
+    "spark.rdd.compress": "true",
+    "spark.shuffle.compress": "true",
+    "spark.shuffle.spill.compress": "true",
+    "spark.dynamicAllocation.enabled": "true",
+    "spark.dynamicAllocation.shuffleTracking.enabled": "true",
+    "spark.dynamicAllocation.maxExecutors": "8",
+    "spark.dynamicAllocation.minExecutors": "4"
+  }
+}

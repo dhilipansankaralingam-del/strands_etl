@@ -1,0 +1,8 @@
+{
+  "glue.ALL.jvm.heap.usage": [0.52, 0.61, 0.74, 0.88, 0.95, 0.98, 0.97, 0.94, 0.91, 0.89],
+  "glue.driver.system.cpuSystemLoad": [0.82, 0.88, 0.91, 0.90, 0.86, 0.84, 0.83, 0.85],
+  "glue.ALL.system.cpuSystemLoad": [0.74, 0.81, 0.85, 0.47, 0.22, 0.16, 0.12, 0.11],
+  "glue.driver.workerutilized": [20.0, 19.0, 17.0, 11.0, 4.0, 2.0, 2.0, 2.0, 2.0],
+  "glue.driver.aggregate.numCompletedStages": [0, 3, 7, 9, 10, 10, 10, 10, 10],
+  "glue.driver.ExecutorAllocationManager.executors.numberAllExecutors": [20.0, 22.0, 24.0, 24.0, 22.0, 20.0, 17.0, 14.0]
+}

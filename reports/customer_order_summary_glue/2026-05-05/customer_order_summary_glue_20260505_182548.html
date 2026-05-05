@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PySpark Optimizer – customer_order_summary_glue</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222}
+  h1{background:#1a237e;color:#fff;padding:16px 24px;border-radius:8px;margin:0 0 20px}
+  h2{color:#1a237e;border-bottom:2px solid #1a237e;padding-bottom:4px;margin-top:28px}
+  .cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+  .card{background:#fff;border-radius:8px;padding:16px 24px;flex:1;min-width:160px;
+          box-shadow:0 1px 4px rgba(0,0,0,.12)}
+  .card .val{font-size:28px;font-weight:700;color:#1a237e}
+  .card .lbl{font-size:12px;color:#666;margin-top:4px}
+  .savings .val{color:#2e7d32}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
+          overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+  th{background:#1a237e;color:#fff;padding:10px 12px;text-align:left;font-size:13px}
+  td{padding:8px 12px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .footer{margin-top:32px;font-size:11px;color:#999;text-align:center}
+  details summary{cursor:pointer;font-weight:600;color:#1a237e;padding:6px 0}
+</style>
+</head>
+<body>
+<h1>PySpark Cost Optimizer — customer_order_summary_glue</h1>
+<p style="color:#555">Generated: 2026-05-05 &nbsp;|&nbsp; Region: us-west-2 &nbsp;|&nbsp; Model: us.anthropic.claude-3-7-sonnet-20250219-v1:0</p>
+
+<div class="cards">
+  <div class="card"><div class="val">0</div><div class="lbl">Anti-patterns</div></div>
+  <div class="card"><div class="val">0</div><div class="lbl">Critical issues</div></div>
+  <div class="card"><div class="val">$1.830</div><div class="lbl">Current cost/run</div></div>
+  <div class="card"><div class="val">$0.050</div><div class="lbl">Optimal cost/run</div></div>
+  <div class="card savings"><div class="val">80%</div><div class="lbl">Potential savings</div></div>
+  <div class="card savings"><div class="val">$535</div><div class="lbl">Annual savings (est.)</div></div>
+</div>
+
+<h2>Recommendations</h2>
+<table>
+<thead><tr><th>Priority</th><th>Title</th><th>Description</th><th>Est. Savings</th></tr></thead>
+<tbody><tr><td><span style='color:#d32f2f;font-weight:700'>P0</span></td><td>JVM heap critical — upgrade memory or worker type</td><td>Heap p90=98%, max=98%. OOM risk detected from Glue CloudWatch metrics.</td><td style='text-align:center'>0%</td></tr>
+<tr><td><span style='color:#f57c00;font-weight:700'>P1</span></td><td>Driver CPU overloaded (86% avg)</td><td>Driver is doing heavy work — likely .collect(), .toPandas(), or complex DAG planning.</td><td style='text-align:center'>0%</td></tr>
+<tr><td><span style='color:#f57c00;font-weight:700'>P1</span></td><td>Workers over-provisioned — reduce from 20 → 9</td><td>Only 8.8 of 20 workers active on average (44% utilisation). Idle workers billed but doing no work.</td><td style='text-align:center'>0%</td></tr>
+<tr><td><span style='color:#f57c00;font-weight:700'>P1</span></td><td>Stage velocity slow — possible data skew or shuffle bottleneck</td><td>Only ? stages completed. Job likely stalled on one large task per stage.</td><td style='text-align:center'>0%</td></tr>
+<tr><td><span style='color:#f57c00;font-weight:700'>P1</span></td><td>Apply 11 metric-derived Spark config(s)</td><td>Spark configs tuned from actual Glue CloudWatch runtime data.</td><td style='text-align:center'>0%</td></tr>
+</tbody>
+</table>
+
+<h2>Multi-Cloud Cost Comparison</h2>
+<table>
+<thead><tr><th>Platform</th><th>Cost/Run</th><th>Annual Cost</th><th>Memory/Node</th><th>Notes</th></tr></thead>
+<tbody><tr style='background:#e8f5e9'><td>★ AWS Athena (Trino/Presto)</td><td style='text-align:right'>$0.003</td><td style='text-align:right'>$1</td><td style='text-align:right'>0 GB</td><td style='font-size:11px;color:#777'>$5/TB scanned; serverless Trino/Presto engine; ANSI SQL only; no cluster mgmt; partition pruning & columnar formats reduce cost; NOT suitable for multi-step PySpark transformations</td></tr>
+<tr style='background:#fafafa'><td>AWS Lambda (simple ETL)</td><td style='text-align:right'>$0.021</td><td style='text-align:right'>$8</td><td style='text-align:right'>10 GB</td><td style='font-size:11px;color:#777'>$0.0000166667/GB-s; max 10 GB RAM / 15 min; no Spark runtime; suitable for lightweight transforms < 10 GB data; use Step Functions to chain; NOT suitable for heavy Spark jobs</td></tr>
+<tr style='background:#fff'><td>GCP Dataproc Serverless</td><td style='text-align:right'>$0.028</td><td style='text-align:right'>$10</td><td style='text-align:right'>4 GB</td><td style='font-size:11px;color:#777'>$0.066/DCU-hour; auto-scales; no cluster mgmt</td></tr>
+<tr style='background:#fafafa'><td>AWS EKS + Karpenter (Spot)</td><td style='text-align:right'>$0.072</td><td style='text-align:right'>$26</td><td style='text-align:right'>32 GB</td><td style='font-size:11px;color:#777'>Spot + Graviton; Karpenter bin-packs; no EMR fee</td></tr>
+<tr style='background:#fff'><td>AWS EMR (Spot m5.2xl)</td><td style='text-align:right'>$0.087</td><td style='text-align:right'>$32</td><td style='text-align:right'>32 GB</td><td style='font-size:11px;color:#777'>~70% spot discount; subject to interruption</td></tr>
+<tr style='background:#fafafa'><td>GCP Dataproc (Spot n2-standard-8)</td><td style='text-align:right'>$0.091</td><td style='text-align:right'>$33</td><td style='text-align:right'>32 GB</td><td style='font-size:11px;color:#777'>~70% Spot discount on Compute Engine</td></tr>
+<tr style='background:#fff'><td>Databricks on AWS (Spot)</td><td style='text-align:right'>$0.111</td><td style='text-align:right'>$41</td><td style='text-align:right'>32 GB</td><td style='font-size:11px;color:#777'>$0.15 DBU + spot EC2 ~$0.115 / h</td></tr>
+<tr style='background:#fafafa'><td>Azure HDInsight (D4s_v3)</td><td style='text-align:right'>$0.121</td><td style='text-align:right'>$44</td><td style='text-align:right'>16 GB</td><td style='font-size:11px;color:#777'>Pay-as-you-go; HDInsight surcharge included</td></tr>
+<tr style='background:#fff'><td>AWS EMR Serverless (Spark)</td><td style='text-align:right'>$0.126</td><td style='text-align:right'>$46</td><td style='text-align:right'>0 GB</td><td style='font-size:11px;color:#777'>$0.052/vCPU-h + $0.0057/GB-h; native PySpark; auto-scales; no cluster to manage; pre-initialized capacity available; billed per second; good replacement for Glue when cost is key</td></tr>
+<tr style='background:#fafafa'><td>Azure Synapse Spark</td><td style='text-align:right'>$0.202</td><td style='text-align:right'>$74</td><td style='text-align:right'>28 GB</td><td style='font-size:11px;color:#777'>Medium node pool; serverless; no cluster mgmt</td></tr>
+</tbody>
+</table>
+
+<h2>Line-by-Line Findings</h2>
+<details open>
+<summary>0 line(s) with issues</summary>
+<table style="margin-top:8px">
+<thead><tr><th>Line</th><th>Severity</th><th>Issue</th><th>Fix</th><th>Code</th></tr></thead>
+<tbody><tr><td colspan='5' style='color:#388e3c;text-align:center'>No issues found</td></tr></tbody>
+</table>
+</details>
+
+<div class="footer">strands_optimizer v2.0 — us.anthropic.claude-3-7-sonnet-20250219-v1:0</div>
+</body>
+</html>
