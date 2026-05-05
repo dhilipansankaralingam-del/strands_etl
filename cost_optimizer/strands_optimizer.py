@@ -689,6 +689,10 @@ def analyze_pyspark_script(
     processing_mode: str = "full",
     current_config: Optional[Dict] = None,
     use_llm: bool = False,
+    glue_metrics: Optional[Dict] = None,
+    current_workers: int = 10,
+    current_worker_type: str = "G.2X",
+    executor_memory_gb: float = 4.0,
 ) -> Dict:
     """
     Run full cost-optimization analysis on a single PySpark script.
@@ -802,6 +806,198 @@ def analyze_pyspark_script(
             existing = result.get("all_recommendations", [])
             result["all_recommendations"] = sf_recs + existing
             result["small_file_issues"] = sf_recs
+
+    # ── Glue metrics → P0/P1 runtime recommendations ──────────────────────────
+    # Runs independently of --apply-fixes so metric findings are always in
+    # all_recommendations, line_annotations report, and annotated script.
+    if glue_metrics:
+        try:
+            try:
+                from .agents.glue_metrics_analyzer import GlueMetricsAnalyzer
+            except ImportError:
+                from cost_optimizer.agents.glue_metrics_analyzer import GlueMetricsAnalyzer
+
+            gma            = GlueMetricsAnalyzer()
+            parsed         = gma.parse_metrics(glue_metrics)
+            metric_analysis= gma.analyze(parsed)
+            metric_findings= metric_analysis.get("findings", [])
+            worker_rec     = gma.get_worker_recommendation(
+                metric_analysis,
+                current_workers     = current_workers,
+                current_worker_type = current_worker_type,
+            )
+            spark_overrides = gma.get_spark_config_overrides(
+                metric_analysis, current_executor_memory_gb=executor_memory_gb
+            )
+
+            result["metric_findings"]       = metric_findings
+            result["metric_analysis"]       = metric_analysis
+            result["worker_recommendation"] = worker_rec
+            result["spark_config_overrides"]= spark_overrides
+
+            # Build P0/P1 recommendations from metric findings
+            _SEV_MAP = {"critical": "P0", "high": "P0", "medium": "P1", "low": "P2"}
+            heap_p    = metric_analysis.get("heap_pressure", "none")
+            cpu_w     = metric_analysis.get("cpu_worker_load", "normal")
+            cpu_d     = metric_analysis.get("cpu_driver_load", "normal")
+            w_util    = metric_analysis.get("worker_utilisation", "unknown")
+            raw_vals  = metric_analysis.get("raw_values", {})
+
+            metric_recs: List[Dict] = []
+
+            if heap_p in ("critical", "high"):
+                metric_recs.append({
+                    "priority":    "P0",
+                    "title":       f"JVM heap {heap_p} — upgrade memory or worker type",
+                    "description": (
+                        f"Heap p90={raw_vals.get('heap_p90',0):.0%}, "
+                        f"max={raw_vals.get('heap_max',0):.0%}. "
+                        "OOM risk detected from Glue CloudWatch metrics."
+                    ),
+                    "implementation": (
+                        f"Upgrade worker type {current_worker_type} → "
+                        f"{worker_rec.get('recommended_type', current_worker_type)}; "
+                        f"add spark.executor.memoryOverhead; enable G1GC."
+                    ),
+                    "estimated_impact": "Prevents OOM crashes; reduces retry cost",
+                    "quick_win":   False,
+                    "source":      "glue_metrics",
+                })
+            elif heap_p == "low":
+                metric_recs.append({
+                    "priority":    "P2",
+                    "title":       "JVM heap under-utilised — downgrade worker type to save cost",
+                    "description": (
+                        f"Heap p90={raw_vals.get('heap_p90',0):.0%}. "
+                        "Workers over-provisioned on memory."
+                    ),
+                    "implementation": (
+                        f"Downgrade worker type "
+                        f"{current_worker_type} → {worker_rec.get('recommended_type', current_worker_type)}."
+                    ),
+                    "estimated_impact": "Direct cost reduction with no performance loss",
+                    "quick_win":   True,
+                    "source":      "glue_metrics",
+                })
+
+            if cpu_w == "overloaded":
+                metric_recs.append({
+                    "priority":    "P0",
+                    "title":       f"Worker CPU saturated ({raw_vals.get('cpu_worker_avg',0):.0%} avg)",
+                    "description": (
+                        "Workers are CPU-bound. Spark tasks are queueing, "
+                        "increasing job duration and cost."
+                    ),
+                    "implementation": (
+                        "Increase number_of_workers; reduce spark.executor.cores to 2 "
+                        "so tasks get more GC headroom."
+                    ),
+                    "estimated_impact": "Reduces job duration; prevents stage retries",
+                    "quick_win":   False,
+                    "source":      "glue_metrics",
+                })
+            elif cpu_w == "idle":
+                metric_recs.append({
+                    "priority":    "P1",
+                    "title":       f"Worker CPU under-utilised ({raw_vals.get('cpu_worker_avg',0):.0%} avg)",
+                    "description": "Workers are mostly idle. Parallelism is under-configured.",
+                    "implementation": "Increase spark.executor.cores to 4; reduce number_of_workers.",
+                    "estimated_impact": "Reduce worker count → direct cost saving",
+                    "quick_win":   True,
+                    "source":      "glue_metrics",
+                })
+
+            if cpu_d in ("overloaded",):
+                metric_recs.append({
+                    "priority":    "P1",
+                    "title":       f"Driver CPU overloaded ({raw_vals.get('cpu_driver_avg',0):.0%} avg)",
+                    "description": (
+                        "Driver is doing heavy work — likely .collect(), .toPandas(), "
+                        "or complex DAG planning."
+                    ),
+                    "implementation": (
+                        "Replace .collect() with .write(); avoid toPandas() on large DataFrames; "
+                        "use broadcast joins instead of driver-side merges."
+                    ),
+                    "estimated_impact": "Reduces driver bottleneck and OOM risk",
+                    "quick_win":   False,
+                    "source":      "glue_metrics",
+                })
+
+            if w_util == "under":
+                wu_avg = raw_vals.get("workers_avg", current_workers)
+                metric_recs.append({
+                    "priority":    "P1",
+                    "title":       (
+                        f"Workers over-provisioned — reduce from "
+                        f"{current_workers} → {worker_rec.get('recommended_workers', current_workers)}"
+                    ),
+                    "description": (
+                        f"Only {wu_avg:.1f} of {current_workers} workers active on average "
+                        f"({wu_avg/max(current_workers,1):.0%} utilisation). "
+                        "Idle workers billed but doing no work."
+                    ),
+                    "implementation": (
+                        f"Set number_of_workers={worker_rec.get('recommended_workers', current_workers)}; "
+                        "enable spark.dynamicAllocation."
+                    ),
+                    "estimated_impact": f"~{int((1 - wu_avg/max(current_workers,1))*100)}% worker cost reduction",
+                    "quick_win":   True,
+                    "source":      "glue_metrics",
+                })
+            elif w_util == "over":
+                metric_recs.append({
+                    "priority":    "P0",
+                    "title":       (
+                        f"Workers under-provisioned — increase from "
+                        f"{current_workers} → {worker_rec.get('recommended_workers', current_workers)}"
+                    ),
+                    "description": "Workers are maxed out — tasks queue, increasing duration.",
+                    "implementation": (
+                        f"Set number_of_workers={worker_rec.get('recommended_workers', current_workers)}."
+                    ),
+                    "estimated_impact": "Reduces job duration and retry failures",
+                    "quick_win":   False,
+                    "source":      "glue_metrics",
+                })
+
+            if metric_analysis.get("stage_velocity") == "slow":
+                metric_recs.append({
+                    "priority":    "P1",
+                    "title":       "Stage velocity slow — possible data skew or shuffle bottleneck",
+                    "description": (
+                        f"Only {raw_vals.get('stages_max', '?')} stages completed. "
+                        "Job likely stalled on one large task per stage."
+                    ),
+                    "implementation": (
+                        "Enable AQE skewJoin; add salting to join keys with high cardinality; "
+                        "check shuffle read/write sizes per stage in Spark UI."
+                    ),
+                    "estimated_impact": "Can reduce job duration by 30-70% for skewed workloads",
+                    "quick_win":   False,
+                    "source":      "glue_metrics",
+                })
+
+            if spark_overrides:
+                metric_recs.append({
+                    "priority":    "P1",
+                    "title":       f"Apply {len(spark_overrides)} metric-derived Spark config(s)",
+                    "description": "Spark configs tuned from actual Glue CloudWatch runtime data.",
+                    "implementation": "\n".join(
+                        f"  {k} = {v}" for k, v in spark_overrides.items()
+                    ),
+                    "estimated_impact": "Right-sizes memory, CPU, and parallelism to actual workload",
+                    "quick_win":   True,
+                    "source":      "glue_metrics",
+                    "spark_configs": spark_overrides,
+                })
+
+            if metric_recs:
+                existing = result.get("all_recommendations", [])
+                result["all_recommendations"] = metric_recs + existing
+
+        except Exception as exc:
+            result["metric_findings"] = [f"Glue metrics parse error: {exc}"]
 
     _state["scan_results"][script_path] = result
     return result
@@ -1723,11 +1919,14 @@ def _write_annotated_script(
         return
 
     lines          = original.splitlines()
-    annotations    = result.get("line_annotations", [])
-    recs           = result.get("all_recommendations", [])
-    s              = result.get("summary", {})
-    mp             = result.get("multiplatform_comparison", [])
-    sf_issues      = result.get("small_file_issues", [])
+    annotations     = result.get("line_annotations", [])
+    recs            = result.get("all_recommendations", [])
+    s               = result.get("summary", {})
+    mp              = result.get("multiplatform_comparison", [])
+    sf_issues       = result.get("small_file_issues", [])
+    metric_findings = result.get("metric_findings", [])
+    worker_rec      = result.get("worker_recommendation")
+    spark_overrides = result.get("spark_config_overrides", {})
 
     # Build a map: lineno → list[finding]
     findings_map: Dict[int, List[Dict]] = {}
@@ -1838,6 +2037,36 @@ def _write_annotated_script(
             if sf.get("fix"):
                 out_lines.append(_c(f"      Fix: {sf['fix'][:100]}"))
         out_lines.append(_c())
+
+    if metric_findings or worker_rec or spark_overrides:
+        out_lines += [
+            _c("  GLUE RUNTIME METRICS ANALYSIS"),
+            _c("  " + "─" * 62),
+        ]
+        for finding in metric_findings:
+            for part in [finding[i:i+80] for i in range(0, len(finding), 80)]:
+                out_lines.append(_c(f"    {part}"))
+        if metric_findings:
+            out_lines.append(_c())
+
+        if worker_rec and worker_rec.get("changed"):
+            out_lines += [
+                _c("  WORKER SIZING RECOMMENDATION"),
+                _c(f"    Current : {worker_rec['current_workers']} × {worker_rec['current_worker_type']}"),
+                _c(f"    Optimal : {worker_rec['recommended_workers']} × {worker_rec['recommended_type']}"),
+            ]
+            for reason in worker_rec.get("reason", []):
+                out_lines.append(_c(f"    Reason  : {reason}"))
+            out_lines.append(_c())
+
+        if spark_overrides:
+            out_lines += [
+                _c("  METRIC-DERIVED SPARK CONFIGS (add to SparkSession)"),
+                _c("  " + "─" * 62),
+            ]
+            for k, v in spark_overrides.items():
+                out_lines.append(_c(f"    .config(\"{k}\", \"{v}\")"))
+            out_lines.append(_c())
 
     out_lines += [
         _c("═" * W),
@@ -2524,6 +2753,10 @@ def _run_one(
     show_lines: bool,
     check_small_files: bool,
     output_dir: Optional[str] = None,
+    glue_metrics: Optional[Dict] = None,
+    current_workers: int = 10,
+    current_worker_type: str = "G.2X",
+    executor_memory_gb: float = 4.0,
 ) -> Dict:
     job_name = Path(script_path).stem
     print(f"\n{'─'*65}")
@@ -2531,11 +2764,15 @@ def _run_one(
     print(f"{'─'*65}")
 
     result = analyze_pyspark_script(
-        script_path     = script_path,
-        tables          = tables,
-        processing_mode = processing_mode,
-        current_config  = current_config,
-        use_llm         = use_llm,
+        script_path         = script_path,
+        tables              = tables,
+        processing_mode     = processing_mode,
+        current_config      = current_config,
+        use_llm             = use_llm,
+        glue_metrics        = glue_metrics,
+        current_workers     = current_workers,
+        current_worker_type = current_worker_type,
+        executor_memory_gb  = executor_memory_gb,
     )
 
     if not result.get("success"):
@@ -2586,6 +2823,16 @@ def _run_one(
         print(f"\n  Top P0 recommendations:")
         for r in p0[:3]:
             print(f"    • {r.get('title', '')}")
+
+    # ── Glue metrics summary ──────────────────────────────────────────────────
+    if result.get("metric_findings"):
+        print(f"\n  Glue metrics findings:")
+        for f in result["metric_findings"]:
+            print(f"    • {f}")
+    if result.get("worker_recommendation", {}).get("changed"):
+        wr = result["worker_recommendation"]
+        print(f"  Worker sizing: {wr['current_workers']}×{wr['current_worker_type']}"
+              f" → {wr['recommended_workers']}×{wr['recommended_type']}")
 
     # ── Small-file findings (always shown when detected, no flag required) ─────
     sf_issues = result.get("small_file_issues", [])
@@ -2692,18 +2939,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.workers:
         current_config["number_of_workers"] = args.workers
 
+    # Load Glue metrics once for the whole batch
+    _glue_metrics_for_run = _load_glue_metrics(args)
+    if _glue_metrics_for_run:
+        print(f"  Glue metrics loaded: {', '.join(_glue_metrics_for_run.keys())}")
+        print("  (metrics will feed into analysis, recommendations, and annotated script)")
+
     # Analyse each script
     all_results: Dict[str, Any] = {}
     for script_path in scripts:
         result = _run_one(
-            script_path       = script_path,
-            tables            = config_tables or [],
-            processing_mode   = args.processing_mode,
-            current_config    = current_config,
-            use_llm           = args.use_llm,
-            show_lines        = args.show_lines,
-            check_small_files = args.small_files,
-            output_dir        = args.output_dir,
+            script_path         = script_path,
+            tables              = config_tables or [],
+            processing_mode     = args.processing_mode,
+            current_config      = current_config,
+            use_llm             = args.use_llm,
+            show_lines          = args.show_lines,
+            check_small_files   = args.small_files,
+            output_dir          = args.output_dir,
+            glue_metrics        = _glue_metrics_for_run,
+            current_workers     = getattr(args, "current_workers", 10),
+            current_worker_type = getattr(args, "worker_type", "G.2X"),
+            executor_memory_gb  = getattr(args, "executor_memory_gb", 4.0),
         )
         all_results[script_path] = result
 
