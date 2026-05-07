@@ -438,6 +438,28 @@ FROM {tbl_ref}$partitions
             "max_files_in_partition":  int(_f("max_files_in_partition")),
         })
 
+    # ── Manifests: index health ───────────────────────────────────────────────
+    manifests_sql = f"""
+SELECT
+    count(*)                               AS manifest_count,
+    sum(added_data_files_count)            AS indexed_files,
+    round(avg(added_data_files_count), 1)  AS avg_files_per_manifest,
+    count(CASE WHEN added_data_files_count = 0 THEN 1 END) AS empty_manifests
+FROM {tbl_ref}$manifests
+""".strip()
+    mani_rows = _run_athena_query(manifests_sql, database, output_s3, region)
+    if mani_rows:
+        r = mani_rows[0]
+        def _f(k: str, default: float = 0.0) -> float:
+            try: return float(r.get(k) or default)
+            except: return default
+        result.update({
+            "manifest_count":         int(_f("manifest_count")),
+            "indexed_files":          int(_f("indexed_files")),
+            "avg_files_per_manifest": _f("avg_files_per_manifest"),
+            "empty_manifests":        int(_f("empty_manifests")),
+        })
+
     return result
 
 
