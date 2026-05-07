@@ -248,6 +248,199 @@ def _parse_s3_path(s3_url: str) -> Tuple[str, str]:
     return parts[0], parts[1] if len(parts) > 1 else ""
 
 
+def _is_iceberg_table(glue_tbl: Dict) -> bool:
+    """Return True when Glue metadata indicates an Iceberg table."""
+    params = glue_tbl.get("Parameters", {})
+    sd     = glue_tbl.get("StorageDescriptor", {})
+    serde  = sd.get("SerdeInfo", {}).get("SerializationLibrary", "").lower()
+    table_type = params.get("table_type", params.get("tableType", "")).upper()
+    metadata_loc = params.get("metadata_location", "")
+    return (
+        table_type == "ICEBERG"
+        or "iceberg" in serde
+        or metadata_loc.endswith(".metadata.json")
+        or "iceberg" in params.get("write.format.default", "").lower()
+    )
+
+
+def _run_athena_query(
+    sql: str,
+    database: str,
+    output_s3: str,
+    region: str = DEFAULT_REGION,
+    timeout_s: int = 60,
+) -> Optional[List[Dict]]:
+    """
+    Execute *sql* via Athena and return rows as list-of-dicts.
+    Returns None on failure or when boto3 / credentials are unavailable.
+    """
+    if not HAS_BOTO3 or not output_s3:
+        return None
+    try:
+        import time
+        athena = boto3.client("athena", region_name=region)
+        resp   = athena.start_query_execution(
+            QueryString              = sql,
+            QueryExecutionContext    = {"Database": database},
+            ResultConfiguration     = {"OutputLocation": output_s3},
+        )
+        qid = resp["QueryExecutionId"]
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            status = athena.get_query_execution(QueryExecutionId=qid)
+            state  = status["QueryExecution"]["Status"]["State"]
+            if state == "SUCCEEDED":
+                break
+            if state in ("FAILED", "CANCELLED"):
+                reason = status["QueryExecution"]["Status"].get("StateChangeReason", state)
+                log.debug("Athena query %s: %s — %s", qid, state, reason)
+                return None
+            time.sleep(1)
+        else:
+            log.debug("Athena query %s timed out after %ds", qid, timeout_s)
+            return None
+
+        pages   = athena.get_paginator("get_query_results").paginate(QueryExecutionId=qid)
+        headers: List[str] = []
+        rows:    List[Dict] = []
+        for page in pages:
+            result_rows = page["ResultSet"]["Rows"]
+            if not headers:
+                headers = [c["VarCharValue"] for c in result_rows[0]["Data"]]
+                result_rows = result_rows[1:]
+            for row in result_rows:
+                vals = [c.get("VarCharValue", "") for c in row["Data"]]
+                rows.append(dict(zip(headers, vals)))
+        return rows
+    except Exception as exc:
+        log.debug("Athena query failed: %s", exc)
+        return None
+
+
+def _iceberg_table_stats(
+    database: str,
+    table_name: str,
+    output_s3: str,
+    region: str = DEFAULT_REGION,
+) -> Dict:
+    """
+    Query Iceberg metadata tables ($files, $snapshots, $partitions) via Athena
+    and return a consolidated stats dict.
+
+    For Iceberg tables S3 object listing is WRONG — it counts data files from
+    all historical snapshots (logically deleted files still physically present
+    until expire_snapshots).  The $files metadata table reflects ONLY the
+    current snapshot's live data files.
+    """
+    if not output_s3:
+        return {"error": "athena_output_s3 not configured; cannot query Iceberg metadata tables"}
+
+    tbl_ref = f'"{database}"."{table_name}"'
+
+    # ── Current snapshot: data file stats ────────────────────────────────────
+    files_sql = f"""
+SELECT
+    count(*)                                                              AS file_cnt,
+    round(min(file_size_in_bytes) / 1024.0, 2)                          AS min_file_size_kb,
+    round(max(file_size_in_bytes) / (1024.0 * 1024), 2)                 AS max_file_size_mb,
+    round(avg(file_size_in_bytes) / (1024.0 * 1024), 2)                 AS avg_file_size_mb,
+    round(sum(file_size_in_bytes) / (1024.0 * 1024), 2)                 AS total_size_mb,
+    round(sum(file_size_in_bytes) / (1024.0 * 1024 * 1024), 4)          AS total_size_gb,
+    count(DISTINCT partition)                                             AS partition_count,
+    count(CASE WHEN file_size_in_bytes < 10  * 1024 * 1024 THEN 1 END)  AS tiny_file_cnt,
+    count(CASE WHEN file_size_in_bytes < 128 * 1024 * 1024 THEN 1 END)  AS small_file_cnt,
+    round(
+        stddev(file_size_in_bytes) / NULLIF(avg(file_size_in_bytes), 0),
+    2)                                                                    AS file_size_cv,
+    sum(record_count)                                                     AS total_records
+FROM {tbl_ref}$files
+""".strip()
+
+    # ── Snapshot history ──────────────────────────────────────────────────────
+    snapshots_sql = f"""
+SELECT
+    count(*)                                    AS snapshot_count,
+    min(committed_at)                           AS oldest_snapshot_ts,
+    max(committed_at)                           AS newest_snapshot_ts,
+    sum(added_data_files_count)                 AS total_added_files,
+    sum(deleted_data_files_count)               AS total_deleted_files,
+    sum(COALESCE(added_records_count, 0))       AS total_added_records,
+    sum(COALESCE(deleted_records_count, 0))     AS total_deleted_records
+FROM {tbl_ref}$snapshots
+""".strip()
+
+    # ── Partition distribution (skew detection) ───────────────────────────────
+    partitions_sql = f"""
+SELECT
+    count(*)                                               AS partition_count,
+    sum(record_count)                                      AS total_records,
+    min(record_count)                                      AS min_partition_records,
+    max(record_count)                                      AS max_partition_records,
+    round(avg(record_count), 0)                            AS avg_partition_records,
+    round(max(record_count) * 1.0
+          / NULLIF(avg(record_count), 0), 2)               AS skew_ratio,
+    sum(file_count)                                        AS total_files,
+    max(file_count)                                        AS max_files_in_partition
+FROM {tbl_ref}$partitions
+""".strip()
+
+    result: Dict[str, Any] = {"source": "iceberg_metadata_tables"}
+
+    files_rows = _run_athena_query(files_sql, database, output_s3, region)
+    if files_rows:
+        r = files_rows[0]
+        def _f(k: str, default: float = 0.0) -> float:
+            try: return float(r.get(k) or default)
+            except: return default
+        result.update({
+            "file_cnt":          int(_f("file_cnt")),
+            "min_file_size_kb":  _f("min_file_size_kb"),
+            "max_file_size_mb":  _f("max_file_size_mb"),
+            "avg_file_size_mb":  _f("avg_file_size_mb"),
+            "total_size_mb":     _f("total_size_mb"),
+            "total_size_gb":     _f("total_size_gb"),
+            "partition_count":   int(_f("partition_count")),
+            "tiny_file_cnt":     int(_f("tiny_file_cnt")),
+            "small_file_cnt":    int(_f("small_file_cnt")),
+            "file_size_cv":      _f("file_size_cv"),   # coefficient of variation
+            "total_records":     int(_f("total_records")),
+        })
+    else:
+        result["files_query_error"] = "Could not query $files"
+
+    snaps_rows = _run_athena_query(snapshots_sql, database, output_s3, region)
+    if snaps_rows:
+        r = snaps_rows[0]
+        def _f(k: str, default: float = 0.0) -> float:
+            try: return float(r.get(k) or default)
+            except: return default
+        result.update({
+            "snapshot_count":         int(_f("snapshot_count")),
+            "oldest_snapshot_ts":     r.get("oldest_snapshot_ts", ""),
+            "newest_snapshot_ts":     r.get("newest_snapshot_ts", ""),
+            "total_added_files":      int(_f("total_added_files")),
+            "total_deleted_files":    int(_f("total_deleted_files")),
+            "total_added_records":    int(_f("total_added_records")),
+            "total_deleted_records":  int(_f("total_deleted_records")),
+        })
+
+    parts_rows = _run_athena_query(partitions_sql, database, output_s3, region)
+    if parts_rows:
+        r = parts_rows[0]
+        def _f(k: str, default: float = 0.0) -> float:
+            try: return float(r.get(k) or default)
+            except: return default
+        result.update({
+            "skew_ratio":              _f("skew_ratio"),
+            "min_partition_records":   int(_f("min_partition_records")),
+            "max_partition_records":   int(_f("max_partition_records")),
+            "avg_partition_records":   int(_f("avg_partition_records")),
+            "max_files_in_partition":  int(_f("max_files_in_partition")),
+        })
+
+    return result
+
+
 def _get_s3_object_sizes(bucket: str, prefix: str) -> List[int]:
     """List object sizes under an S3 prefix.  Returns [] when no access."""
     if not HAS_BOTO3:
@@ -265,12 +458,26 @@ def _get_s3_object_sizes(bucket: str, prefix: str) -> List[int]:
         return []
 
 
-def _glue_table_info(database: str, table_name: str) -> Dict:
-    """Fetch table metadata from Glue Catalog. Returns {} on failure."""
+def _glue_table_info(
+    database: str,
+    table_name: str,
+    athena_output_s3: str = "",
+    region: str = DEFAULT_REGION,
+) -> Dict:
+    """
+    Fetch table metadata from Glue Catalog.
+
+    For Iceberg tables, uses Athena $files / $snapshots / $partitions metadata
+    tables instead of S3 object listing.  S3 listing for Iceberg is INACCURATE
+    because it includes data files from all historical snapshots that have not
+    yet been physically deleted by expire_snapshots.
+
+    Returns {} on failure.
+    """
     if not HAS_BOTO3 or not database or not table_name:
         return {}
     try:
-        glue = boto3.client("glue", region_name=DEFAULT_REGION)
+        glue = boto3.client("glue", region_name=region)
         tbl  = glue.get_table(DatabaseName=database, Name=table_name)["Table"]
         params = tbl.get("Parameters", {})
         sd     = tbl.get("StorageDescriptor", {})
@@ -282,7 +489,9 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
         size_bytes   = int(params.get("totalSize", params.get("sizeKey", 0)) or 0)
 
         fmt_raw = sd.get("InputFormat", "").lower()
+        is_iceberg = _is_iceberg_table(tbl)
         fmt = (
+            "iceberg" if is_iceberg else
             "parquet" if "parquet" in fmt_raw else
             "orc"     if "orc"     in fmt_raw else
             "avro"    if "avro"    in fmt_raw else
@@ -291,18 +500,45 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
             "parquet"
         )
 
-        # If catalog stats are absent, estimate size by listing S3
-        file_count = 0
-        if size_bytes == 0 and location.startswith("s3"):
-            bkt, pfx = _parse_s3_path(location)
-            sizes = _get_s3_object_sizes(bkt, pfx)
-            if sizes:
-                file_count = len(sizes)
-                size_bytes = sum(sizes)
-                if record_count == 0:
-                    record_count = max(1, size_bytes // 500)  # ~500 bytes/row guess
+        file_count   = 0
+        iceberg_meta: Dict = {}
 
-        # Track whether we have real stats or are working blind
+        if is_iceberg:
+            # ── Iceberg: query metadata tables for accurate current-snapshot stats ──
+            # S3 listing would include files from all old snapshots → wrong total.
+            if athena_output_s3:
+                iceberg_meta = _iceberg_table_stats(database, table_name, athena_output_s3, region)
+                if "total_size_gb" in iceberg_meta:
+                    size_bytes   = int(iceberg_meta["total_size_gb"] * (1024 ** 3))
+                    record_count = iceberg_meta.get("total_records", record_count)
+                    file_count   = iceberg_meta.get("file_cnt", 0)
+            else:
+                log.debug(
+                    "Iceberg table %s.%s detected but --athena-output-s3 not set; "
+                    "S3 listing may over-count due to historical snapshot files.",
+                    database, table_name,
+                )
+                iceberg_meta = {"warning": "S3 listing used — sizes inflated by old snapshots"}
+                # Fall back to S3 listing but warn
+                if size_bytes == 0 and location.startswith("s3"):
+                    bkt, pfx = _parse_s3_path(location)
+                    sizes = _get_s3_object_sizes(bkt, pfx)
+                    if sizes:
+                        file_count = len(sizes)
+                        size_bytes = sum(sizes)
+                        if record_count == 0:
+                            record_count = max(1, size_bytes // 500)
+        else:
+            # ── Non-Iceberg: use Glue stats; fall back to S3 listing ──────────────
+            if size_bytes == 0 and location.startswith("s3"):
+                bkt, pfx = _parse_s3_path(location)
+                sizes = _get_s3_object_sizes(bkt, pfx)
+                if sizes:
+                    file_count = len(sizes)
+                    size_bytes = sum(sizes)
+                    if record_count == 0:
+                        record_count = max(1, size_bytes // 500)
+
         has_stats = size_bytes > 0 or record_count > 0
 
         info: Dict[str, Any] = {
@@ -313,13 +549,17 @@ def _glue_table_info(database: str, table_name: str) -> Dict:
             "column_count":     len(cols) + len(partition_keys),
             "partition_column": partition_keys[0]["Name"] if partition_keys else None,
             "format":           fmt,
-            "source":           "glue_catalog",
+            "is_iceberg":       is_iceberg,
+            "source":           "iceberg_metadata_tables" if (is_iceberg and "total_size_gb" in iceberg_meta)
+                                else "glue_catalog",
             "has_stats":        has_stats,
         }
         if size_bytes:
             info["size_gb"] = round(size_bytes / (1024 ** 3), 3)
         if file_count:
             info["file_count"] = file_count
+        if iceberg_meta:
+            info["iceberg_stats"] = iceberg_meta
         return info
     except Exception as exc:
         log.debug("Glue catalog lookup failed for %s.%s: %s", database, table_name, exc)
@@ -506,7 +746,7 @@ def scan_scripts_in_directory(directory: str, recursive: bool = True) -> Dict:
 
 
 @strands_tool
-def auto_detect_tables(script_path: str) -> Dict:
+def auto_detect_tables(script_path: str, athena_output_s3: str = "") -> Dict:
     """
     Extract table/data-source references from a PySpark script without a config.
 
@@ -594,7 +834,7 @@ def auto_detect_tables(script_path: str) -> Dict:
         else:
             db  = base.get("database", "")
             tbl = base["table"]
-            info = _glue_table_info(db, tbl) if db else {}
+            info = _glue_table_info(db, tbl, athena_output_s3) if db else {}
             if not info:
                 info = _heuristic_table_info(tbl, db)
             elif not info.get("has_stats", True):
@@ -623,24 +863,93 @@ def detect_small_file_problem(
     location: str = "",
     database: str = "",
     table_name: str = "",
+    athena_output_s3: str = "",
+    region: str = DEFAULT_REGION,
 ) -> Dict:
     """
     Check whether a table/S3 path suffers from the small-file problem.
 
+    For Iceberg tables, queries table$files via Athena (accurate — current
+    snapshot only).  Falls back to S3 object listing for non-Iceberg tables
+    or when athena_output_s3 is not provided.
+
     Provide either:
       location              - S3 URI (s3://bucket/prefix)
-      database + table_name - resolved via Glue Catalog
-
-    Returns a report with file counts, average size, and fix recommendations.
+      database + table_name - resolved via Glue Catalog (preferred)
     """
-    if not location and database and table_name:
-        info = _glue_table_info(database, table_name)
-        location = info.get("location", "")
+    info: Dict = {}
+    is_iceberg = False
+
+    if database and table_name:
+        info       = _glue_table_info(database, table_name, athena_output_s3, region)
+        location   = info.get("location", location)
+        is_iceberg = info.get("is_iceberg", False)
 
     if not location:
         return {"checked": False, "reason": "No S3 location; provide location or database+table_name"}
     if not location.startswith("s3"):
         return {"checked": False, "reason": "Only S3 locations are supported"}
+
+    key = f"{database}.{table_name}" if database and table_name else location
+
+    # ── Iceberg: use pre-fetched $files stats if available ────────────────────
+    iceberg_stats = info.get("iceberg_stats", {})
+    if is_iceberg and "file_cnt" in iceberg_stats:
+        fc        = iceberg_stats["file_cnt"]
+        avg_mb    = iceberg_stats.get("avg_file_size_mb", 0.0)
+        min_mb    = iceberg_stats.get("min_file_size_kb", 0.0) / 1024
+        max_mb    = iceberg_stats.get("max_file_size_mb", 0.0)
+        total_gb  = iceberg_stats.get("total_size_gb", 0.0)
+        tiny_cnt  = iceberg_stats.get("tiny_file_cnt", 0)
+        small_cnt = iceberg_stats.get("small_file_cnt", 0)
+        has_problem = avg_mb < SMALL_FILE_THRESHOLD_MB and fc >= MIN_SMALL_FILE_COUNT
+        report = {
+            "checked":            True,
+            "table":              table_name or location,
+            "location":           location,
+            "is_iceberg":         True,
+            "sizing_source":      "iceberg_$files (current snapshot only)",
+            "file_count":         fc,
+            "total_size_gb":      round(total_gb, 3),
+            "avg_file_size_mb":   round(avg_mb, 2),
+            "min_file_size_mb":   round(min_mb, 2),
+            "max_file_size_mb":   round(max_mb, 2),
+            "tiny_file_count":    tiny_cnt,
+            "small_file_count":   small_cnt,
+            "small_file_pct":     round(small_cnt / max(fc, 1) * 100, 1),
+            "file_size_cv":       iceberg_stats.get("file_size_cv", 0.0),
+            "snapshot_count":     iceberg_stats.get("snapshot_count", 0),
+            "skew_ratio":         iceberg_stats.get("skew_ratio", 1.0),
+            "has_problem":        has_problem,
+            "severity": (
+                "critical" if has_problem and avg_mb < TINY_FILE_THRESHOLD_MB else
+                "warning"  if has_problem else "ok"
+            ),
+            "recommendation": (
+                _small_file_recommendation(avg_mb, fc) if has_problem else None
+            ),
+        }
+        # Iceberg-specific extras
+        snap_count = iceberg_stats.get("snapshot_count", 0)
+        if snap_count > 50:
+            report["snapshot_warning"] = (
+                f"{snap_count} snapshots found — run expire_snapshots to reclaim storage "
+                f"and speed up Iceberg table planning."
+            )
+        if iceberg_stats.get("skew_ratio", 1.0) > 5:
+            report["partition_skew_warning"] = (
+                f"Partition skew ratio {iceberg_stats['skew_ratio']:.1f}× — "
+                "largest partition has significantly more records than average."
+            )
+        _state["small_file_flags"][key] = report
+        return report
+
+    # ── Non-Iceberg (or Iceberg without Athena): S3 listing ───────────────────
+    if is_iceberg:
+        log.debug(
+            "Iceberg table %s detected but $files query unavailable; "
+            "S3 listing will include old snapshot files and may over-count.", key
+        )
 
     bucket, prefix = _parse_s3_path(location)
     sizes = _get_s3_object_sizes(bucket, prefix)
@@ -650,6 +959,8 @@ def detect_small_file_problem(
             "checked": True, "table": table_name or location,
             "file_count": 0, "has_problem": False,
             "note": "No files found or no S3 access",
+            "is_iceberg": is_iceberg,
+            "sizing_source": "s3_listing",
         }
 
     total_bytes = sum(sizes)
@@ -657,11 +968,15 @@ def detect_small_file_problem(
     small_count = sum(1 for s in sizes if s < SMALL_FILE_THRESHOLD_MB * 1024 * 1024)
     has_problem = avg_mb < SMALL_FILE_THRESHOLD_MB and len(sizes) >= MIN_SMALL_FILE_COUNT
 
-    key = f"{database}.{table_name}" if database and table_name else location
     report = {
         "checked":            True,
         "table":              table_name or location,
         "location":           location,
+        "is_iceberg":         is_iceberg,
+        "sizing_source":      (
+            "s3_listing_inflated (Iceberg — old snapshot files included)"
+            if is_iceberg else "s3_listing"
+        ),
         "file_count":         len(sizes),
         "total_size_gb":      round(total_bytes / (1024 ** 3), 3),
         "avg_file_size_mb":   round(avg_mb, 2),
@@ -693,6 +1008,7 @@ def analyze_pyspark_script(
     current_workers: int = 10,
     current_worker_type: str = "G.2X",
     executor_memory_gb: float = 4.0,
+    athena_output_s3: str = "",
 ) -> Dict:
     """
     Run full cost-optimization analysis on a single PySpark script.
@@ -717,7 +1033,7 @@ def analyze_pyspark_script(
         return {"error": f"Script not found: {script_path}"}
 
     if not tables:
-        detection = auto_detect_tables(script_path)
+        detection = auto_detect_tables(script_path, athena_output_s3=athena_output_s3)
         tables = detection.get("tables", [])
 
     # ── Always store resolved tables so _run_one / --small-files can use them
@@ -732,7 +1048,10 @@ def analyze_pyspark_script(
         db  = tbl.get("database", "")
         tn  = tbl.get("table", "")
         if loc.startswith("s3") or (db and tn):
-            sf = detect_small_file_problem(location=loc, database=db, table_name=tn)
+            sf = detect_small_file_problem(
+                location=loc, database=db, table_name=tn,
+                athena_output_s3=athena_output_s3,
+            )
             if sf.get("has_problem"):
                 tbl["_small_file_report"] = sf   # carry into orchestrator context
 
@@ -2581,6 +2900,12 @@ Examples:
                    help="Use Amazon Bedrock for deeper analysis (requires credentials)")
     p.add_argument("--model-id", default=DEFAULT_MODEL_ID,
                    help=f"Bedrock model ID (default: {DEFAULT_MODEL_ID})")
+    p.add_argument("--athena-output-s3", default="", metavar="S3_URI",
+                   help=(
+                       "S3 URI for Athena query results (e.g. s3://my-bucket/athena-tmp/). "
+                       "Required for accurate sizing of Iceberg tables — without it the tool "
+                       "falls back to S3 listing which includes files from all old snapshots."
+                   ))
     p.add_argument("--region", default=DEFAULT_REGION,
                    help=f"AWS region for Bedrock/Glue/S3 calls (default: {DEFAULT_REGION})")
     p.add_argument("--s3-bucket", metavar="BUCKET",
@@ -2809,6 +3134,7 @@ def _run_one(
     current_workers: int = 10,
     current_worker_type: str = "G.2X",
     executor_memory_gb: float = 4.0,
+    athena_output_s3: str = "",
 ) -> Dict:
     job_name = Path(script_path).stem
     print(f"\n{'─'*65}")
@@ -2825,6 +3151,7 @@ def _run_one(
         current_workers     = current_workers,
         current_worker_type = current_worker_type,
         executor_memory_gb  = executor_memory_gb,
+        athena_output_s3    = athena_output_s3,
     )
 
     if not result.get("success"):
@@ -3013,6 +3340,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             current_workers     = getattr(args, "current_workers", 10),
             current_worker_type = getattr(args, "worker_type", "G.2X"),
             executor_memory_gb  = getattr(args, "executor_memory_gb", 4.0),
+            athena_output_s3    = getattr(args, "athena_output_s3", ""),
         )
         all_results[script_path] = result
 
