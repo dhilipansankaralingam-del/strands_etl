@@ -2771,6 +2771,402 @@ def _render_batch_html(
 </html>"""
 # =============================================================================
 
+# =============================================================================
+# SCIENTIFIC ALGORITHM TOOLS
+# =============================================================================
+# Wrappers that expose pure-math functions from scientific_tools.py as
+# @strands_tool functions the interactive agent can call directly.
+# =============================================================================
+
+@strands_tool
+def amdahls_law_analysis(
+    serial_fraction_pct: float,
+    current_workers: int,
+) -> Dict:
+    """
+    Apply Amdahl's Law to find the theoretical maximum speedup and the
+    worker count past which adding more workers gives <1% gain.
+
+    serial_fraction_pct: estimated percentage of code that runs serially on the
+                         driver only (collect, toPandas, broadcast, single-partition
+                         sort).  Example: 15.0 means 15% serial.
+    current_workers:     current or proposed Glue / EMR worker count.
+
+    Returns: amdahl_speedup, theoretical_max_speedup, diminishing_returns_elbow,
+             efficiency_score, recommendation.
+    """
+    try:
+        from .agents.scientific_tools import amdahls_law
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import amdahls_law
+    return amdahls_law(serial_fraction=serial_fraction_pct / 100.0,
+                       num_workers=current_workers)
+
+
+@strands_tool
+def exponential_growth_forecast(
+    table_name: str,
+    initial_gb: float,
+    daily_growth_rate_pct: float,
+    forecast_days: int = 90,
+) -> Dict:
+    """
+    Forecast future table size using Euler's exponential model N(t) = N₀·e^(r·t).
+    More accurate than linear for tables with compounding write patterns.
+
+    table_name:            display name for context.
+    initial_gb:            current table size in GB (use detect_small_file_problem
+                           or analyze_pyspark_script to get this).
+    daily_growth_rate_pct: continuous growth rate per day as a percentage.
+                           Derive via: ln(current_gb/old_gb)/days_elapsed × 100
+                           Example: 1.5 means 1.5%/day compound growth.
+    forecast_days:         horizon to forecast (default 90).
+
+    Returns: projected_gb, doubling_time_days, monthly storage cost increase,
+             growth milestones (2×, 5×, 10×).
+    """
+    try:
+        from .agents.scientific_tools import exponential_growth
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import exponential_growth
+    result = exponential_growth(
+        initial_gb=initial_gb,
+        daily_rate=daily_growth_rate_pct / 100.0,
+        days=forecast_days,
+    )
+    result["table_name"] = table_name
+    return result
+
+
+@strands_tool
+def zipf_skew_analysis(
+    partition_sizes: List,
+    table_name: str = "",
+) -> Dict:
+    """
+    Fit a Zipf/power-law distribution to partition sizes and derive the
+    mathematically optimal salting factor to resolve data skew.
+
+    Uses the Hill estimator for the Zipf exponent α.
+    α < 0.5 = EXTREME skew, 0.5–1 = HIGH, 1–2 = MODERATE, ≥2 = MILD.
+    Recommended salt factor = ceil(√(max/median)).
+
+    partition_sizes: list of partition sizes (record counts or bytes).
+                     Obtain from: Athena query on table$partitions, or
+                     pass the partition_record_counts from detect_small_file_problem.
+    table_name:      table name for display.
+
+    Returns: zipf_alpha, skew_severity, recommended_salt_factor, spark_salting_snippet.
+    """
+    try:
+        from .agents.scientific_tools import zipf_skew_model
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import zipf_skew_model
+    result = zipf_skew_model(partition_sizes=[float(x) for x in partition_sizes])
+    if table_name:
+        result["table_name"] = table_name
+    return result
+
+
+@strands_tool
+def shannon_entropy_analysis(
+    value_counts: Dict,
+    column_name: str = "",
+) -> Dict:
+    """
+    Compute Shannon entropy for a column's value distribution to estimate
+    compressibility and recommend the optimal Parquet/ORC codec.
+
+    H = −Σ p(x)·log₂(p(x))
+    High entropy (→1.0) → hard to compress, use zstd.
+    Low entropy (→0.0)  → dictionary encoding very effective, use gzip.
+
+    value_counts: {value: count} dict, e.g. {"US": 5000, "UK": 2000, "DE": 500}.
+                  Obtain by running SELECT col, COUNT(*) FROM table GROUP BY col.
+    column_name:  column name for display.
+
+    Returns: entropy_bits, normalized_entropy, recommended_codec,
+             estimated_compression_ratio, parquet_encoding.
+    """
+    try:
+        from .agents.scientific_tools import shannon_entropy
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import shannon_entropy
+    result = shannon_entropy(value_counts={str(k): int(v) for k, v in value_counts.items()})
+    if column_name:
+        result["column_name"] = column_name
+    return result
+
+
+@strands_tool
+def file_distribution_analysis(
+    file_sizes_mb: List,
+    table_name: str = "",
+) -> Dict:
+    """
+    Fit a Gaussian model to file sizes and compute the Bimodality Coefficient
+    (BC) to detect the mixed tiny+huge file anti-pattern.
+
+    BC > 0.555 → bimodal distribution: the table has a mix of tiny files
+    (from incremental writes) and large files (from bulk loads). OPTIMIZE
+    bin-pack is required.
+
+    Uses: skewness, excess kurtosis, BC = (γ₁² + 1) / κ (Pfister et al. 2013).
+
+    file_sizes_mb: list of file sizes in MB. Obtain from:
+                   SELECT file_size_in_bytes/1048576.0 FROM table$files
+    table_name:    table name for display.
+
+    Returns: mean_mb, std_mb, cv, is_bimodal, bimodality_coefficient,
+             size_bands (tiny/small/ideal/large percentages), action.
+    """
+    try:
+        from .agents.scientific_tools import gaussian_file_distribution
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import gaussian_file_distribution
+    result = gaussian_file_distribution(file_sizes_mb=[float(x) for x in file_sizes_mb])
+    if table_name:
+        result["table_name"] = table_name
+    return result
+
+
+@strands_tool
+def littles_law_shuffle_tuning(
+    avg_task_duration_sec: float,
+    num_executors: int,
+    total_tasks: Optional[int] = None,
+    target_duration_min: Optional[float] = None,
+) -> Dict:
+    """
+    Apply Little's Law (L = λ·W) from queueing theory to derive the optimal
+    spark.sql.shuffle.partitions for a Glue / Spark job.
+
+    Little's Law: L (concurrent tasks) = λ (throughput) × W (service time)
+    Optimal shuffle.partitions = 3 × num_executors keeps the pipeline full.
+
+    avg_task_duration_sec: mean Spark task duration in seconds.
+                           Find in Spark UI → Stages → Task metrics, or
+                           parse_spark_event_log will extract this.
+    num_executors:         number of executor cores available.
+    total_tasks:           total tasks in the job (for target-duration calc).
+    target_duration_min:   desired job completion time to back-calculate required workers.
+
+    Returns: optimal_shuffle_partitions, task_throughput_per_sec,
+             executor_utilisation, spark_config dict.
+    """
+    try:
+        from .agents.scientific_tools import littles_law_parallelism
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import littles_law_parallelism
+    return littles_law_parallelism(
+        avg_task_sec=avg_task_duration_sec,
+        num_executors=num_executors,
+        target_duration_min=target_duration_min,
+        total_tasks=total_tasks,
+    )
+
+
+@strands_tool
+def job_cost_anomaly_detection(
+    historical_costs: List,
+    current_cost: float,
+    metric_label: str = "cost_usd",
+) -> Dict:
+    """
+    Apply a Shewhart X-bar 3-sigma control chart to detect whether the current
+    job cost or duration is statistically anomalous.
+
+    UCL = μ + 3σ  (upper control limit)
+    LCL = μ − 3σ  (lower control limit)
+
+    Also checks Western Electric rules: 2-of-3 beyond 2σ, 4-of-5 beyond 1σ,
+    8 consecutive on same side — these detect drift before a point hits UCL.
+
+    historical_costs: list of previous job run costs or durations (≥ 5 needed).
+                      Obtain from: fetch_glue_metrics or AWS Cost Explorer.
+    current_cost:     the new observation to test.
+    metric_label:     label string for display (e.g. "cost_usd", "duration_min").
+
+    Returns: z_score, zone, is_anomaly, ucl_3sigma, western_electric_signals.
+    """
+    try:
+        from .agents.scientific_tools import shewhart_control_chart
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import shewhart_control_chart
+    return shewhart_control_chart(
+        history=[float(c) for c in historical_costs],
+        current_value=float(current_cost),
+        label=metric_label,
+    )
+
+
+@strands_tool
+def detect_workload_periodicity(
+    metric_time_series: List,
+    sample_interval_minutes: int = 5,
+    metric_name: str = "",
+) -> Dict:
+    """
+    Apply a Discrete Fourier Transform (DFT) to a CloudWatch time series
+    to detect dominant periodic patterns (daily heap spikes, weekly batch
+    peaks, hourly write bursts).
+
+    X[k] = Σ x[n]·e^(−j·2π·kn/N)
+
+    Use the dominant period to schedule OPTIMIZE/VACUUM at the trough,
+    or to set Glue job retry windows.
+
+    metric_time_series:      ordered metric values (heap%, CPU%, cost, duration).
+                             Obtain from fetch_glue_metrics or CloudWatch CLI.
+    sample_interval_minutes: interval between samples (CloudWatch default = 5 min).
+    metric_name:             label for display.
+
+    Returns: dominant_period_hr, dominant_label (daily/weekly/hourly),
+             top_frequencies, interpretation.
+    """
+    try:
+        from .agents.scientific_tools import fourier_periodicity
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import fourier_periodicity
+    result = fourier_periodicity(
+        time_series=[float(v) for v in metric_time_series],
+        sample_interval_minutes=sample_interval_minutes,
+    )
+    if metric_name:
+        result["metric_name"] = metric_name
+    return result
+
+
+@strands_tool
+def bloom_filter_advisor(
+    table_name: str,
+    table_size_gb: float,
+    join_selectivity_pct: float,
+    num_distinct_join_keys: int,
+    bits_per_key: int = 10,
+) -> Dict:
+    """
+    Estimate whether a Parquet/Iceberg Bloom filter on a join column is
+    worth enabling, and what I/O savings to expect.
+
+    P(false positive) = (1 − e^(−k·n/m))^k   where k_opt = (m/n)·ln2
+
+    Bloom filters let Spark skip row groups that cannot match the join predicate,
+    reducing I/O especially for low-selectivity joins (few matches).
+
+    table_name:             the probed (larger) table in the join.
+    table_size_gb:          size of the probed table in GB.
+    join_selectivity_pct:   percentage of rows that match (e.g. 5.0 = 5%).
+                            Lower = more rows skipped = bigger savings.
+    num_distinct_join_keys: distinct values of the join key in the build table.
+    bits_per_key:           filter density (default 10 gives FPP ≈ 0.8%).
+
+    Returns: false_positive_rate, io_saved_gb, worth_enabling, iceberg_ddl.
+    """
+    try:
+        from .agents.scientific_tools import bloom_filter_savings
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import bloom_filter_savings
+    result = bloom_filter_savings(
+        table_size_gb=table_size_gb,
+        join_selectivity=join_selectivity_pct / 100.0,
+        num_distinct_keys=num_distinct_join_keys,
+        bits_per_key=bits_per_key,
+    )
+    result["table_name"] = table_name
+    return result
+
+
+@strands_tool
+def spot_instance_risk_model(
+    job_duration_hours: float,
+    instance_type: str = "m5.2xlarge",
+    checkpoint_interval_hours: float = 0.0,
+) -> Dict:
+    """
+    Model spot instance interruption risk using a geometric distribution and
+    compute net savings after expected rework cost.
+
+    P(survive t hours) = (1 − p_interrupt)^t
+
+    Use this before recommending EMR Spot or EKS Spot to quantify the actual
+    net savings (gross discount minus expected retry cost).
+
+    job_duration_hours:        expected job wall-clock duration.
+    instance_type:             EC2 instance type (used for interruption rate lookup).
+    checkpoint_interval_hours: if the job uses checkpointing, max rework per
+                               interruption = checkpoint_interval, not full job.
+
+    Returns: p_survive_full_job, p_interrupted, expected_rework_hours,
+             net_savings_pct, recommendation.
+    """
+    # Approximate interruption rates by instance family (based on Spot Advisor data)
+    interruption_rates = {
+        "m5": 0.05, "m5a": 0.05, "m5n": 0.06,
+        "r5": 0.07, "r5a": 0.07,
+        "c5": 0.04, "c5n": 0.04,
+        "m4": 0.08, "r4": 0.09,
+        "m6i": 0.04, "r6i": 0.06, "r6g": 0.04,
+        "g4dn": 0.12, "p3": 0.15,
+    }
+    family = instance_type.split(".")[0].lower()
+    rate   = interruption_rates.get(family, 0.07)
+
+    try:
+        from .agents.scientific_tools import spot_interruption_risk
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import spot_interruption_risk
+
+    result = spot_interruption_risk(
+        job_duration_hours=job_duration_hours,
+        hourly_interruption_rate=rate,
+        checkpoint_interval_hours=checkpoint_interval_hours,
+    )
+    result["instance_type"]    = instance_type
+    result["instance_family"]  = family
+    result["interruption_rate_source"] = "AWS Spot Advisor approximation"
+    return result
+
+
+@strands_tool
+def pareto_rank_recommendations_tool(
+    script_path: str = "",
+) -> Dict:
+    """
+    Apply the Pareto 80/20 principle to the cached recommendations for a script
+    to identify the top N recommendations that deliver ~80% of total savings.
+
+    Score = estimated_savings_percent / sqrt(effort_hours)
+    (impact-per-unit-of-effort, inspired by Pareto efficiency frontier).
+
+    script_path: path to an already-analysed script (uses cached results).
+                 If empty, uses the most recently analysed script.
+
+    Returns: pareto_front (top recs), pareto_count, ranked_recommendations,
+             interpretation.
+    """
+    try:
+        from .agents.scientific_tools import pareto_rank_recommendations
+    except ImportError:
+        from cost_optimizer.agents.scientific_tools import pareto_rank_recommendations
+
+    # Fetch from session cache
+    target = script_path or (list(_state["scan_results"].keys()) or [""])[0]
+    result = _state["scan_results"].get(target, {})
+    recs   = result.get("all_recommendations", [])
+
+    if not recs:
+        return {
+            "error": f"No recommendations cached for '{target}'. "
+                     "Run analyze_pyspark_script first.",
+            "script_path": target,
+        }
+
+    ranked = pareto_rank_recommendations(recs)
+    ranked["script_path"] = target
+    return ranked
+
+
 _INTERACTIVE_SYSTEM_PROMPT = """
 You are an expert PySpark and Big Data cost-optimization assistant built into
 the strands_optimizer tool.
@@ -2780,6 +3176,7 @@ You have direct access to the following tools organised by capability:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CUSTOM DOMAIN TOOLS  (16 tools)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 DISCOVERY
   scan_scripts_in_directory    – find all PySpark scripts under a directory
   auto_detect_tables           – extract table references from a script (Glue catalog + S3)
@@ -2849,6 +3246,73 @@ BEHAVIOUR GUIDELINES
 - Use http_fetch to verify current AWS pricing before quoting annual savings.
 - Prioritise P0/P1 recommendations; cite exact line numbers wherever possible.
 - When saving to S3 always confirm the s3_uri to the user first.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCIENTIFIC ALGORITHM TOOLS  (11 tools)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+These tools apply rigorous mathematical models to produce defensible,
+data-driven recommendations.  Call them after gathering raw metrics.
+
+PARALLELISM & CAPACITY
+  amdahls_law_analysis         – Amdahl's Law S(N)=1/(s+(1-s)/N): theoretical max speedup
+                                  USE WHEN: user asks how many workers are enough, or
+                                  serial code fraction has been identified from profiling.
+  littles_law_shuffle_tuning   – Little's Law L=λW: optimal spark.sql.shuffle.partitions
+                                  USE WHEN: shuffle stage is slow, or AQE is overriding
+                                  partition counts and causing small tasks.
+
+GROWTH & FORECASTING
+  exponential_growth_forecast  – Euler's N(t)=N₀·e^(rt): table-size growth projection
+                                  USE WHEN: estimating storage budget, deciding when to
+                                  archive/tier partitions, or sizing future Glue workers.
+
+DATA SKEW & DISTRIBUTION
+  zipf_skew_analysis           – Zipf/Power-law with Hill estimator: exact salting factor
+                                  USE WHEN: partition size variance > 5×, straggler tasks,
+                                  OOM on specific executors.
+  file_distribution_analysis   – Bimodality Coefficient BC=(γ₁²+1)/κ: detect tiny+huge mix
+                                  USE WHEN: file count is high but total size is low, or
+                                  OPTIMIZE has never been run on the Iceberg table.
+  shannon_entropy_analysis     – Shannon H=−Σp·log₂p: column compressibility → codec choice
+                                  USE WHEN: choosing between ZSTD/GZIP/Snappy, evaluating
+                                  dictionary encoding on high-cardinality columns.
+
+ANOMALY DETECTION & PERIODICITY
+  job_cost_anomaly_detection   – Shewhart 3-sigma control chart + Western Electric rules
+                                  USE WHEN: job cost or duration jumped unexpectedly, user
+                                  wants statistical confirmation of a regression.
+  detect_workload_periodicity  – Discrete Fourier Transform: dominant period in CloudWatch
+                                  USE WHEN: user suspects daily/weekly/hourly cost spikes,
+                                  scheduling OPTIMIZE/VACUUM at the right time window.
+
+JOIN OPTIMISATION
+  bloom_filter_advisor         – Bloom filter P(FP)=(1−e^(−kn/m))^k: I/O savings estimate
+                                  USE WHEN: large table probe-side join with low selectivity;
+                                  quantifies the I/O benefit before enabling Iceberg bloom DDL.
+
+COST / RISK
+  spot_instance_risk_model     – Geometric distribution P(survive)=(1−p)^t: net Spot savings
+                                  USE WHEN: recommending EMR Spot or EKS Spot; computes
+                                  expected rework cost vs. gross discount to give net savings.
+  pareto_rank_recommendations_tool – Pareto 80/20 score=savings/√effort: top-N quick wins
+                                  USE WHEN: multiple recommendations exist and user wants
+                                  to know which 20% of fixes will deliver 80% of savings.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCIENTIFIC TOOL WORKFLOWS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Skew diagnosis:
+  detect_small_file_problem → zipf_skew_analysis (partition_sizes) →
+  amdahls_law_analysis (serial fraction from code) →
+  pareto_rank_recommendations_tool
+
+Growth planning:
+  current_time → exponential_growth_forecast → calculator (storage cost) →
+  bloom_filter_advisor (join tables) → spot_instance_risk_model
+
+Anomaly investigation:
+  fetch_glue_metrics → job_cost_anomaly_detection → detect_workload_periodicity →
+  littles_law_shuffle_tuning
 """.strip()
 
 _INTERACTIVE_TOOLS = [
@@ -2873,6 +3337,18 @@ _INTERACTIVE_TOOLS = [
     deploy_tests_to_glue,
     create_glue_job,
     save_results_to_s3,
+    # ── Scientific algorithm tools ────────────────────────────────────────────
+    amdahls_law_analysis,
+    exponential_growth_forecast,
+    zipf_skew_analysis,
+    shannon_entropy_analysis,
+    file_distribution_analysis,
+    littles_law_shuffle_tuning,
+    job_cost_anomaly_detection,
+    detect_workload_periodicity,
+    bloom_filter_advisor,
+    spot_instance_risk_model,
+    pareto_rank_recommendations_tool,
     # ── Strands built-in tools (added when strands-tools is installed) ────────
     # python_repl  → live code execution: AST parse, boto3 calls, size math
     # shell        → AWS CLI: get-job-runs, cloudwatch metrics, s3 ls
