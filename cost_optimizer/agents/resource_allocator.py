@@ -6,6 +6,7 @@ Determines optimal compute resources based on data size and code complexity.
 Calculates cost comparisons and savings potential.
 """
 
+import json
 from typing import Dict, List, Any
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult
 
@@ -65,6 +66,180 @@ class ResourceAllocatorAgent(CostOptimizerAgent):
     GCP_SERVERLESS_DCU_COST = 0.066  # per DCU-hour
 
     SPOT_DISCOUNT = 0.70   # ~70% on average for spot/preemptible
+
+    def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
+        """LLM prompt: uses actual Iceberg table sizes + Glue runtime metrics for precise right-sizing."""
+
+        # Pull full sizing telemetry
+        size_full = context.get('size_analyzer_full', {})
+        table_findings = size_full.get('table_findings', {})
+        agg_storage = size_full.get('aggregate_storage_costs', {})
+
+        # Compact table-level facts
+        table_lines: List[str] = []
+        total_live_gb = 0.0
+        for tbl, f in table_findings.items():
+            fs = f.get('file_stats', {})
+            gf = f.get('growth_forecast', {})
+            gb = fs.get('total_size_gb', 0)
+            total_live_gb += gb
+            table_lines.append(
+                f"  {tbl}: {gb:.2f} GB | files={fs.get('file_count',0):,} "
+                f"avg={fs.get('avg_file_mb',0):.1f} MB | skew={fs.get('skew_ratio',1):.1f}x | "
+                f"growth={gf.get('gb_per_day',0):.2f} GB/day"
+            )
+        table_ctx = "\n".join(table_lines) or "  (no Iceberg telemetry)"
+
+        # Glue runtime metrics summary
+        glue_metrics = context.get('glue_metrics', {})
+        metrics_lines: List[str] = []
+        heap_peak = 0.0
+        cpu_worker_min = 1.0
+        worker_util_min = 1.0
+        if glue_metrics:
+            for m, vals in glue_metrics.items():
+                if not vals:
+                    continue
+                metrics_lines.append(
+                    f"  {m}: min={min(vals):.2f} max={max(vals):.2f} last={vals[-1]:.2f}"
+                )
+                if 'jvm.heap' in m:
+                    heap_peak = max(heap_peak, max(vals))
+                if 'ALL.system.cpu' in m:
+                    cpu_worker_min = min(cpu_worker_min, min(vals))
+                if 'workerutilized' in m:
+                    worker_util_min = min(worker_util_min, min(vals))
+        metrics_ctx = "\n".join(metrics_lines) or "  (no runtime metrics)"
+
+        # Current config
+        cur_workers     = input_data.current_config.get('number_of_workers', 10)
+        cur_type        = input_data.current_config.get('worker_type', 'G.2X')
+        runs_per_year   = input_data.additional_context.get('runs_per_year', 365)
+        complexity_score = context.get('complexity_score', 50)
+        join_count       = context.get('join_count', 0)
+        anti_patterns    = context.get('anti_pattern_count', 0)
+
+        # Rule-based pre-calc as starting point
+        rule = self._analyze_rule_based(input_data, context)
+        rule_optimal = rule.analysis.get('optimal_config', {})
+        rule_savings  = rule.analysis.get('savings', {})
+        rule_platform = rule.analysis.get('platform_comparison', [])
+
+        return f"""You are a Principal Cloud Architect specialising in Spark right-sizing and cost optimisation.
+Determine the OPTIMAL compute configuration using the actual runtime evidence below.
+Rule-based analysis is provided as a starting point — override it where the evidence justifies.
+
+══════════════════════════════════════════════════════
+JOB METADATA
+══════════════════════════════════════════════════════
+Script      : {input_data.script_path}
+Job         : {input_data.job_name}
+Mode        : {input_data.processing_mode}
+Current     : {cur_workers} × {cur_type}
+Complexity  : {complexity_score}/100  |  joins={join_count}  |  anti-patterns={anti_patterns}
+Runs/year   : {runs_per_year}
+
+══════════════════════════════════════════════════════
+ACTUAL TABLE SIZES  (Athena $files — current snapshot only)
+══════════════════════════════════════════════════════
+{table_ctx}
+Total live data: {total_live_gb:.2f} GB
+
+══════════════════════════════════════════════════════
+GLUE RUNTIME METRICS  (CloudWatch)
+══════════════════════════════════════════════════════
+{metrics_ctx}
+
+Signal interpretation:
+  heap_peak={heap_peak:.2f}  → {'OOM risk: upgrade worker type or reduce partition size' if heap_peak > 0.85 else 'heap OK' if heap_peak > 0 else 'unknown'}
+  cpu_worker_min={cpu_worker_min:.2f} → {'severe skew: executors idle mid-job' if cpu_worker_min < 0.20 else 'mild idle' if cpu_worker_min < 0.50 else 'CPU healthy'}
+  worker_util_min={worker_util_min:.2f} → {'over-provisioned: many workers idle' if worker_util_min < 0.40 else 'utilisation OK'}
+
+══════════════════════════════════════════════════════
+RULE-BASED PRE-CALC  (override where runtime evidence differs)
+══════════════════════════════════════════════════════
+Rule optimal: {rule_optimal.get('workers')} × {rule_optimal.get('worker_type')}
+Rule savings: {rule_savings.get('percent',0):.0f}%  (${rule_savings.get('annual_savings',0):,.0f}/year)
+Platform comparison (rule-based):
+{json.dumps([{{'platform': p['platform'], 'cost_per_run': p['cost_per_run']}} for p in rule_platform[:5]], indent=2)}
+
+══════════════════════════════════════════════════════
+AWS PRICING REFERENCE
+══════════════════════════════════════════════════════
+Glue workers (per worker-hour): G.1X=$0.44  G.2X=$0.88  G.4X=$1.76  G.8X=$3.52
+EMR on-demand: m5.xlarge=$0.230  m5.2xlarge=$0.461  m5.4xlarge=$0.922
+EMR spot: ~70% discount on above
+EKS+Karpenter spot: ~10% better bin-packing than EMR spot
+Databricks AWS (Jobs): $0.07 DBU + $0.461 EC2 per worker-hour
+GCP Dataproc: n2-standard-8=$0.485  spot ~70% discount
+
+══════════════════════════════════════════════════════
+RIGHT-SIZING GUIDELINES
+══════════════════════════════════════════════════════
+Worker count formula:
+  base = ceil(total_live_gb / 10)
+  multiply by complexity_factor (1.0–1.5 based on joins/skew)
+  cap between 2 and 100
+
+Worker type selection (memory headroom = 2× peak partition size):
+  peak_partition_gb = total_live_gb / shuffle_partitions
+  G.1X (16 GB executor) if peak_partition_gb < 4
+  G.2X (32 GB executor) if peak_partition_gb < 12
+  G.4X (64 GB executor) if peak_partition_gb < 28
+  G.8X (128 GB executor) otherwise
+
+Metric overrides:
+  heap_peak > 0.85 AND worker_type < G.4X  → upgrade worker type one tier
+  heap_peak < 0.40                          → downgrade worker type one tier
+  worker_util_min < 0.40                   → reduce workers to peak_utilised
+  cpu_worker_min < 0.20 (skew)             → SAME workers, fix skew first (salting/AQE)
+
+Platform selection:
+  Cost difference > 30% vs Glue → recommend migration
+  Prefer EKS+Karpenter for batch, EMR spot for ad-hoc, Glue for serverless simplicity
+
+Respond ONLY with a JSON object:
+{{
+  "current_config": {{
+    "platform": "glue", "workers": {cur_workers}, "worker_type": "{cur_type}",
+    "cost_per_run": <float>, "annual_cost": <float>
+  }},
+  "optimal_config": {{
+    "platform": "<best platform>",
+    "workers": <int>,
+    "worker_type": "<G.1X|G.2X|G.4X|G.8X>",
+    "emr_instance_type": "<m5.Nxlarge>",
+    "cost_per_run": <float>,
+    "annual_cost": <float>,
+    "rationale": "<one sentence citing the specific metric or size evidence>"
+  }},
+  "estimated_duration_hours": <float>,
+  "effective_size_gb": {total_live_gb:.2f},
+  "platform_comparison": [
+    {{"platform": "...", "label": "...", "cost_per_run": <float>,
+      "annual_cost": <float>, "savings_vs_current_percent": <float>}}
+  ],
+  "savings": {{
+    "rightsizing_per_run": <float>,
+    "platform_per_run": <float>,
+    "percent": <float>,
+    "annual_savings": <float>
+  }},
+  "resource_efficiency": {{
+    "current_gb_per_worker": <float>,
+    "optimal_gb_per_worker": <float>,
+    "memory_utilization_estimate": "<low|optimal|high|critical>"
+  }},
+  "metric_driven_adjustments": [
+    "<what metric triggered what change — one item per adjustment>"
+  ],
+  "recommendations": [
+    {{"priority": "P0|P1|P2", "category": "resource|architecture",
+      "title": "...", "description": "...", "implementation": "...",
+      "estimated_savings_usd": <float>}}
+  ]
+}}
+"""
 
     def _analyze_rule_based(self, input_data: AnalysisInput, context: Dict) -> AnalysisResult:
         """Rule-based resource allocation analysis."""

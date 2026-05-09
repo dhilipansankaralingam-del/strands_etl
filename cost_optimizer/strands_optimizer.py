@@ -62,6 +62,28 @@ except ImportError:
     def strands_tool(fn):  # no-op decorator when strands isn't installed
         return fn
 
+# ── Strands built-in tools (pip install strands-agents[tools] or strands-tools)
+# These extend the interactive agent with general-purpose capabilities:
+#   python_repl  — execute Python inline (live AST parse, boto3 test, size math)
+#   shell        — run AWS CLI commands (get-job-runs, cloudwatch, s3 ls)
+#   file_read    — read any file the user points to
+#   file_write   — write reports / optimized scripts
+#   http_fetch   — fetch AWS pricing docs, external references
+#   current_time — timestamp for cold-partition age and growth-forecast calculations
+#   calculator   — explicit cost arithmetic the LLM can verify
+_STRANDS_BUILTIN_TOOLS: list = []
+try:
+    from strands_tools import python_repl, shell, file_read, file_write  # type: ignore[import]
+    _STRANDS_BUILTIN_TOOLS += [python_repl, shell, file_read, file_write]
+    try:
+        from strands_tools import http_fetch, current_time, calculator    # type: ignore[import]
+        _STRANDS_BUILTIN_TOOLS += [http_fetch, current_time, calculator]
+    except ImportError:
+        pass
+    HAS_STRANDS_TOOLS = True
+except ImportError:
+    HAS_STRANDS_TOOLS = False
+
 # ── Local imports (existing cost_optimizer modules) ──────────────────────────
 try:
     from .orchestrator import CostOptimizationOrchestrator
@@ -2753,67 +2775,113 @@ _INTERACTIVE_SYSTEM_PROMPT = """
 You are an expert PySpark and Big Data cost-optimization assistant built into
 the strands_optimizer tool.
 
-You have direct access to the following 16 tools organised by capability:
+You have direct access to the following tools organised by capability:
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUSTOM DOMAIN TOOLS  (16 tools)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DISCOVERY
   scan_scripts_in_directory    – find all PySpark scripts under a directory
-  auto_detect_tables           – extract table references from a script
-  detect_small_file_problem    – check a table/S3 path for small-file issues
+  auto_detect_tables           – extract table references from a script (Glue catalog + S3)
+  detect_small_file_problem    – check a table/S3 path for small-file issues via Athena $files
 
 ANALYSIS
-  analyze_pyspark_script       – full 4-agent cost analysis on one script
-  get_analysis_summary         – session-level summary across all analysed scripts
-  detect_delta_iceberg         – detect Delta Lake / Iceberg usage and get maintenance SQL
-  parse_spark_event_log        – parse a Spark event log (skew, GC, shuffle, bottlenecks)
-  analyze_column_lineage       – trace column-level data flow; outputs Mermaid + DOT graphs
+  analyze_pyspark_script       – full 4-agent cost analysis (Size → Code → Metrics → Recs)
+  get_analysis_summary         – session-level rollup across all analysed scripts
+  detect_delta_iceberg         – detect Delta Lake / Iceberg and return maintenance SQL
+  parse_spark_event_log        – parse a Spark event log: skew, GC, shuffle, stage bottlenecks
+  analyze_column_lineage       – column-level data flow; outputs Mermaid + DOT graphs
 
 OPTIMISATION
-  apply_recommendations_to_script – apply LLM + metric-driven fixes; write optimised .py
-  fetch_glue_metrics           – pull CloudWatch metrics for a Glue job run
-  get_multiplatform_cost_comparison – compare Glue / Athena / Lambda / EMR Serverless costs
+  apply_recommendations_to_script – 5-layer fix pipeline → writes <script>_optimized.py
+  fetch_glue_metrics           – pull CloudWatch metrics for a Glue job run into a JSON file
+  get_multiplatform_cost_comparison – compare Glue / EMR / EKS / Databricks / GCP Dataproc costs
 
 JOB GENERATION
   generate_pyspark_job         – generate a new PySpark Glue script from a JSON spec
 
 TESTING & DEPLOYMENT
-  generate_and_run_tests       – generate unit tests and run them locally (needs local Spark)
-  deploy_tests_to_glue         – deploy a Glue-native validation job to AWS (no local Spark needed)
-  create_glue_job              – upload script to S3 and create/update a Glue job
+  generate_and_run_tests       – generate pytest unit tests and run locally (needs local Spark)
+  deploy_tests_to_glue         – deploy a Glue-native validation job to AWS
+  create_glue_job              – upload script to S3 and create/update a Glue job definition
   save_results_to_s3           – persist analysis reports to S3
 
-Behaviour guidelines:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRANDS BUILT-IN TOOLS  (available when strands-tools is installed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  python_repl   – execute Python code inline
+                  USE FOR: live AST parsing, boto3 calls, cost math, validating configs,
+                           running quick data checks before full analysis
+  shell         – run shell / AWS CLI commands
+                  USE FOR: aws glue get-job-runs, aws cloudwatch get-metric-statistics,
+                           aws s3 ls s3://bucket/table/, aws athena start-query-execution,
+                           running the optimized script locally for a smoke test
+  file_read     – read any file on disk
+                  USE FOR: reading a script the user just pointed to, reading an existing
+                           report JSON, reading a glue metrics file
+  file_write    – write any file on disk
+                  USE FOR: saving ad-hoc reports, writing a config snippet, exporting
+                           a changelog when save_results_to_s3 is not needed
+  http_fetch    – HTTP GET requests
+                  USE FOR: fetching AWS on-demand pricing JSON from pricing.us-east-1.amazonaws.com,
+                           checking AWS documentation pages, confirming Glue version release notes
+  current_time  – get the current UTC timestamp
+                  USE FOR: cold-partition age calculation (NOW - oldest_snapshot_date),
+                           growth-forecast reference point (days since last snapshot),
+                           tagging reports with run timestamp
+  calculator    – step-by-step arithmetic
+                  USE FOR: explicit cost calculations the user wants to verify
+                           (workers × rate × hours × runs_per_month), storage waste $,
+                           Glacier archival savings
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BEHAVIOUR GUIDELINES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Always call auto_detect_tables first when given a script, before analyze_pyspark_script.
-- Prioritise P0/P1 recommendations (highest impact, easiest fix).
+- Use python_repl to quickly verify an assumption before running a heavyweight tool.
+- Use shell to fetch live AWS data when the user has not pre-downloaded metrics or event logs.
+- Use current_time before cold-partition or growth calculations so ages are accurate.
+- Use calculator when presenting cost numbers — show the arithmetic step-by-step.
 - Call fetch_glue_metrics before apply_recommendations_to_script when a job name is known.
 - Use detect_delta_iceberg when the script writes to a table — format matters for tuning.
 - Use parse_spark_event_log when the user mentions slow stages, skew, or OOM errors.
 - Call get_multiplatform_cost_comparison when cost reduction is the primary concern.
-- Be concise; cite line numbers where relevant.
-- When saving to S3 always confirm the s3_uri to the user.
+- Use http_fetch to verify current AWS pricing before quoting annual savings.
+- Prioritise P0/P1 recommendations; cite exact line numbers wherever possible.
+- When saving to S3 always confirm the s3_uri to the user first.
 """.strip()
 
 _INTERACTIVE_TOOLS = [
-    # Discovery
+    # ── Discovery ────────────────────────────────────────────────────────────
     scan_scripts_in_directory,
     auto_detect_tables,
     detect_small_file_problem,
-    # Analysis
+    # ── Analysis ─────────────────────────────────────────────────────────────
     analyze_pyspark_script,
     get_analysis_summary,
     detect_delta_iceberg,
     parse_spark_event_log,
     analyze_column_lineage,
-    # Optimisation
+    # ── Optimisation ─────────────────────────────────────────────────────────
     apply_recommendations_to_script,
     fetch_glue_metrics,
     get_multiplatform_cost_comparison,
-    # Job generation
+    # ── Job generation ────────────────────────────────────────────────────────
     generate_pyspark_job,
-    # Testing & deployment
+    # ── Testing & deployment ──────────────────────────────────────────────────
     generate_and_run_tests,
     deploy_tests_to_glue,
     create_glue_job,
     save_results_to_s3,
+    # ── Strands built-in tools (added when strands-tools is installed) ────────
+    # python_repl  → live code execution: AST parse, boto3 calls, size math
+    # shell        → AWS CLI: get-job-runs, cloudwatch metrics, s3 ls
+    # file_read    → read any script or config the user points to
+    # file_write   → write reports, configs, optimized scripts
+    # http_fetch   → AWS pricing pages, documentation lookups
+    # current_time → cold-partition age, growth-forecast timestamps
+    # calculator   → explicit cost arithmetic the LLM can verify step-by-step
+    *_STRANDS_BUILTIN_TOOLS,
 ]
 
 
