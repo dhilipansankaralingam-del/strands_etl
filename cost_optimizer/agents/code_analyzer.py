@@ -11,6 +11,12 @@ import re
 from typing import Dict, List, Any, Tuple
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult, CodePatternMatcher
 
+try:
+    from .scientific_tools import amdahls_law
+    _HAS_SCIENTIFIC = True
+except ImportError:
+    _HAS_SCIENTIFIC = False
+
 
 class CodeAnalyzerAgent(CostOptimizerAgent):
     """Analyzes PySpark code for optimization opportunities."""
@@ -204,7 +210,8 @@ class CodeAnalyzerAgent(CostOptimizerAgent):
             'optimization_score': optimization_score,
             'estimated_cost_reduction_percent': cost_reduction,
             'lines_of_code': len(lines),
-            'code_quality_score': max(0, 100 - (len(anti_patterns) * 10))
+            'code_quality_score': max(0, 100 - (len(anti_patterns) * 10)),
+            'scientific_analysis': self._run_scientific_analysis(anti_patterns, complexity, context),
         }
 
         recommendations = self._generate_recommendations(analysis)
@@ -222,6 +229,37 @@ class CodeAnalyzerAgent(CostOptimizerAgent):
                 'window_function_count': complexity['window_function_count']
             }
         )
+
+    def _run_scientific_analysis(
+        self, anti_patterns: List[Dict], complexity: Dict, context: Dict
+    ) -> Dict:
+        """
+        Apply Amdahl's Law using serial fraction derived from detected anti-patterns.
+        Tells the LLM the hard mathematical ceiling on worker-count scaling.
+        """
+        if not _HAS_SCIENTIFIC:
+            return {}
+
+        # Serial operations detected in the code
+        SERIAL_OPS = {'collect_large', 'toPandas_large', 'show_in_production', 'iterate_collect'}
+        serial_count = sum(
+            p.get('count', 1) for p in anti_patterns if p.get('pattern', '') in SERIAL_OPS
+        )
+        has_cross_join = any(p.get('pattern') == 'crossJoin' for p in anti_patterns)
+        # Each serial pattern contributes ~8% serial overhead; cross joins add driver-side work
+        serial_fraction = min(0.65, serial_count * 0.08 + (0.05 if has_cross_join else 0.0))
+        serial_fraction = max(0.02, serial_fraction)  # at least 2% serial overhead
+
+        cur_workers = int(
+            context.get('current_config', {}).get('number_of_workers')
+            or context.get('workers', 10)
+        )
+        result = amdahls_law(serial_fraction=serial_fraction, num_workers=cur_workers)
+        result['estimated_serial_fraction_pct'] = round(serial_fraction * 100, 1)
+        result['serial_patterns_found'] = [
+            p.get('pattern') for p in anti_patterns if p.get('pattern') in SERIAL_OPS
+        ]
+        return {"amdahls_law": result}
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """Size-aware LLM prompt: correlates every line with actual Iceberg table telemetry."""
@@ -318,6 +356,16 @@ RULE-BASED PRE-SCAN  (deterministic, fast)
 ═══════════════════════════════════════════════════════════════
 Anti-patterns: {json.dumps(rule_anti, indent=2)}
 Missed optimizations: {json.dumps(rule_opts, indent=2)}
+
+═══════════════════════════════════════════════════════════════
+SCIENTIFIC ANALYSIS  (Amdahl's Law — worker scaling ceiling)
+═══════════════════════════════════════════════════════════════
+{json.dumps(rule.analysis.get('scientific_analysis', {}), indent=2, default=str)}
+Interpretation:
+  • amdahl_speedup      — actual speedup achievable at the current worker count
+  • theoretical_max     — hard ceiling regardless of how many workers are added
+  • diminishing_returns_elbow — worker count past which marginal gain < 1%
+  • If serial_fraction > 30%, adding workers is wasteful — fix serial ops first
 
 ═══════════════════════════════════════════════════════════════
 PYSPARK SCRIPT  (with line numbers)

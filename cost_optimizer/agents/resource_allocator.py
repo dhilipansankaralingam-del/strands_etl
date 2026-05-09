@@ -10,6 +10,12 @@ import json
 from typing import Dict, List, Any
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult
 
+try:
+    from .scientific_tools import amdahls_law, littles_law_parallelism, spot_interruption_risk
+    _HAS_SCIENTIFIC = True
+except ImportError:
+    _HAS_SCIENTIFIC = False
+
 
 class ResourceAllocatorAgent(CostOptimizerAgent):
     """Calculates optimal resource allocation and cost savings."""
@@ -66,6 +72,69 @@ class ResourceAllocatorAgent(CostOptimizerAgent):
     GCP_SERVERLESS_DCU_COST = 0.066  # per DCU-hour
 
     SPOT_DISCOUNT = 0.70   # ~70% on average for spot/preemptible
+
+    def _build_scientific_section(
+        self, context: Dict, total_live_gb: float, cur_workers: int
+    ) -> str:
+        """Build the SCIENTIFIC ANALYSIS block for the resource-allocator LLM prompt."""
+        if not _HAS_SCIENTIFIC:
+            return "  (scientific_tools not available)"
+
+        lines: List[str] = []
+
+        # 1. Amdahl's Law — pull serial fraction from CodeAnalyzerAgent's scientific output
+        code_sci = context.get('code_analyzer_full', {}).get('scientific_analysis', {})
+        amdahl   = code_sci.get('amdahls_law', {})
+        if amdahl:
+            sf = amdahl.get('estimated_serial_fraction_pct', 0)
+            lines.append(
+                f"Amdahl's Law (from code analysis):\n"
+                f"  serial_fraction={sf:.0f}%  "
+                f"speedup@{cur_workers}w={amdahl.get('amdahl_speedup',0):.2f}x  "
+                f"theoretical_max={amdahl.get('theoretical_max_speedup',0):.2f}x  "
+                f"diminishing_returns_elbow={amdahl.get('diminishing_returns_elbow',0)} workers\n"
+                f"  → Do NOT recommend more than {amdahl.get('diminishing_returns_elbow', cur_workers)} "
+                f"workers unless serial ops are eliminated first."
+            )
+
+        # 2. Little's Law — derive optimal shuffle.partitions from glue_metrics task duration
+        glue_metrics = context.get('glue_metrics', {})
+        avg_task_sec = 0.0
+        for metric, vals in glue_metrics.items():
+            if 'task' in metric.lower() and 'duration' in metric.lower() and vals:
+                avg_task_sec = sum(vals) / len(vals)
+                break
+        if avg_task_sec > 0:
+            vcpu_per_worker = self.GLUE_PRICING.get(
+                context.get('current_config', {}).get('worker_type', 'G.2X'), {}
+            ).get('vcpu', 8)
+            num_executors = cur_workers * vcpu_per_worker
+            ll = littles_law_parallelism(
+                avg_task_sec=avg_task_sec,
+                num_executors=num_executors,
+            )
+            lines.append(
+                f"Little's Law (shuffle.partitions):\n"
+                f"  avg_task={avg_task_sec:.1f}s  executors={num_executors}  "
+                f"→ optimal_shuffle_partitions={ll.get('optimal_shuffle_partitions',200)}\n"
+                f"  executor_utilisation={ll.get('executor_utilisation',0):.1%}"
+            )
+
+        # 3. Spot interruption risk — estimated from effective data size
+        est_hours = max(0.5, total_live_gb / 50.0)  # ~50 GB/hr throughput heuristic
+        spot = spot_interruption_risk(
+            job_duration_hours=est_hours,
+            hourly_interruption_rate=0.05,  # m5-family average
+        )
+        lines.append(
+            f"Spot Interruption Risk (m5-family, est. {est_hours:.1f}h job):\n"
+            f"  p_survive={spot.get('p_survive_full_job',0):.1%}  "
+            f"p_interrupted={spot.get('p_interrupted',0):.1%}  "
+            f"net_savings={spot.get('net_savings_pct',0):.0f}%\n"
+            f"  → {spot.get('recommendation','')}"
+        )
+
+        return "\n\n".join(lines) if lines else "  (no scientific inputs available)"
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """LLM prompt: uses actual Iceberg table sizes + Glue runtime metrics for precise right-sizing."""
@@ -197,6 +266,11 @@ Metric overrides:
 Platform selection:
   Cost difference > 30% vs Glue → recommend migration
   Prefer EKS+Karpenter for batch, EMR spot for ad-hoc, Glue for serverless simplicity
+
+══════════════════════════════════════════════════════
+SCIENTIFIC ANALYSIS  (factor these into your decision)
+══════════════════════════════════════════════════════
+{self._build_scientific_section(context, total_live_gb, cur_workers)}
 
 Respond ONLY with a JSON object:
 {{

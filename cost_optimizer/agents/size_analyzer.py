@@ -37,6 +37,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult
 
+try:
+    from .scientific_tools import (
+        exponential_growth, zipf_skew_model,
+        gaussian_file_distribution, bloom_filter_savings,
+    )
+    _HAS_SCIENTIFIC = True
+except ImportError:
+    _HAS_SCIENTIFIC = False
+
 # ── Thresholds ────────────────────────────────────────────────────────────────
 _TINY_FILE_MB      = 10
 _SMALL_FILE_MB     = 128
@@ -130,6 +139,7 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
         }
 
         recs = self._generate_recommendations(analysis, tables_detail)
+        analysis["scientific_analysis"] = self._run_scientific_analysis(tables_detail)
         return AnalysisResult(
             agent_name      = self.AGENT_NAME,
             success         = True,
@@ -142,6 +152,91 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
                 "monthly_s3_cost":   storage_cost.get("total_monthly_usd", 0),
             },
         )
+
+    # ── Scientific analysis ────────────────────────────────────────────────────
+
+    def _run_scientific_analysis(self, tables_detail: List[Dict]) -> Dict:
+        """
+        Run mathematical models on already-gathered table metrics.
+        No extra AWS calls — works with data collected by _analyze_table().
+        """
+        if not _HAS_SCIENTIFIC:
+            return {}
+
+        per_table: Dict = {}
+        for ta in tables_detail:
+            name = ta.get("table", "unknown")
+            fs   = ta.get("file_stats", {})
+            gf   = ta.get("growth_forecast") or {}
+            res: Dict = {}
+
+            total_gb   = ta.get("compressed_size_gb", 0.0) or fs.get("total_size_gb", 0.0)
+            gb_per_day = gf.get("gb_per_day", 0.0)
+
+            # 1. Euler's exponential growth N(t)=N₀·e^(rt) — more accurate than linear
+            if total_gb > 0.1 and gb_per_day > 0:
+                daily_rate = gb_per_day / total_gb
+                res["exponential_growth"] = exponential_growth(
+                    initial_gb=total_gb,
+                    daily_rate=daily_rate,
+                    days=90,
+                )
+
+            # 2. Zipf/power-law skew model — synthetic from skew_ratio + partition count
+            skew_ratio  = fs.get("skew_ratio", 1.0)
+            part_count  = max(fs.get("partition_count", 10), 4)
+            if skew_ratio > 1.5:
+                import math as _math
+                avg  = 100.0
+                # Power-law: size[k] ∝ k^(-α), α derived from skew_ratio
+                alpha = _math.log(skew_ratio) / _math.log(part_count) if part_count > 1 else 1.0
+                synth = sorted(
+                    [avg * (k ** -alpha) for k in range(1, part_count + 1)],
+                    reverse=True
+                )
+                res["zipf_skew"] = zipf_skew_model(partition_sizes=synth)
+                res["zipf_skew"]["_note"] = (
+                    "Synthetic from skew_ratio — query table$partitions for exact α"
+                )
+
+            # 3. Gaussian/bimodality analysis from file-size bucket counts
+            fc    = fs.get("file_count", 0)
+            tiny  = fs.get("tiny_count",  0)
+            small = fs.get("small_count", 0)
+            avg_mb = fs.get("avg_mb", 128.0)
+            remaining = max(0, fc - tiny - small)
+            if avg_mb > _LARGE_FILE_MB:
+                ideal_c, large_c = 0, remaining
+            elif avg_mb > _IDEAL_FILE_MB:
+                ideal_c, large_c = remaining // 2, remaining - remaining // 2
+            else:
+                ideal_c, large_c = remaining, 0
+            # Cap array sizes to avoid slowdowns on huge file counts
+            synth_files = (
+                [5.0]   * min(tiny,    500) +
+                [64.0]  * min(small,   500) +
+                [256.0] * min(ideal_c, 500) +
+                [768.0] * min(large_c, 500)
+            )
+            if len(synth_files) >= 4:
+                res["file_distribution"] = gaussian_file_distribution(
+                    file_sizes_mb=synth_files
+                )
+
+            # 4. Bloom filter I/O savings — for every non-broadcast join table
+            if not ta.get("is_broadcast_candidate") and total_gb > 1:
+                distinct_keys = max(1, int(ta.get("record_count", 1_000_000) * 0.1))
+                res["bloom_filter"] = bloom_filter_savings(
+                    table_size_gb=total_gb,
+                    join_selectivity=0.05,
+                    num_distinct_keys=min(distinct_keys, 10_000_000),
+                    bits_per_key=10,
+                )
+
+            if res:
+                per_table[name] = res
+
+        return {"per_table": per_table}
 
     # ── LLM prompt override ────────────────────────────────────────────────────
 
@@ -214,6 +309,16 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
         cross_redund = rule_analysis.get("cross_table_redundancy", {})
         storage_cost = rule_analysis.get("storage_cost_summary", {})
 
+        # Run scientific algorithms on already-gathered table stats
+        rule_tables = rule_result.analysis.get("tables_detail",
+                      [{"table": t.get("table", ""), "file_stats": {},
+                        "compressed_size_gb": t.get("size_gb", 0),
+                        "growth_forecast": {}, "is_broadcast_candidate": False,
+                        "record_count": t.get("record_count", 0)}
+                       for t in input_data.source_tables])
+        sci = self._run_scientific_analysis(rule_tables)
+        sci_json = json.dumps(sci, indent=2, default=str) if sci.get("per_table") else "  (insufficient data)"
+
         return f"""
 You are a Senior Data Platform Engineer specializing in Apache Iceberg, AWS Glue,
 and PySpark performance optimization.  Analyze the table telemetry below and the
@@ -229,6 +334,16 @@ Mode: {input_data.processing_mode}
 ━━━━ TABLE TELEMETRY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```json
 {json.dumps(table_telemetry, indent=2, default=str)}
+```
+
+━━━━ SCIENTIFIC ALGORITHM RESULTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(Pre-computed mathematical models — cite these in your findings)
+  • exponential_growth  – Euler N(t)=N₀·e^(rt): growth curve, doubling time, 90d projection
+  • zipf_skew           – Zipf α + recommended salt factor (biased from skew_ratio, not raw $partitions)
+  • file_distribution   – Bimodality coefficient BC=(γ₁²+1)/κ: >0.555 = mixed tiny+huge anti-pattern
+  • bloom_filter        – Bloom filter FPP + I/O savings if enabled on join column
+```json
+{sci_json}
 ```
 
 ━━━━ CROSS-TABLE REDUNDANCY SIGNALS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

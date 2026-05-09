@@ -11,6 +11,14 @@ from typing import Dict, List, Any
 from datetime import datetime
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult
 
+try:
+    from .scientific_tools import (
+        pareto_rank_recommendations, shewhart_control_chart, fourier_periodicity
+    )
+    _HAS_SCIENTIFIC = True
+except ImportError:
+    _HAS_SCIENTIFIC = False
+
 
 class RecommendationsAgent(CostOptimizerAgent):
     """Synthesizes findings into prioritized recommendations."""
@@ -27,6 +35,66 @@ class RecommendationsAgent(CostOptimizerAgent):
         'high': 24,
         'very_high': 80
     }
+
+    def _run_scientific_synthesis(
+        self, context: Dict, rule_recs: List[Dict]
+    ) -> Dict:
+        """
+        Cross-agent mathematical synthesis:
+          - Pareto 80/20 ranking of all recommendations
+          - Shewhart cost anomaly detection (if time-series cost data available)
+          - Fourier periodicity on CloudWatch metrics (if series available)
+        """
+        if not _HAS_SCIENTIFIC:
+            return {}
+
+        result: Dict = {}
+
+        # 1. Pareto ranking — aggregate recommendations from all agent analyses
+        all_recs = (
+            context.get('code_analyzer_full', {}).get('recommendations', []) +
+            context.get('size_analyzer_full',  {}).get('recommendations', []) +
+            context.get('resource_allocator',  {}).get('recommendations', []) +
+            list(rule_recs)
+        )
+        if all_recs:
+            try:
+                result["pareto_ranking"] = pareto_rank_recommendations(all_recs)
+            except Exception:
+                pass
+
+        glue_metrics = context.get('glue_metrics', {})
+        if glue_metrics:
+            # 2. Shewhart control chart — detect cost/duration anomalies
+            for metric, vals in glue_metrics.items():
+                if isinstance(vals, list) and len(vals) >= 5:
+                    fv = [float(v) for v in vals]
+                    try:
+                        result["cost_anomaly"] = shewhart_control_chart(
+                            history=fv[:-1],
+                            current_value=fv[-1],
+                            label=metric,
+                        )
+                        result["cost_anomaly"]["metric"] = metric
+                    except Exception:
+                        pass
+                    break  # one metric is enough for anomaly detection
+
+            # 3. Fourier periodicity — find dominant period in time series
+            for metric, vals in glue_metrics.items():
+                if isinstance(vals, list) and len(vals) >= 8:
+                    try:
+                        fp = fourier_periodicity(
+                            time_series=[float(v) for v in vals],
+                            sample_interval_minutes=5,
+                        )
+                        fp["metric_analyzed"] = metric
+                        result["workload_periodicity"] = fp
+                    except Exception:
+                        pass
+                    break
+
+        return result
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """Holistic synthesis prompt — connects findings from all 4 agents."""
@@ -95,6 +163,10 @@ class RecommendationsAgent(CostOptimizerAgent):
             for r in rule_result.recommendations[:20]
         ]
 
+        # Scientific synthesis
+        sci = self._run_scientific_synthesis(context, rule_result.recommendations)
+        sci_ctx = json.dumps(sci, indent=2, default=str) if sci else "  (not available)"
+
         return f"""You are a senior AWS cost-optimization architect.
 Synthesize findings from 4 analysis agents into a **holistic, prioritized** optimization plan.
 Your unique value is detecting COMPOUND issues that no single agent sees alone.
@@ -123,6 +195,12 @@ AGENT 2 — CODE ANALYZER  (PySpark line-by-line analysis)
 ══════════════════════════════════════════════════════════════
 {json.dumps(code_summary, indent=2)[:4000]}
 
+Scientific signals from code analysis (Amdahl's Law):
+{json.dumps(code_full.get('scientific_analysis', {}), indent=2, default=str)}
+
+Scientific signals from size analysis (growth, skew, bloom filter):
+{json.dumps(size_full.get('scientific_analysis', {}).get('per_table', {}), indent=2, default=str)[:2000]}
+
 ══════════════════════════════════════════════════════════════
 AGENT 3 — GLUE RUNTIME METRICS  (CloudWatch)
 ══════════════════════════════════════════════════════════════
@@ -137,6 +215,15 @@ AGENT 4 — RESOURCE ALLOCATOR
 RULE-BASED PRE-COMPUTED RECOMMENDATIONS  (starting point)
 ══════════════════════════════════════════════════════════════
 {json.dumps(rule_recs_brief, indent=2)}
+
+══════════════════════════════════════════════════════════════
+SCIENTIFIC SYNTHESIS  (mathematical cross-agent analysis)
+══════════════════════════════════════════════════════════════
+{sci_ctx}
+Interpretation:
+  • pareto_ranking  — top quick wins by savings/√effort (Pareto 80/20 rule)
+  • cost_anomaly    — Shewhart 3-sigma: is_anomaly means this run is statistically abnormal
+  • workload_periodicity — DFT dominant period: schedule OPTIMIZE/VACUUM at the trough
 
 ══════════════════════════════════════════════════════════════
 SYNTHESIS GUIDELINES — COMPOUND ISSUES TO DETECT
