@@ -352,6 +352,146 @@ def compare_spot_savings(
         return json.dumps({"error": str(exc)})
 
 
+@tool
+def allocate_resources_scientific(
+    sizing_result_json: str,
+    code_analysis_json: str = "{}",
+    glue_metrics_json: str = "{}",
+    serial_fraction: float = 0.15,
+    runs_per_day: int = 1,
+) -> str:
+    """
+    Scientifically-driven resource allocation using:
+    - Amdahl's Law for theoretical worker ceiling
+    - Little's Law for optimal shuffle partition count
+    - Geometric spot-interruption risk model
+    - Pareto ranking of cost-reduction recommendations
+
+    Args:
+        sizing_result_json: JSON from Sizing Agent (effective_size_gb, skew_risk_score).
+        code_analysis_json: JSON from Code Analyzer Agent (complexity, join_count, udf_count).
+        glue_metrics_json:  JSON CloudWatch metrics (heap_peak_pct, worker_util_min,
+                            cpu_worker_min, num_workers, avg_task_sec).
+        serial_fraction:    Fraction of job that's inherently serial (default 0.15 = 15%).
+        runs_per_day:       Daily run frequency for cost annualisation.
+
+    Returns:
+        JSON with amdahl_max_workers, recommended_workers, shuffle_partitions,
+        spot_recommendation, ranked_recommendations, and projected_savings.
+    """
+    try:
+        sizing  = json.loads(sizing_result_json)
+        code    = json.loads(code_analysis_json) if code_analysis_json else {}
+        metrics = json.loads(glue_metrics_json)  if glue_metrics_json  else {}
+
+        size_gb    = float(sizing.get("effective_size_gb", 100))
+        complexity = int((code.get("complexity") or {}).get("complexity_score", 50))
+        joins      = int((code.get("complexity") or {}).get("join_count", 0))
+        udf_count  = int((code.get("complexity") or {}).get("udf_count", 0))
+        skew       = int(sizing.get("skew_risk_score", 20))
+
+        # --- Amdahl's Law: theoretical worker ceiling ---
+        # Speedup = 1 / (S + (1-S)/N)  → ceiling where N → ∞ gives 1/S
+        amdahl_max = math.floor(1.0 / max(serial_fraction, 0.01))
+
+        # --- Base allocation from rules ---
+        optimal = _calc_optimal_glue(size_gb, complexity, joins, skew)
+        recommended_workers = min(optimal["workers"], amdahl_max)
+
+        # --- Metric-driven adjustments ---
+        heap_peak   = float(metrics.get("heap_peak_pct", metrics.get("heap_memory_pct", 0)))
+        worker_util = float(metrics.get("worker_util_min", metrics.get("worker_utilization_min", 100)))
+        cpu_min     = float(metrics.get("cpu_worker_min", metrics.get("cpu_min_pct", 100)))
+        cur_workers = int(metrics.get("num_workers", metrics.get("worker_count", recommended_workers)))
+
+        adjustment_reasons = []
+        if heap_peak > 85:
+            # Upgrade worker type to G.4X for more memory
+            optimal["worker_type"] = "G.4X"
+            adjustment_reasons.append(f"Heap peak {heap_peak:.0f}% → upgraded to G.4X for memory headroom")
+        if worker_util < 40 and cur_workers > 4:
+            # Workers underutilised — reduce
+            recommended_workers = max(4, math.ceil(recommended_workers * 0.7))
+            adjustment_reasons.append(f"Worker utilisation {worker_util:.0f}% < 40% → reduced workers by 30%")
+        if cpu_min < 20 and joins > 2:
+            # Severe skew — recommend AQE skewJoin
+            adjustment_reasons.append(f"CPU min {cpu_min:.0f}% with {joins} joins → enable AQE skewJoin urgently")
+
+        # --- Little's Law: shuffle partitions ---
+        # L = λ × W → partitions = (total_tasks) / (target_task_duration_sec / avg_task_sec)
+        avg_task_sec   = float(metrics.get("avg_task_sec", 30))
+        target_dur_sec = 60  # target 60s per task for balance
+        total_tasks    = max(200, int(size_gb * 8))  # ~8 tasks/GB heuristic
+        little_partitions = max(200, min(2000, int(total_tasks * avg_task_sec / target_dur_sec)))
+
+        # --- Spot risk (geometric distribution) ---
+        job_hours    = optimal["estimated_duration_hours"]
+        spot_rate    = 0.05  # 5%/hr interruption rate
+        # P(survival) = (1 - rate)^hours
+        import math as _math
+        survival_prob = (1 - spot_rate) ** job_hours
+        spot_viable   = survival_prob > 0.80 and udf_count == 0
+
+        # --- Pareto-rank recommendations ---
+        raw_recs = []
+        if heap_peak > 85:
+            raw_recs.append({"title": "Upgrade to G.4X workers", "savings_pct": 0,  "effort": "low",  "priority": "P0"})
+        if worker_util < 40:
+            reduction_pct = round((1 - recommended_workers / max(cur_workers, 1)) * 100)
+            raw_recs.append({"title": f"Reduce workers {cur_workers}→{recommended_workers} ({reduction_pct}% savings)", "savings_pct": reduction_pct, "effort": "low", "priority": "P0"})
+        if cpu_min < 20 and joins > 2:
+            raw_recs.append({"title": "Enable AQE skewJoin (CPU imbalance detected)", "savings_pct": 25, "effort": "low", "priority": "P0"})
+        if spot_viable:
+            raw_recs.append({"title": "Use EMR Spot (70% discount, low interruption risk)", "savings_pct": 70, "effort": "medium", "priority": "P1"})
+        if udf_count > 0:
+            raw_recs.append({"title": f"Replace {udf_count} Python UDFs with Spark built-ins", "savings_pct": 30, "effort": "medium", "priority": "P0"})
+        if little_partitions != 200:
+            raw_recs.append({"title": f"Set shuffle partitions to {little_partitions} (Little's Law)", "savings_pct": 10, "effort": "low", "priority": "P1"})
+
+        # Pareto sort: descending savings_pct
+        raw_recs.sort(key=lambda r: -r.get("savings_pct", 0))
+        cumulative = 0
+        ranked = []
+        for r in raw_recs:
+            cumulative += r["savings_pct"]
+            r["cumulative_savings_pct"] = min(cumulative, 80)
+            r["is_top_20pct_effort"] = r.get("effort") == "low"
+            ranked.append(r)
+            if cumulative >= 80:
+                break  # 80% of gains captured — Pareto cutoff
+
+        # Projected cost
+        opt_cost  = _glue_cost(recommended_workers, optimal["worker_type"], job_hours)
+        cur_cost  = _glue_cost(cur_workers, metrics.get("worker_type", optimal["worker_type"]), job_hours)
+        saved_pct = round((1 - opt_cost / max(cur_cost, 0.001)) * 100, 1)
+
+        return json.dumps({
+            "scientific_models_applied": ["Amdahl's Law", "Little's Law", "Geometric spot risk", "Pareto 80/20"],
+            "amdahl_max_workers":        amdahl_max,
+            "serial_fraction":           serial_fraction,
+            "recommended_workers":       recommended_workers,
+            "recommended_worker_type":   optimal["worker_type"],
+            "estimated_duration_hours":  optimal["estimated_duration_hours"],
+            "little_law_shuffle_partitions": little_partitions,
+            "metric_adjustments":        adjustment_reasons,
+            "spot_recommendation": {
+                "viable":          spot_viable,
+                "survival_prob":   round(survival_prob, 3),
+                "reason": ("UDFs present — Spot interruption would lose Python state" if udf_count > 0
+                           else f"Survival probability {survival_prob:.1%} — Spot is viable"),
+            },
+            "ranked_recommendations":   ranked,
+            "projected_savings": {
+                "percent":           saved_pct,
+                "monthly_usd":       round((cur_cost - opt_cost) * runs_per_day * 30, 2),
+                "annual_usd":        round((cur_cost - opt_cost) * runs_per_day * 365, 2),
+            },
+        })
+    except Exception as exc:
+        logger.error("Scientific resource allocation failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 def create_resource_allocator_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                                      region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for resource allocation."""
@@ -359,5 +499,5 @@ def create_resource_allocator_agent(model_id: str = "us.anthropic.claude-3-7-son
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[allocate_resources, recommend_flex_execution, compare_spot_savings],
+        tools=[allocate_resources, recommend_flex_execution, compare_spot_savings, allocate_resources_scientific],
     )

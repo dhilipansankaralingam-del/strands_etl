@@ -17,6 +17,7 @@ from .spark_event_log_agent        import create_spark_event_log_agent
 from .script_tester_agent          import create_script_tester_agent
 from .recommendation_agent         import create_recommendation_agent
 from .learning_agent               import create_learning_agent
+from .scientific_agent             import create_scientific_agent
 
 __all__ = [
     "create_sizing_agent",
@@ -34,4 +35,5 @@ __all__ = [
     "create_script_tester_agent",
     "create_recommendation_agent",
     "create_learning_agent",
+    "create_scientific_agent",
 ]

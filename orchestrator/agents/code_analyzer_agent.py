@@ -432,6 +432,254 @@ def analyse_pyspark_file(script_path: str, effective_size_gb: float = 100.0) -> 
         return json.dumps({"error": str(exc)})
 
 
+# ---------------------------------------------------------------------------
+# Compound cross-agent issue detection (8 patterns from KEYJa branch)
+# ---------------------------------------------------------------------------
+_COMPOUND_PATTERNS = [
+    {
+        "id": "SIZE_CODE_UDF_LARGE",
+        "title": "Large dataset processed with Python UDFs",
+        "severity": "critical",
+        "condition": lambda s, m: s.get("effective_size_gb", 0) > 50 and m.get("udf_count", 0) > 0,
+        "description": "UDFs on large datasets combine worst of two worlds: full data movement + Python serialisation overhead",
+        "recommendation": "Replace UDFs with Spark built-ins (F.regexp_extract, F.when, F.concat) before scaling",
+        "savings_pct": 40,
+    },
+    {
+        "id": "METRICS_SIZE_OVER_PROVISION",
+        "title": "High worker count but small effective data size",
+        "severity": "high",
+        "condition": lambda s, m: s.get("effective_size_gb", 999) < 20 and m.get("worker_count", 0) > 10,
+        "description": "Workers are idle — effective data size doesn't justify the cluster",
+        "recommendation": "Reduce worker count; enable auto-scaling; consider G.1X instead of G.2X",
+        "savings_pct": 30,
+    },
+    {
+        "id": "METRICS_CODE_SKEW_NO_AQE",
+        "title": "Skewed join detected without AQE enabled",
+        "severity": "critical",
+        "condition": lambda s, m: m.get("skew_risk", False) and not m.get("aqe_enabled", False),
+        "description": "Skew causes stragglers; without AQE the job hangs on the largest partition",
+        "recommendation": "Enable spark.sql.adaptive.enabled=true and skewJoin.enabled=true",
+        "savings_pct": 35,
+    },
+    {
+        "id": "SIZE_CODE_NO_PREDICATE",
+        "title": "Full table scan on large table without predicate pushdown",
+        "severity": "high",
+        "condition": lambda s, m: s.get("effective_size_gb", 0) > 100 and m.get("select_star_count", 0) > 0,
+        "description": "Reading all columns on 100+ GB table wastes I/O budget",
+        "recommendation": "Add column projection and partition filters at read time",
+        "savings_pct": 20,
+    },
+    {
+        "id": "METRICS_CODE_COLLECT_LOOP",
+        "title": "collect() inside processing loop",
+        "severity": "critical",
+        "condition": lambda s, m: m.get("for_loop_collect_count", 0) > 0,
+        "description": "Each loop iteration triggers a full Spark job — N×overhead",
+        "recommendation": "Vectorise with Spark transformations; use .rdd.map() or join instead of loop",
+        "savings_pct": 50,
+    },
+    {
+        "id": "SIZE_CODE_REPARTITION_SMALL",
+        "title": "repartition(1) on a large dataset",
+        "severity": "high",
+        "condition": lambda s, m: s.get("effective_size_gb", 0) > 10 and m.get("repartition_1_count", 0) > 0,
+        "description": "Single partition on large data creates write bottleneck and disables parallelism",
+        "recommendation": "Use .coalesce(optimal_n) or remove repartition and let AQE manage partition count",
+        "savings_pct": 25,
+    },
+    {
+        "id": "METRICS_HEAP_UDF",
+        "title": "High heap pressure with Python UDFs",
+        "severity": "high",
+        "condition": lambda s, m: m.get("heap_peak_pct", 0) > 80 and m.get("udf_count", 0) > 0,
+        "description": "UDFs hold Python objects in off-heap; combined with high JVM heap → GC storms",
+        "recommendation": "Replace UDFs first; then consider increasing executor memory or G.2X workers",
+        "savings_pct": 20,
+    },
+    {
+        "id": "SIZE_CODE_CROSS_JOIN",
+        "title": "Cartesian product on non-trivial dataset",
+        "severity": "critical",
+        "condition": lambda s, m: s.get("effective_size_gb", 0) > 1 and m.get("crossjoin_count", 0) > 0,
+        "description": "crossJoin scales quadratically — even 1 GB × 1 GB = 1 TB shuffle",
+        "recommendation": "Replace crossJoin with broadcast + inequality join or window function",
+        "savings_pct": 60,
+    },
+]
+
+
+def _extract_code_metrics(script_content: str, base_analysis: dict) -> dict:
+    complexity = base_analysis.get("complexity", {})
+    return {
+        "udf_count":            complexity.get("udf_count", 0),
+        "for_loop_collect_count": len(re.findall(r"for\s+\w+\s+in\s+\w+\.collect\(\)", script_content)),
+        "repartition_1_count":  len(re.findall(r"\.repartition\(\s*1\s*\)", script_content)),
+        "crossjoin_count":      len(re.findall(r"\.crossJoin\(", script_content, re.IGNORECASE)),
+        "select_star_count":    len(re.findall(r'\.select\(\s*["\']?\*["\']?\s*\)', script_content)),
+        "skew_risk":            base_analysis.get("complexity", {}).get("join_count", 0) > 2,
+        "aqe_enabled":          "spark.sql.adaptive.enabled" in script_content,
+        "worker_count":         0,  # filled from metrics_json if provided
+        "heap_peak_pct":        0,  # filled from metrics_json if provided
+    }
+
+
+@tool
+def analyse_pyspark_code_compound(
+    script_content: str,
+    sizing_results_json: str = "{}",
+    metrics_json: str = "{}",
+) -> str:
+    """
+    Detect compound cross-agent issues by combining code analysis with sizing and
+    Glue CloudWatch metrics. Surfaces 8 cross-agent anti-patterns.
+
+    Args:
+        script_content:      Full PySpark script source code.
+        sizing_results_json: JSON output from the Sizing Agent (effective_size_gb, etc.).
+        metrics_json:        JSON Glue CloudWatch metrics (heap_peak_pct, worker_count, etc.).
+
+    Returns:
+        JSON with compound_issues list, each with severity, savings_pct, and recommendation.
+    """
+    try:
+        sizing  = json.loads(sizing_results_json) if sizing_results_json else {}
+        metrics = json.loads(metrics_json) if metrics_json else {}
+
+        base   = json.loads(analyse_pyspark_code.__wrapped__(script_content))
+        code_m = _extract_code_metrics(script_content, base)
+        # Merge explicit metrics
+        code_m.update({
+            "worker_count":  metrics.get("worker_count", metrics.get("num_workers", 0)),
+            "heap_peak_pct": metrics.get("heap_peak_pct", metrics.get("heap_memory_pct", 0)),
+        })
+
+        triggered = []
+        for cp in _COMPOUND_PATTERNS:
+            try:
+                if cp["condition"](sizing, code_m):
+                    triggered.append({
+                        "id":             cp["id"],
+                        "title":          cp["title"],
+                        "severity":       cp["severity"],
+                        "description":    cp["description"],
+                        "recommendation": cp["recommendation"],
+                        "savings_pct":    cp["savings_pct"],
+                        "priority":       "P0" if cp["severity"] == "critical" else "P1",
+                    })
+            except Exception:
+                pass
+
+        total_savings = min(80, sum(c["savings_pct"] for c in triggered))
+        return json.dumps({
+            "compound_issues":        triggered,
+            "compound_issue_count":   len(triggered),
+            "critical_compound":      sum(1 for c in triggered if c["severity"] == "critical"),
+            "estimated_savings_pct":  total_savings,
+            "base_analysis_summary": {
+                "anti_pattern_count":   base.get("anti_pattern_count", 0),
+                "optimization_score":   base.get("optimization_score", 0),
+                "complexity_score":     base.get("complexity", {}).get("complexity_score", 0),
+            },
+        })
+    except Exception as exc:
+        logger.error("Compound analysis failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def detect_skew_patterns(
+    script_content: str,
+    partition_sizes_json: str = "[]",
+) -> str:
+    """
+    Detect data skew in PySpark scripts, quantified using Zipf's law model.
+    Identifies skew-prone join keys and recommends salting / AQE strategies.
+
+    Args:
+        script_content:       Full PySpark script source code.
+        partition_sizes_json: JSON array of partition sizes in MB (optional, for Zipf fit).
+
+    Returns:
+        JSON with skew_risk_level, zipf_alpha, skewed_keys, and mitigation strategies.
+    """
+    import math
+
+    def _zipf_alpha(sizes: list) -> float:
+        """Estimate Zipf exponent via Hill estimator (MLE)."""
+        n = len(sizes)
+        if n < 2:
+            return 1.0
+        mn = min(sizes)
+        if mn <= 0:
+            mn = 1e-6
+        return 1 + n / sum(math.log(s / mn) for s in sizes if s > mn) if any(s > mn for s in sizes) else 1.0
+
+    try:
+        partition_sizes = json.loads(partition_sizes_json) if partition_sizes_json else []
+        lines = script_content.split("\n")
+
+        skewed_keys = []
+        for i, line in enumerate(lines, 1):
+            for kw in ["status", "type", "flag", "category", "region", "country"]:
+                if re.search(rf'\.join\(.*["\']?{kw}["\']?', line, re.IGNORECASE):
+                    skewed_keys.append({"line": i, "key": kw, "reason": "low-cardinality key"})
+
+        alpha = _zipf_alpha([float(s) for s in partition_sizes]) if partition_sizes else None
+        skew_level = "unknown"
+        if alpha is not None:
+            skew_level = ("severe" if alpha > 2.5 else
+                          "high"   if alpha > 1.8 else
+                          "moderate" if alpha > 1.2 else "low")
+
+        join_count = len(re.findall(r"\.join\(", script_content, re.IGNORECASE))
+        has_aqe    = "spark.sql.adaptive.enabled" in script_content
+        has_salt   = "salt" in script_content.lower()
+
+        mitigations = []
+        if skew_level in ("severe", "high") or skewed_keys:
+            if not has_salt:
+                mitigations.append({
+                    "technique": "Key Salting",
+                    "priority": "P0",
+                    "code": (
+                        "num_salt = 10\n"
+                        "df = df.withColumn('salt_key', concat(col('join_key'), lit('_'), (rand()*num_salt).cast('int')))"
+                    ),
+                })
+            if not has_aqe:
+                mitigations.append({
+                    "technique": "Enable AQE skewJoin",
+                    "priority": "P0",
+                    "code": (
+                        'spark.conf.set("spark.sql.adaptive.enabled", "true")\n'
+                        'spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")'
+                    ),
+                })
+
+        return json.dumps({
+            "skew_risk_level":   skew_level,
+            "zipf_alpha":        round(alpha, 4) if alpha else None,
+            "zipf_interpretation": (
+                "α > 2.5 → extreme skew (few partitions hold almost all data)"
+                if alpha and alpha > 2.5 else
+                "α > 1.5 → moderate skew — AQE skewJoin recommended"
+                if alpha and alpha > 1.5 else
+                "α ≈ 1.0 → uniform distribution — low skew risk"
+                if alpha else "No partition size data provided"
+            ),
+            "join_count":        join_count,
+            "skewed_keys":       skewed_keys,
+            "aqe_enabled":       has_aqe,
+            "salting_present":   has_salt,
+            "mitigations":       mitigations,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 def create_code_analyzer_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                                 region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for PySpark code analysis."""
@@ -439,5 +687,10 @@ def create_code_analyzer_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-2
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[analyse_pyspark_code, analyse_pyspark_file],
+        tools=[
+            analyse_pyspark_code,
+            analyse_pyspark_file,
+            analyse_pyspark_code_compound,
+            detect_skew_patterns,
+        ],
     )

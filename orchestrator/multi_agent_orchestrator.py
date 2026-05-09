@@ -5,17 +5,18 @@ Multi-Agent ETL Orchestrator
 True agentic ETL framework powered by Strands SDK with Agent-to-Agent (A2A)
 interaction via the agent_as_tool pattern.
 
-Architecture  (15 specialist agents, 40+ tools):
+Architecture  (16 specialist agents, 50+ tools):
 
   OrchestratorAgent
     │
-    ├── Phase 1 ─ PARALLEL (6 agents)
-    │     ├── SizingAgent           → data volume, skew risk, partition efficiency (3 tools)
+    ├── Phase 1 ─ PARALLEL (7 agents)
+    │     ├── SizingAgent           → data volume, skew risk, partition efficiency, Iceberg snapshot health (6 tools)
     │     ├── DataQualityAgent      → DQ rule evaluation, schema checks (2 tools)
     │     ├── ComplianceAgent       → PII detection, GDPR/HIPAA/PCI/SOX/CCPA (2 tools)
-    │     ├── CodeAnalyzerAgent     → line-by-line anti-pattern + AQE config (2 tools)
+    │     ├── CodeAnalyzerAgent     → line-by-line anti-pattern + AQE config + compound cross-agent + Zipf skew (4 tools)
     │     ├── ColumnLineageAgent    → column-level data flow, Mermaid/DOT (3 tools)
-    │     └── DeltaIcebergAgent     → format detection, maintenance SQL, partition (3 tools)
+    │     ├── DeltaIcebergAgent     → format detection, maintenance SQL, partition (3 tools)
+    │     └── ScientificAgent       → 14 algorithms: Amdahl, Euler, Zipf, Planck, Newton, Monte Carlo… (14 tools)
     │
     ├── Phase 2 ─ SEQUENTIAL (1 agent, consumes Phase 1)
     │     └── ResourceAllocatorAgent → right-sizing, cost comparison, Spot/Flex (3 tools)
@@ -63,13 +64,14 @@ from .agents import (
     create_script_tester_agent,
     create_recommendation_agent,
     create_learning_agent,
+    create_scientific_agent,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 _ORCHESTRATOR_SYSTEM_PROMPT = """
-You are a **Master ETL Orchestrator Agent** coordinating 15 specialist sub-agents in a 5-phase pipeline.
+You are a **Master ETL Orchestrator Agent** coordinating 16 specialist sub-agents in a 5-phase pipeline.
 
 Your responsibilities:
 1. Delegate analysis tasks to specialist agents via the provided tools
@@ -131,7 +133,7 @@ class MultiAgentOrchestrator:
         self.region      = region
         self.max_workers = max_workers
 
-        logger.info("Initialising 15 specialist agents …")
+        logger.info("Initialising 16 specialist agents …")
 
         # ── Phase 1 ────────────────────────────────────────────────────────────
         self._sizing_agent             = create_sizing_agent(model_id, region)
@@ -140,6 +142,7 @@ class MultiAgentOrchestrator:
         self._code_analyzer_agent      = create_code_analyzer_agent(model_id, region)
         self._column_lineage_agent     = create_column_lineage_agent(model_id, region)
         self._delta_iceberg_agent      = create_delta_iceberg_agent(model_id, region)
+        self._scientific_agent         = create_scientific_agent(model_id, region)
 
         # ── Phase 2 ────────────────────────────────────────────────────────────
         self._resource_allocator_agent = create_resource_allocator_agent(model_id, region)
@@ -190,6 +193,8 @@ class MultiAgentOrchestrator:
                           description="Synthesise ROI-driven recommendations and implementation plan"),
             agent_as_tool(self._learning_agent,           name="learning_agent",
                           description="Persist pipeline learning vectors and retrieve history"),
+            agent_as_tool(self._scientific_agent,         name="scientific_agent",
+                          description="Run scientific algorithms: Amdahl, Euler growth, Zipf skew, Planck hot-partition, Newton cooling, Monte Carlo cost, Little's Law, Shannon entropy, Bloom filter, Shewhart control charts, Fourier periodicity, Pareto ranking"),
         ]
 
         self._orchestrator = Agent(
@@ -268,8 +273,8 @@ class MultiAgentOrchestrator:
         logger.info("Pipeline %s  |  job: %s  |  mode: %s", pipeline_id, job_name, mode)
         logger.info("=" * 70)
 
-        # ── Phase 1: Parallel analysis (6 agents) ──────────────────────────────
-        logger.info("[Phase 1] Running 6 analysis agents in parallel …")
+        # ── Phase 1: Parallel analysis (7 agents) ──────────────────────────────
+        logger.info("[Phase 1] Running 7 analysis agents in parallel …")
 
         def _run_sizing():
             return self._call_agent(
@@ -315,6 +320,15 @@ class MultiAgentOrchestrator:
                 f"Detect Delta/Iceberg format and emit maintenance commands for:\n{script[:3000]}"
             )
 
+        def _run_scientific():
+            return self._call_agent(
+                self._scientific_agent,
+                f"Run scientific analysis for job '{job_name}': "
+                f"tables={tables_json}. "
+                f"Use Euler growth forecast, Amdahl parallelism ceiling, and Pareto ranking. "
+                f"Join count: {join_count}. Processing mode: {mode}."
+            )
+
         phase1 = self._run_parallel({
             "sizing":        _run_sizing,
             "data_quality":  _run_dq,
@@ -322,6 +336,7 @@ class MultiAgentOrchestrator:
             "code_analysis": _run_code_analysis,
             "lineage":       _run_lineage,
             "delta_iceberg": _run_delta_iceberg,
+            "scientific":    _run_scientific,
         })
 
         sizing_result   = phase1.get("sizing", {})

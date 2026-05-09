@@ -288,6 +288,199 @@ def analyse_partition_efficiency(tables_json: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Scientific sizing tools
+# ---------------------------------------------------------------------------
+
+def _gaussian_bimodality_coefficient(values: list) -> float:
+    """Sarle's bimodality coefficient — values > 0.555 suggest bimodal distribution."""
+    import math
+    n = len(values)
+    if n < 4:
+        return 0.0
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / max(n - 1, 1)
+    std = variance ** 0.5
+    if std == 0:
+        return 0.0
+    skewness = sum((x - mean) ** 3 for x in values) / (n * std ** 3)
+    kurtosis = sum((x - mean) ** 4 for x in values) / (n * std ** 4) - 3
+    return (skewness ** 2 + 1) / (kurtosis + 3 * (n - 1) ** 2 / max((n - 2) * (n - 3), 1))
+
+
+@tool
+def analyse_file_size_distribution(file_sizes_mb_json: str) -> str:
+    """
+    Analyse the distribution of Iceberg/Delta table file sizes using Gaussian
+    bimodality detection to identify tiny-file pathologies.
+
+    Args:
+        file_sizes_mb_json: JSON array of file sizes in MB (e.g. from $files system table).
+
+    Returns:
+        JSON with bimodality_coefficient, tiny_file_count, large_file_count,
+        p50_mb, p95_mb, pathology, and compaction_recommendation.
+    """
+    try:
+        sizes = json.loads(file_sizes_mb_json)
+        if not sizes:
+            return json.dumps({"error": "empty file list"})
+
+        sizes_sorted = sorted(float(s) for s in sizes)
+        n = len(sizes_sorted)
+        p50 = sizes_sorted[int(n * 0.50)]
+        p95 = sizes_sorted[int(n * 0.95)]
+
+        tiny = sum(1 for s in sizes_sorted if s < 10)
+        large = sum(1 for s in sizes_sorted if s > 512)
+        bmc = _gaussian_bimodality_coefficient(sizes_sorted)
+
+        if bmc > 0.555 and tiny > n * 0.3:
+            pathology = "bimodal_tiny_file"
+            rec = "Run OPTIMIZE / REWRITE_DATA_FILES to compact small files into 128–256 MB targets"
+        elif tiny > n * 0.5:
+            pathology = "tiny_file_dominated"
+            rec = "Enable auto-compaction or schedule periodic OPTIMIZE jobs"
+        elif large > n * 0.3:
+            pathology = "oversized_files"
+            rec = "Reduce write batch size or enable file size control in writer options"
+        else:
+            pathology = "healthy"
+            rec = "File size distribution is within acceptable range"
+
+        return json.dumps({
+            "file_count":              n,
+            "bimodality_coefficient":  round(bmc, 4),
+            "bimodal_threshold":       0.555,
+            "is_bimodal":              bmc > 0.555,
+            "tiny_file_count":         tiny,
+            "tiny_file_pct":           round(100 * tiny / max(n, 1), 1),
+            "large_file_count":        large,
+            "p50_mb":                  round(p50, 2),
+            "p95_mb":                  round(p95, 2),
+            "pathology":               pathology,
+            "compaction_recommendation": rec,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def forecast_table_growth(tables_json: str, forecast_days: int = 90) -> str:
+    """
+    Project table size and storage cost growth using Euler exponential growth model
+    (compound continuous growth: S(t) = S₀ · e^(r·t)).
+
+    Args:
+        tables_json:   JSON array of {table, size_gb, daily_growth_rate_pct} objects.
+        forecast_days: Number of days to project forward (default 90).
+
+    Returns:
+        JSON with per-table projections and total_projected_gb, total_cost_usd.
+    """
+    import math
+    STORAGE_COST_PER_GB_MONTH = 0.023  # S3 standard
+
+    try:
+        tables = json.loads(tables_json)
+        projections = []
+        for t in tables:
+            name   = t.get("table", t.get("name", "unknown"))
+            s0     = float(t.get("size_gb", 0))
+            rate   = float(t.get("daily_growth_rate_pct", t.get("growth_rate", 1.0))) / 100.0
+            st     = s0 * math.exp(rate * forecast_days)
+            growth = st - s0
+            months = forecast_days / 30.0
+            cost   = st * STORAGE_COST_PER_GB_MONTH * months
+            projections.append({
+                "table":                name,
+                "current_size_gb":      round(s0, 2),
+                "projected_size_gb":    round(st, 2),
+                "growth_gb":            round(growth, 2),
+                "growth_pct":           round((st / max(s0, 0.001) - 1) * 100, 1),
+                "storage_cost_usd":     round(cost, 2),
+                "daily_growth_rate_pct": t.get("daily_growth_rate_pct", 1.0),
+            })
+
+        total_current  = sum(p["current_size_gb"]   for p in projections)
+        total_proj     = sum(p["projected_size_gb"]  for p in projections)
+        total_cost     = sum(p["storage_cost_usd"]   for p in projections)
+
+        high_growth = [p for p in projections if p["growth_pct"] > 100]
+        rec = (f"{len(high_growth)} table(s) will double in {forecast_days} days — consider lifecycle policies"
+               if high_growth else "Growth rates are within normal bounds")
+
+        return json.dumps({
+            "forecast_days":        forecast_days,
+            "projections":          projections,
+            "total_current_gb":     round(total_current, 2),
+            "total_projected_gb":   round(total_proj, 2),
+            "total_storage_cost_usd": round(total_cost, 2),
+            "high_growth_tables":   [p["table"] for p in high_growth],
+            "recommendation":       rec,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def assess_iceberg_snapshot_health(
+    snapshot_count: int,
+    file_count: int,
+    added_file_count: int,
+    table_name: str = "unknown",
+) -> str:
+    """
+    Assess Iceberg table snapshot health: detect snapshot bloat, write amplification,
+    and orphan file accumulation. Recommends VACUUM / expire_snapshots timing.
+
+    Args:
+        snapshot_count:    Total number of snapshots (from $snapshots system table).
+        file_count:        Total live files (from $files system table).
+        added_file_count:  Total files added across all snapshots (from $manifests).
+        table_name:        Table identifier for labelling.
+
+    Returns:
+        JSON with bloat_score, write_amplification, health_grade, and recommendations.
+    """
+    try:
+        write_amp = round(added_file_count / max(file_count, 1), 2)
+
+        # Bloat score 0–100
+        snap_penalty  = min(50, max(0, (snapshot_count - 10) * 2))
+        amp_penalty   = min(50, max(0, (write_amp - 1.5) * 10))
+        bloat_score   = int(snap_penalty + amp_penalty)
+
+        recs = []
+        if snapshot_count > 30:
+            recs.append(f"expire_snapshots(older_than=7d) — {snapshot_count} snapshots is excessive (target ≤ 30)")
+        if write_amp > 5:
+            recs.append(f"Write amplification {write_amp}× exceeds 5× threshold; switch to merge-on-read or increase write batch size")
+        if write_amp > 2 and snapshot_count > 10:
+            recs.append("Schedule REWRITE_DATA_FILES weekly to compact overlapping data files")
+        if bloat_score < 20:
+            recs.append("Snapshot health is good; maintain current VACUUM cadence")
+
+        health_grade = ("A" if bloat_score < 20 else
+                        "B" if bloat_score < 40 else
+                        "C" if bloat_score < 60 else
+                        "D" if bloat_score < 80 else "F")
+
+        return json.dumps({
+            "table":               table_name,
+            "snapshot_count":      snapshot_count,
+            "live_file_count":     file_count,
+            "added_file_count":    added_file_count,
+            "write_amplification": write_amp,
+            "bloat_score":         bloat_score,
+            "health_grade":        health_grade,
+            "requires_vacuum":     snapshot_count > 30 or write_amp > 5,
+            "recommendations":     recs,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
 def create_sizing_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
@@ -297,5 +490,12 @@ def create_sizing_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[analyse_data_sizing, estimate_shuffle_size, analyse_partition_efficiency],
+        tools=[
+            analyse_data_sizing,
+            estimate_shuffle_size,
+            analyse_partition_efficiency,
+            analyse_file_size_distribution,
+            forecast_table_growth,
+            assess_iceberg_snapshot_health,
+        ],
     )
