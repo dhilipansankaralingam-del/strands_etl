@@ -6,6 +6,7 @@ Analyzes PySpark code for anti-patterns, optimization opportunities,
 and provides specific recommendations for cost reduction.
 """
 
+import json
 import re
 from typing import Dict, List, Any, Tuple
 from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult, CodePatternMatcher
@@ -221,6 +222,194 @@ class CodeAnalyzerAgent(CostOptimizerAgent):
                 'window_function_count': complexity['window_function_count']
             }
         )
+
+    def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
+        """Size-aware LLM prompt: correlates every line with actual Iceberg table telemetry."""
+
+        # ── Size telemetry summary per table ─────────────────────────────────
+        size_full = context.get('size_analyzer_full', {})
+        table_findings = size_full.get('table_findings', {})
+
+        table_lines: List[str] = []
+        for tbl, findings in table_findings.items():
+            fs    = findings.get('file_stats',             {})
+            ih    = findings.get('iceberg_health',         {})
+            gf    = findings.get('growth_forecast',        {})
+            sc    = findings.get('storage_cost',           {})
+            cold  = findings.get('cold_partition_analysis',{})
+            comp  = findings.get('compression',            {})
+
+            line = (
+                f"  {tbl}: "
+                f"{fs.get('total_size_gb', 0):.2f} GB | "
+                f"files={fs.get('file_count', 0):,} | "
+                f"avg={fs.get('avg_file_mb', 0):.1f} MB | "
+                f"tiny={fs.get('tiny_file_count', 0):,} | "
+                f"skew={fs.get('skew_ratio', 1.0):.1f}x | "
+                f"snapshots={ih.get('snapshot_count', 0)} | "
+                f"write_amp={ih.get('write_amplification', 1.0):.1f}x | "
+                f"growth={gf.get('gb_per_day', 0):.2f} GB/day | "
+                f"storage=${sc.get('monthly_total_usd', 0):.2f}/mo | "
+                f"cold={cold.get('cold_data_estimate_gb', 0):.0f} GB | "
+                f"compress={comp.get('label', 'unknown')}"
+            )
+            table_lines.append(line)
+
+            # Iceberg health issues inline
+            for issue in ih.get('issues', []):
+                table_lines.append(
+                    f"    [{issue.get('severity','').upper()}] {issue.get('description','')}"
+                )
+
+        table_ctx = "\n".join(table_lines) if table_lines else "  (no Iceberg telemetry available)"
+
+        # Cross-table redundancy
+        redundancy  = size_full.get('cross_table_redundancy', {})
+        storage_agg = size_full.get('aggregate_storage_costs', {})
+
+        # Glue metrics summary
+        glue_metrics = context.get('glue_metrics', {})
+        metrics_lines: List[str] = []
+        if glue_metrics:
+            for metric, values in glue_metrics.items():
+                if values:
+                    metrics_lines.append(
+                        f"  {metric}: min={min(values):.2f} max={max(values):.2f} "
+                        f"last={values[-1]:.2f}"
+                    )
+        metrics_ctx = "\n".join(metrics_lines) if metrics_lines else "  (no runtime metrics)"
+
+        # Rule-based pre-scan (fast, gives LLM a starting point)
+        rule = self._analyze_rule_based(input_data, context)
+        rule_anti  = [{"pattern": p["pattern"], "severity": p["severity"],
+                        "lines": p["line_numbers"]}
+                       for p in rule.analysis.get('anti_patterns', [])]
+        rule_opts  = [o["category"] for o in rule.analysis.get('optimizations', [])]
+
+        # Numbered script
+        numbered = "\n".join(
+            f"{i+1:4d}  {ln}"
+            for i, ln in enumerate(input_data.script_content.splitlines())
+        )
+
+        return f"""You are an expert AWS Glue / PySpark cost-optimization engineer.
+Perform a **size-aware line-by-line code review** — every finding must reference the
+actual Iceberg table telemetry provided below.
+
+═══════════════════════════════════════════════════════════════
+SIZING TELEMETRY  (from SizeAnalyzerAgent — Athena $files data)
+═══════════════════════════════════════════════════════════════
+{table_ctx}
+
+CROSS-TABLE REDUNDANCY:
+{json.dumps(redundancy, indent=2) if redundancy else "  (none detected)"}
+
+AGGREGATE STORAGE:  live={storage_agg.get('total_live_gb', 0):.1f} GB  \
+dead={storage_agg.get('total_dead_gb', 0):.1f} GB  \
+monthly_cost=${storage_agg.get('total_monthly_usd', 0):.2f}
+
+═══════════════════════════════════════════════════════════════
+GLUE RUNTIME METRICS  (CloudWatch)
+═══════════════════════════════════════════════════════════════
+{metrics_ctx}
+
+═══════════════════════════════════════════════════════════════
+RULE-BASED PRE-SCAN  (deterministic, fast)
+═══════════════════════════════════════════════════════════════
+Anti-patterns: {json.dumps(rule_anti, indent=2)}
+Missed optimizations: {json.dumps(rule_opts, indent=2)}
+
+═══════════════════════════════════════════════════════════════
+PYSPARK SCRIPT  (with line numbers)
+═══════════════════════════════════════════════════════════════
+```python
+{numbered}
+```
+
+═══════════════════════════════════════════════════════════════
+ANALYSIS GUIDELINES  — 8 dimensions
+═══════════════════════════════════════════════════════════════
+
+1. ANTI-PATTERNS × TABLE SIZE
+   • tiny_file_count > 10k on a read → each file = 1 task → executor overload
+   • collect() / toPandas() on a table > 1 GB → guaranteed driver OOM
+   • crossJoin on any table > 100 MB → exponential data explosion
+
+2. JOIN ANALYSIS × ACTUAL TABLE GB
+   • table_size_gb < 0.5 GB → add broadcast() hint → eliminate shuffle entirely
+   • table_size_gb > 8 GB → warn: broadcast risks OOM on the driver
+   • skew_ratio > 3x on the join key → recommend salting or AQE skewJoin hint
+
+3. PARTITION SKEW CORRELATION
+   • If skew_ratio > 5x AND the skewed column is a join/groupBy key → straggler tasks
+   • Recommend df.repartition(n, "skewed_col") BEFORE the heavy operation
+
+4. ICEBERG-SPECIFIC CODE PATTERNS
+   • tiny_file_count > 10k → recommend OPTIMIZE … REWRITE DATA USING bin-pack in Athena
+   • snapshot_count > 30 → recommend VACUUM / expire_snapshots() call before job
+   • write_amplification > 5x → incremental read (startSnapshotId) saves 80%+ I/O
+   • No pushdown filter on partitioned Iceberg table → full table scan
+
+5. CACHE / PERSIST RECOMMENDATIONS
+   • Same table > 1 GB reused 2+ times → cache() and unpersist() after last use
+   • table_size_gb < 0.2 GB → MEMORY_ONLY storage level
+   • table_size_gb 0.2–2 GB → MEMORY_AND_DISK
+   • table_size_gb > 2 GB → DISK_ONLY or avoid caching
+
+6. SPARK CONFIG CALIBRATED TO ACTUAL DATA SIZE
+   • shuffle.partitions = max(200, round(total_size_gb * 3))
+   • autoBroadcastJoinThreshold = 10% of executor memory
+   • executor.memory: 2× max single-partition size with 20% safety margin
+
+7. WINDOW FUNCTION OPTIMIZATION × SKEW
+   • Multiple Window.partitionBy on the same column → consolidate into one window spec
+   • Window on a column with skew_ratio > 5x → single executor holds the full skewed partition → OOM risk
+
+8. SCRIPT-TO-TELEMETRY HOTSPOT MAPPING
+   • Identify the SINGLE most expensive line: which table read/join dominates compute
+   • Connect dots explicitly: "line N reads TABLE (X files, Y GB) → line M joins it → Z shuffle overhead"
+   • If cold_data_estimate_gb > 0 and no date filter present → cold scan waste
+
+Respond ONLY with a JSON object:
+{{
+  "anti_patterns": [
+    {{"pattern": "name", "severity": "critical|high|medium|low", "cost_impact": "...",
+      "description": "...", "fix": "...", "line_numbers": [...]}}
+  ],
+  "anti_pattern_count": <int>,
+  "critical_issues": <int>,
+  "complexity": {{
+    "join_count": <int>, "window_function_count": <int>, "aggregation_count": <int>,
+    "complexity_score": <0-100>, "skew_risk_factors": [...]
+  }},
+  "optimizations": [
+    {{"category": "...", "recommendation": "...", "implementation": "...",
+      "estimated_savings_percent": <int>, "effort": "low|medium|high"}}
+  ],
+  "spark_configs": [
+    {{"config": "...", "current_value": "...", "recommended_value": "...", "reason": "..."}}
+  ],
+  "skew_mitigations": [...],
+  "iceberg_specific": [
+    {{"action": "OPTIMIZE|VACUUM|incremental_read|pushdown", "table": "...",
+      "reason": "...", "sql_or_code": "..."}}
+  ],
+  "line_hotspots": [
+    {{"line": <int>, "severity": "critical|high|medium|low",
+      "description": "...", "table": "...", "size_context": "...", "fix": "..."}}
+  ],
+  "top_expensive_line": {{"line": <int>, "reason": "...", "table": "...", "size_gb": <float>}},
+  "optimization_score": <0-100>,
+  "estimated_cost_reduction_percent": <int>,
+  "code_quality_score": <0-100>,
+  "recommendations": [
+    {{"priority": "P0|P1|P2|P3", "category": "code|config|iceberg|storage",
+      "title": "...", "description": "...", "implementation": "...",
+      "lines": [<int>], "estimated_savings_percent": <int>,
+      "size_evidence": "quote the specific telemetry that triggered this rec"}}
+  ]
+}}
+"""
 
     def _detect_anti_patterns(self, code: str, lines: List[str]) -> List[Dict]:
         """Detect anti-patterns in code."""

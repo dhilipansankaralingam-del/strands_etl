@@ -50,7 +50,8 @@ class CostOptimizationOrchestrator:
         source_tables: List[Dict],
         processing_mode: str = 'full',
         current_config: Dict = None,
-        additional_context: Dict = None
+        additional_context: Dict = None,
+        glue_metrics: Dict = None
     ) -> Dict[str, Any]:
         """
         Analyze a single PySpark script.
@@ -79,6 +80,10 @@ class CostOptimizationOrchestrator:
         script_content = script_file.read_text()
 
         # Build input
+        merged_context = {**(additional_context or {})}
+        if glue_metrics:
+            merged_context['glue_metrics'] = glue_metrics
+
         input_data = AnalysisInput(
             script_path=script_path,
             script_content=script_content,
@@ -86,17 +91,20 @@ class CostOptimizationOrchestrator:
             processing_mode=processing_mode,
             current_config=current_config or {},
             job_name=script_file.stem,
-            additional_context=additional_context or {}
+            additional_context=merged_context
         )
 
         # Phase 1: Size Analysis (runs first)
         size_result = self.agents['size_analyzer'].analyze(input_data, {})
 
-        # Build context for next agents
+        # Build context for next agents — full size analysis passed so LLM agents can
+        # correlate actual table telemetry (file counts, skew, Iceberg health) with code patterns
         context = {
             'effective_size_gb': size_result.analysis.get('effective_size_gb', 100),
             'skew_risk_score': size_result.analysis.get('skew_risk_score', 20),
-            'join_amplification_factor': size_result.analysis.get('join_amplification_factor', 1.0)
+            'join_amplification_factor': size_result.analysis.get('join_amplification_factor', 1.0),
+            'size_analyzer_full': size_result.analysis,
+            'glue_metrics': glue_metrics or {},
         }
 
         # Phase 2: Code Analysis and Resource Allocation (can run in parallel)
@@ -122,11 +130,15 @@ class CostOptimizationOrchestrator:
             'anti_pattern_count': code_result.analysis.get('anti_pattern_count', 0)
         })
 
-        # Phase 3: Recommendations (needs all previous results)
+        # Phase 3: Recommendations — receives full outputs from ALL prior agents so the
+        # LLM prompt can detect compound issues (e.g., tiny files + broadcast = OOM)
         full_context = {
             'size_analyzer': size_result.analysis,
+            'size_analyzer_full': size_result.analysis,
             'code_analyzer': code_result.analysis,
-            'resource_allocator': resource_result.analysis
+            'code_analyzer_full': code_result.analysis,
+            'resource_allocator': resource_result.analysis,
+            'glue_metrics': glue_metrics or {},
         }
         full_context.update(context)
 
