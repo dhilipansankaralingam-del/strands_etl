@@ -1546,6 +1546,13 @@ def apply_recommendations_to_script(
         region   = DEFAULT_REGION,
     )
     tables = _state["detected_tables"].get(script_path, [])
+
+    # Pull full cross-agent outputs stored by analyze_pyspark_script
+    agents_block   = result.get("agents", {})
+    size_full      = agents_block.get("size_analyzer",  {}).get("analysis", {})
+    code_full      = agents_block.get("code_analyzer",  {}).get("analysis", {})
+    all_recs       = result.get("all_recommendations", [])
+
     out    = agent.apply(
         script_path               = script_path,
         script_content            = script_content,
@@ -1555,6 +1562,9 @@ def apply_recommendations_to_script(
         current_workers           = current_workers,
         current_worker_type       = current_worker_type,
         current_executor_memory_gb= executor_memory_gb,
+        size_analyzer_full        = size_full,
+        code_analyzer_full        = code_full,
+        all_recommendations       = all_recs,
     )
 
     if not out["success"]:

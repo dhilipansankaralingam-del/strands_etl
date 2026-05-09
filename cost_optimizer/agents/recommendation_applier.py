@@ -33,6 +33,7 @@ LLM mode
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import textwrap
 from typing import Any, Dict, List, Optional, Tuple
@@ -132,6 +133,9 @@ class RecommendationApplierAgent(CostOptimizerAgent):
         current_workers: int = 10,
         current_worker_type: str = "G.2X",
         current_executor_memory_gb: float = 4.0,
+        size_analyzer_full: Optional[Dict[str, Any]] = None,
+        code_analyzer_full: Optional[Dict[str, Any]] = None,
+        all_recommendations: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """
         Apply recommendations to *script_content*.
@@ -166,6 +170,9 @@ class RecommendationApplierAgent(CostOptimizerAgent):
                 "current_workers":            current_workers,
                 "current_worker_type":        current_worker_type,
                 "current_executor_memory_gb": current_executor_memory_gb,
+                "size_analyzer_full":         size_analyzer_full or {},
+                "code_analyzer_full":         code_analyzer_full or {},
+                "all_recommendations":        all_recommendations or [],
             },
         )
         return {
@@ -280,82 +287,208 @@ class RecommendationApplierAgent(CostOptimizerAgent):
     # ─── LLM prompt override ──────────────────────────────────────────────────
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
-        import json
-        analysis    = context.get("analysis_result", {})
-        raw_metrics = context.get("glue_metrics", {})
-        cur_workers = context.get("current_workers", 10)
-        cur_type    = context.get("current_worker_type", "G.2X")
-        cur_mem_gb  = context.get("current_executor_memory_gb", 4.0)
+        analysis       = context.get("analysis_result",    {})
+        raw_metrics    = context.get("glue_metrics",       {})
+        size_full      = context.get("size_analyzer_full", {})
+        code_full      = context.get("code_analyzer_full", {})
+        all_recs       = context.get("all_recommendations", [])
+        cur_workers    = context.get("current_workers",    10)
+        cur_type       = context.get("current_worker_type", "G.2X")
+        cur_mem_gb     = context.get("current_executor_memory_gb", 4.0)
 
+        # ── Per-table Iceberg section ─────────────────────────────────────────
+        table_findings = size_full.get("table_findings", {})
+        iceberg_lines: List[str] = []
+        iceberg_action_lines: List[str] = []
+        for tbl, findings in table_findings.items():
+            fs   = findings.get("file_stats",              {})
+            ih   = findings.get("iceberg_health",          {})
+            cold = findings.get("cold_partition_analysis", {})
+            sc   = findings.get("storage_cost",            {})
+
+            tiny     = fs.get("tiny_file_count",   0)
+            avg_mb   = fs.get("avg_file_mb",       0)
+            snaps    = ih.get("snapshot_count",    0)
+            write_amp = ih.get("write_amplification", 1.0)
+            cold_gb  = cold.get("cold_data_estimate_gb", 0)
+            waste_pct = sc.get("waste_pct",         0)
+
+            iceberg_lines.append(
+                f"  {tbl}: tiny_files={tiny:,} avg={avg_mb:.1f}MB "
+                f"snapshots={snaps} write_amp={write_amp:.1f}x "
+                f"cold={cold_gb:.0f}GB waste={waste_pct:.0f}%"
+            )
+            # Derive code-level actions from Iceberg health
+            if tiny > 10_000:
+                iceberg_action_lines.append(
+                    f"  - Before reading {tbl}: add comment "
+                    f"'# PRE-CONDITION: run OPTIMIZE {tbl} REWRITE DATA USING bin-pack in Athena "
+                    f"({tiny:,} tiny files, avg {avg_mb:.1f} MB — expect {tiny:,} tasks without OPTIMIZE)'"
+                )
+            if snaps > 30:
+                iceberg_action_lines.append(
+                    f"  - Add comment near {tbl} read: "
+                    f"'# PRE-CONDITION: run CALL system.expire_snapshots(\\'{tbl}\\', "
+                    f"TIMESTAMP \\'{{NOW - 7d}}\\') — {snaps} snapshots cause {write_amp:.1f}x I/O overhead'"
+                )
+            if cold_gb > 50:
+                iceberg_action_lines.append(
+                    f"  - Add date pushdown filter on {tbl} read: "
+                    f"filter out partitions older than 90 days "
+                    f"({cold_gb:.0f} GB cold data scanned unnecessarily)"
+                )
+            if write_amp > 5:
+                iceberg_action_lines.append(
+                    f"  - Remove any coalesce(1)/repartition(1) before writing to {tbl}: "
+                    f"write_amplification={write_amp:.1f}x means Iceberg creates 1 manifest "
+                    f"per write-file; bin-pack OPTIMIZE should handle compaction instead"
+                )
+
+        iceberg_ctx = "\n".join(iceberg_lines)   or "  (no Iceberg telemetry)"
+        action_ctx  = "\n".join(iceberg_action_lines) or "  (none)"
+
+        # ── Code line hotspots ────────────────────────────────────────────────
+        hotspots = code_full.get("line_hotspots", [])
+        top_line = code_full.get("top_expensive_line", {})
+        iceberg_specific = code_full.get("iceberg_specific", [])
+
+        hotspot_ctx = json.dumps(hotspots[:10], indent=2) if hotspots else "  (none)"
+        top_ctx     = json.dumps(top_line, indent=2) if top_line else "  (none)"
+        ice_code_ctx = json.dumps(iceberg_specific, indent=2) if iceberg_specific else "  (none)"
+
+        # ── P0/P1 recommendations (highest priority only for the applier) ─────
+        p01_recs = [r for r in all_recs if r.get("priority") in ("P0", "P1")]
+        recs_ctx = json.dumps(p01_recs[:15], indent=2) if p01_recs else "  (none)"
+
+        # ── Glue metrics section ──────────────────────────────────────────────
         metric_section = ""
         if raw_metrics:
+            metric_rows = []
+            for m, vals in raw_metrics.items():
+                if vals:
+                    metric_rows.append(
+                        f"  {m}: min={min(vals):.2f} max={max(vals):.2f} "
+                        f"last={vals[-1]:.2f} "
+                        f"trend={'↑' if vals[-1] > vals[0] else '↓'}"
+                    )
             metric_section = f"""
-## Glue CloudWatch Metrics
-Current: {cur_workers} × {cur_type} ({cur_mem_gb} GB executor memory)
-```json
-{json.dumps(raw_metrics, indent=2, default=str)}
-```
-Tuning rules – apply ALL that match:
-| Metric                                  | Threshold | Action                                           |
-|-----------------------------------------|-----------|--------------------------------------------------|
-| glue.ALL.jvm.heap.usage                 | > 0.80    | increase executor.memory; add G1GC JVM options   |
-| glue.ALL.jvm.heap.usage                 | < 0.50    | reduce executor.memory to reclaim budget          |
-| glue.ALL.system.cpuSystemLoad           | < 0.30    | reduce executor.cores; enable dynamic allocation |
-| glue.ALL.system.cpuSystemLoad           | > 0.80    | add workers; reduce executor.cores per worker    |
-| glue.driver.workerutilized              | < 70% max | shrink number_of_workers                         |
-| glue.driver.workerutilized              | > 95% max | increase number_of_workers                       |
-| shuffle bytes > 10 GB                   | -         | enable shuffle service; increase reducer buffers  |
-| skewed stages (max/median ratio > 5)    | -         | tighten skewJoin thresholds; inject salting hints |
-| repeated full-table scans in loop       | -         | cache() the DataFrame before the loop            |
-"""
-        return f"""
-You are a Senior PySpark Engineer.  Apply EVERY optimization recommendation to
-the script below and return a complete, runnable modified version plus a changelog.
+══════════════════════════════════════════════════════
+GLUE RUNTIME METRICS  ({cur_workers} × {cur_type}  {cur_mem_gb} GB executor memory)
+══════════════════════════════════════════════════════
+{chr(10).join(metric_rows)}
 
-## Original Script  ({input_data.script_path})
+Metric-to-code mapping rules (apply ALL that match):
+  heap > 0.80  → increase executor.memory; inject G1GC JVM options; add cache.unpersist()
+  heap < 0.50  → reduce executor.memory; add comment "# executor memory can be halved"
+  cpu_workers < 0.30 mid-job → executor CPU idle = SKEW; add .repartition() before heaviest join
+  cpu_workers drops after peak → late-stage skew; add AQE skewJoin configs + salting comment
+  workerutilized peak < 70%  → add comment "# Job config: reduce workers to {{peak_utilized}}"
+  workerutilized > 95%       → add comment "# Job config: increase workers — all executors busy"
+  shuffle heavy              → inject shuffle service + reducer buffers
+"""
+
+        return f"""You are a Senior PySpark Engineer performing a COMPLETE, HOLISTIC rewrite of the script below.
+Your job is to produce a single, runnable optimized Python file with ALL issues fixed.
+You can see findings from EVERY analysis layer — fix ALL of them.
+
+══════════════════════════════════════════════════════
+ORIGINAL SCRIPT  ({input_data.script_path})
+══════════════════════════════════════════════════════
 ```python
 {input_data.script_content}
 ```
 
-## Analysis Recommendations
-```json
-{json.dumps(analysis, indent=2, default=str)}
-```
+══════════════════════════════════════════════════════
+ICEBERG TABLE HEALTH  (from SizeAnalyzerAgent — actual $files data)
+══════════════════════════════════════════════════════
+Per-table summary:
+{iceberg_ctx}
 
-## Source Tables
-```json
-{json.dumps(input_data.source_tables, indent=2)}
-```
+Required Iceberg-driven code changes:
+{action_ctx}
 {metric_section}
-## Required Changes – apply ALL
-1. Inject AQE / KryoSerializer / shuffle Spark configs into SparkSession builder.
-2. If Glue metrics supplied: tune executor.memory, memoryOverhead, memory.fraction,
-   dynamicAllocation, executor.cores, G1GC JVM options.
-3. Replace `.repartition(1)` → `.coalesce(1)`.
-4. Add `broadcast()` hints for small tables (< 500 k rows) inside `.join()`.
-5. Add `.cache()` before DataFrames used by ≥ 2 actions.
-6. Add `.coalesce(N)` before write operations lacking one.
-7. Replace UDFs with pyspark.sql.functions equivalents where feasible.
-8. Apply every `code_refactoring` entry from the analysis JSON (fuzzy-match).
-9. Apply every `anti_patterns[*].fix_code` entry (replace at detected lines).
-10. Apply every `spark_configs[*]` entry (inject into config block).
-11. For each `optimizations[*]` narrative: add an inline TODO comment where relevant.
-12. Add key-salting comment + AQE skewJoin tuning if skew is detected.
-13. Set `spark.locality.wait=0` when reading from S3.
-14. Add G1GC JVM options when heap usage is high.
+══════════════════════════════════════════════════════
+CODE HOTSPOTS  (from CodeAnalyzerAgent — line-level analysis)
+══════════════════════════════════════════════════════
+Most expensive line:
+{top_ctx}
 
-## Output Format
-Return ONLY a JSON object:
+Line hotspots (fix these first):
+{hotspot_ctx}
+
+Iceberg-specific code patterns detected:
+{ice_code_ctx}
+
+══════════════════════════════════════════════════════
+P0/P1 RECOMMENDATIONS  (must fix — highest priority)
+══════════════════════════════════════════════════════
+{recs_ctx}
+
+══════════════════════════════════════════════════════
+FULL ANALYSIS (fallback / additional context)
+══════════════════════════════════════════════════════
+```json
+{json.dumps(analysis, indent=2, default=str)[:3000]}
+```
+
+══════════════════════════════════════════════════════
+REQUIRED CHANGES — apply ALL in this order
+══════════════════════════════════════════════════════
+
+LAYER 1 — Spark configuration (inject into SparkSession builder)
+  1. AQE enabled + coalescePartitions + skewJoin + localShuffleReader
+  2. KryoSerializer + kryoserializer.buffer.max=512m
+  3. shuffle.partitions calibrated to data size (see Iceberg table GB above)
+  4. autoBroadcastJoinThreshold tuned to 10% of executor memory
+  5. locality.wait=0 for S3-backed jobs
+  If Glue metrics supplied: tune executor.memory, memoryOverhead, memory.fraction,
+  dynamicAllocation, executor.cores, G1GC JVM options based on metric rules above.
+
+LAYER 2 — Iceberg table pre-conditions (add comments/code BEFORE each table read)
+  6. If tiny_file_count > 10k: add # PRE-CONDITION: OPTIMIZE comment above the read
+  7. If snapshot_count > 30: add # PRE-CONDITION: expire_snapshots comment above the read
+  8. If cold_gb > 50 and no date filter: add .filter("partition_col >= date_sub(current_date(),90)")
+  9. If write_amplification > 5: remove coalesce(1)/repartition(1) before Iceberg writes
+
+LAYER 3 — Code pattern fixes (at specific lines from hotspot analysis)
+  10. Fix each line_hotspot: apply the "fix" field exactly at the referenced line
+  11. Apply iceberg_specific[] actions (OPTIMIZE comment, expire_snapshots, incremental reads)
+  12. Replace .repartition(1) → .coalesce(1)
+  13. Add broadcast() for small tables (< 500k rows or flagged in source_tables)
+  14. Add .cache() before DataFrames used by ≥ 2 actions; add .unpersist() after last use
+  15. Add .coalesce(N) before write operations — N = ceil(total_output_gb * 4)
+  16. Replace UDFs with pyspark.sql.functions equivalents; add SUGGESTION comment if not possible
+  17. Add WARNING comment above every .collect() / .toPandas() call
+
+LAYER 4 — Skew mitigation
+  18. If skew_ratio > 5 on join key: add key-salting comment + tighter AQE skewJoin thresholds
+  19. If workerutilized drops mid-job: add .repartition(n, skewed_col) before the join
+
+LAYER 5 — Long-running job specific
+  20. If same DataFrame reused in a loop: add .cache() before loop, .unpersist() after
+  21. If window function on high-skew column: add comment about OOM risk + recommend AQE
+  22. Add worker count comment based on workerutilized metric:
+      "# Glue job config: set --number-of-workers to <recommended>"
+
+Return ONLY a JSON object — no markdown, no explanation outside JSON:
 {{
-  "modified_script": "<complete Python source as single string>",
+  "modified_script": "<COMPLETE Python source — every line — as a single string. Must be runnable.>",
   "changelog": [
-    {{"line": <int>, "fix": "<type>", "description": "<what changed and why>"}}
+    {{
+      "line": <int or null>,
+      "fix": "<type: spark_config|iceberg_precheck|hotspot_fix|broadcast|cache|coalesce|skew|loop_cache|udf|worker_sizing>",
+      "description": "<exactly what changed and WHY — reference the metric or telemetry that triggered it>"
+    }}
   ],
   "worker_recommendation": {{
     "recommended_workers": <int>,
     "recommended_type": "<G.1X|G.2X|G.4X|G.8X>",
-    "reason": "<one sentence>"
-  }}
+    "monthly_saving_usd": <float>,
+    "reason": "<one sentence citing the specific metric>"
+  }},
+  "iceberg_precheck_commands": [
+    "<Athena SQL: OPTIMIZE / VACUUM / expire_snapshots to run before this Glue job>"
+  ]
 }}
 """
 
