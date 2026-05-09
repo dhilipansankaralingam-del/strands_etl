@@ -19,11 +19,18 @@ try:
 except ImportError:
     _HAS_SCIENTIFIC = False
 
+try:
+    from .pipeline_tools import RECOMMENDATIONS_AGENT_TOOLS as _RECO_AGENT_TOOLS
+except ImportError:
+    _RECO_AGENT_TOOLS = []
+
 
 class RecommendationsAgent(CostOptimizerAgent):
     """Synthesizes findings into prioritized recommendations."""
 
-    AGENT_NAME = "recommendations"
+    AGENT_NAME     = "recommendations"
+    AGENT_TOOLS    = _RECO_AGENT_TOOLS   # rank_recommendations_by_impact, detect_cost_anomaly, detect_metric_periodicity
+    MAX_ITERATIONS = 3                   # Pareto rank → anomaly check → periodicity → final plan
 
     # Engineering cost for ROI calculation
     ENGINEERING_HOURLY_RATE = 150  # USD
@@ -167,9 +174,27 @@ class RecommendationsAgent(CostOptimizerAgent):
         sci = self._run_scientific_synthesis(context, rule_result.recommendations)
         sci_ctx = json.dumps(sci, indent=2, default=str) if sci else "  (not available)"
 
+        tool_guidance = """
+TOOLS AVAILABLE (call in this order — each builds on the last):
+  rank_recommendations_by_impact(recommendations)
+      → CALL FIRST, ALWAYS. Pass the full list from RULE-BASED PRE-COMPUTED
+        RECOMMENDATIONS. Returns Pareto front (top quick-wins). Use the ranking
+        to order your final implementation roadmap.
+  detect_cost_anomaly(historical_values, current_value, metric_label)
+      → CALL IF glue_metrics contains any metric with ≥ 5 data points.
+        Use the last value as current_value and the rest as historical_values.
+        An is_anomaly=True result means this run is statistically abnormal.
+  detect_metric_periodicity(metric_time_series, sample_interval_minutes)
+      → CALL IF glue_metrics has a metric with ≥ 8 data points.
+        Use the result to determine whether spikes are periodic (schedule-based)
+        or structural (skew/OOM). This changes the recommended fix category.
+After calling tools, synthesize ALL findings and respond with the JSON object below.
+""" if self.AGENT_TOOLS else ""
+
         return f"""You are a senior AWS cost-optimization architect.
 Synthesize findings from 4 analysis agents into a **holistic, prioritized** optimization plan.
 Your unique value is detecting COMPOUND issues that no single agent sees alone.
+{tool_guidance}
 
 ══════════════════════════════════════════════════════════════
 JOB METADATA

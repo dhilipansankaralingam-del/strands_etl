@@ -17,11 +17,18 @@ try:
 except ImportError:
     _HAS_SCIENTIFIC = False
 
+try:
+    from .pipeline_tools import CODE_AGENT_TOOLS as _CODE_AGENT_TOOLS
+except ImportError:
+    _CODE_AGENT_TOOLS = []
+
 
 class CodeAnalyzerAgent(CostOptimizerAgent):
     """Analyzes PySpark code for optimization opportunities."""
 
-    AGENT_NAME = "code_analyzer"
+    AGENT_NAME     = "code_analyzer"
+    AGENT_TOOLS    = _CODE_AGENT_TOOLS   # compute_amdahls_ceiling, compute_shuffle_partitions
+    MAX_ITERATIONS = 2                   # detect serial ops → Amdahl; detect shuffle bottleneck → Little's Law
 
     # Anti-patterns with severity and cost impact
     ANTI_PATTERNS = {
@@ -330,9 +337,22 @@ class CodeAnalyzerAgent(CostOptimizerAgent):
             for i, ln in enumerate(input_data.script_content.splitlines())
         )
 
+        tool_guidance = """
+TOOLS AVAILABLE (call selectively — only when the code evidence warrants it):
+  compute_amdahls_ceiling(serial_fraction_pct, current_workers)
+      → CALL IF collect(), toPandas(), show(), or iterate_collect() appear in the script.
+        Estimate serial_fraction_pct = count_of_serial_ops × 8, capped at 65.
+        current_workers comes from JOB METADATA below.
+  compute_shuffle_partitions(avg_task_duration_sec, num_executors)
+      → CALL IF Glue runtime metrics include a task-duration metric (look in
+        GLUE RUNTIME METRICS section). num_executors = workers × vCPU_per_worker.
+After calling any tools, respond with the JSON object specified below.
+""" if self.AGENT_TOOLS else ""
+
         return f"""You are an expert AWS Glue / PySpark cost-optimization engineer.
 Perform a **size-aware line-by-line code review** — every finding must reference the
 actual Iceberg table telemetry provided below.
+{tool_guidance}
 
 ═══════════════════════════════════════════════════════════════
 SIZING TELEMETRY  (from SizeAnalyzerAgent — Athena $files data)

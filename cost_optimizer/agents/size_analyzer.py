@@ -46,6 +46,11 @@ try:
 except ImportError:
     _HAS_SCIENTIFIC = False
 
+try:
+    from .pipeline_tools import SIZE_AGENT_TOOLS as _SIZE_AGENT_TOOLS
+except ImportError:
+    _SIZE_AGENT_TOOLS = []
+
 # ── Thresholds ────────────────────────────────────────────────────────────────
 _TINY_FILE_MB      = 10
 _SMALL_FILE_MB     = 128
@@ -73,7 +78,9 @@ _COMPRESSION_EXCEL = 0.10
 class SizeAnalyzerAgent(CostOptimizerAgent):
     """Analyzes data sizes and all performance-impacting table characteristics."""
 
-    AGENT_NAME = "size_analyzer"
+    AGENT_NAME     = "size_analyzer"
+    AGENT_TOOLS    = _SIZE_AGENT_TOOLS   # compute_skew_model, compute_growth_forecast, compute_bloom_filter_value
+    MAX_ITERATIONS = 3                   # up to 3 tool rounds: skew → growth → bloom
 
     BYTES_PER_ROW = {
         "narrow":    200,
@@ -319,10 +326,25 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
         sci = self._run_scientific_analysis(rule_tables)
         sci_json = json.dumps(sci, indent=2, default=str) if sci.get("per_table") else "  (insufficient data)"
 
+        tool_guidance = """
+━━━━ TOOLS AVAILABLE (call selectively — only when evidence warrants) ━━━━━━━━
+  compute_skew_model(partition_sizes, table_name)
+      → CALL IF skew_ratio > 3 in any table's file_stats.
+        Pass a synthetic power-law array if raw partition sizes are unavailable:
+        [avg * skew_ratio^((n-k)/(n-1)) for k in 1..partition_count]
+  compute_growth_forecast(table_name, current_size_gb, daily_growth_gb)
+      → CALL IF growth_gb_per_day > 0 for any table (from iceberg_telemetry).
+  compute_bloom_filter_value(table_name, table_size_gb, join_selectivity_pct)
+      → CALL FOR every table > 1 GB that appears in a JOIN in the script AND
+        is NOT a broadcast candidate (is_broadcast_candidate = false).
+After calling any tools, respond with the JSON object specified below.
+""" if self.AGENT_TOOLS else ""
+
         return f"""
 You are a Senior Data Platform Engineer specializing in Apache Iceberg, AWS Glue,
 and PySpark performance optimization.  Analyze the table telemetry below and the
 PySpark script to produce a comprehensive sizing and health report.
+{tool_guidance}
 
 ━━━━ SCRIPT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 File: {input_data.script_path}

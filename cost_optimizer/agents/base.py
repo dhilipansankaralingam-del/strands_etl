@@ -295,6 +295,13 @@ class CostOptimizerAgent(ABC):
     DEFAULT_MODEL  = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
     DEFAULT_REGION = "us-west-2"
 
+    # Subclasses set these to enable the agentic tool-calling loop.
+    # AGENT_TOOLS = []   → single-shot LLM call (original behaviour)
+    # AGENT_TOOLS = [...] → agentic loop; Claude calls tools as needed
+    # MAX_ITERATIONS caps the loop so cost/latency stay bounded.
+    AGENT_TOOLS:    list = []
+    MAX_ITERATIONS: int  = 1   # 1 = single-shot; >1 = agentic loop
+
     def __init__(self, use_llm: bool = False, model_id: str = None, region: str = None):
         """
         Initialize agent.
@@ -310,7 +317,19 @@ class CostOptimizerAgent(ABC):
         self._agent   = None
 
     def _get_llm_agent(self):
-        """Lazy load LLM agent."""
+        """
+        Lazy-load the Strands Agent for this pipeline stage.
+
+        When AGENT_TOOLS is non-empty, the Agent is created with tools and
+        max_iterations — enabling an agentic tool-calling loop where Claude
+        decides which tools to invoke based on the evidence it sees.
+
+        When AGENT_TOOLS is empty (default), the Agent is single-shot:
+        one prompt → one response → done (original behaviour).
+
+        The boto3 fallback path (used when strands is not installed) never
+        supports tools; it always does a single-shot call.
+        """
         if self._agent is None and self.use_llm:
             try:
                 from strands import Agent
@@ -318,13 +337,26 @@ class CostOptimizerAgent(ABC):
                 from ..prompts.super_prompts import get_prompt
 
                 bedrock_model = BedrockModel(
-                    model_id       = self.model_id,
-                    region_name    = self.region,
+                    model_id    = self.model_id,
+                    region_name = self.region,
                 )
-                self._agent = Agent(
+                agent_kwargs: dict = dict(
                     model         = bedrock_model,
-                    system_prompt = get_prompt(self.AGENT_NAME)
+                    system_prompt = get_prompt(self.AGENT_NAME),
                 )
+                tools = self.AGENT_TOOLS or []
+                if tools:
+                    agent_kwargs["tools"]          = tools
+                    agent_kwargs["max_iterations"] = self.MAX_ITERATIONS
+                    _log.info(
+                        "[agent/%s] agentic mode: %d tools, max_iterations=%d",
+                        self.AGENT_NAME, len(tools), self.MAX_ITERATIONS,
+                    )
+                else:
+                    _log.info("[agent/%s] single-shot mode (no tools)", self.AGENT_NAME)
+
+                self._agent = Agent(**agent_kwargs)
+
             except ImportError:
                 raise ImportError(
                     "strands-agents not installed. Install with: pip install strands-agents"
@@ -399,10 +431,14 @@ class CostOptimizerAgent(ABC):
         # ── Attempt 1: strands Agent ──────────────────────────────────────────
         _box_divider("CALLING")
         try:
-            print(f"  │ Trying strands-agents SDK ...{' ' * (_BOX_W - 33)}│")
+            tools_info = (
+                f"{len(self.AGENT_TOOLS)} tools, max_iter={self.MAX_ITERATIONS}"
+                if self.AGENT_TOOLS else "single-shot (no tools)"
+            )
+            print(f"  │ Trying strands-agents SDK [{tools_info}]{' ' * max(0, _BOX_W - 38 - len(tools_info))}│")
             agent    = self._get_llm_agent()   # raises ImportError if not installed
             response = agent(prompt)
-            call_type     = "strands"
+            call_type     = "strands" if not self.AGENT_TOOLS else "strands_agentic"
             response_text = str(response)
             print(f"  │ strands call SUCCESS{' ' * (_BOX_W - 24)}│")
             _log.info("[LLM/strands] %s — call succeeded", self.AGENT_NAME)

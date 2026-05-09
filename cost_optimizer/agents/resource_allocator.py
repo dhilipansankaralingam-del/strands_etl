@@ -16,11 +16,18 @@ try:
 except ImportError:
     _HAS_SCIENTIFIC = False
 
+try:
+    from .pipeline_tools import RESOURCE_AGENT_TOOLS as _RESOURCE_AGENT_TOOLS
+except ImportError:
+    _RESOURCE_AGENT_TOOLS = []
+
 
 class ResourceAllocatorAgent(CostOptimizerAgent):
     """Calculates optimal resource allocation and cost savings."""
 
-    AGENT_NAME = "resource_allocator"
+    AGENT_NAME     = "resource_allocator"
+    AGENT_TOOLS    = _RESOURCE_AGENT_TOOLS   # compute_amdahls_ceiling, compute_spot_risk
+    MAX_ITERATIONS = 3                        # Amdahl (from code findings) → Spot risk → final config
 
     # AWS Glue pricing (per DPU-hour)
     GLUE_PRICING = {
@@ -194,8 +201,22 @@ class ResourceAllocatorAgent(CostOptimizerAgent):
         rule_savings  = rule.analysis.get('savings', {})
         rule_platform = rule.analysis.get('platform_comparison', [])
 
+        tool_guidance = """
+TOOLS AVAILABLE (call selectively — use only when evidence justifies it):
+  compute_amdahls_ceiling(serial_fraction_pct, current_workers)
+      → CALL IF code_analyzer scientific_analysis contains amdahls_law results
+        OR if anti_pattern_count > 0 and serial ops (collect/toPandas) are listed.
+        The elbow is the hard cap — never recommend more workers than that.
+  compute_spot_risk(job_duration_hours, instance_type, checkpoint_interval_hours)
+      → CALL IF you are about to recommend EMR Spot or EKS Spot as an alternative.
+        Estimate job_duration_hours from: total_live_gb / 50 (≈ 50 GB/hr for G.2X).
+        Only recommend Spot if net_savings_pct > 30 AND p_survive > 0.75.
+After calling any tools, respond with the JSON object specified below.
+""" if self.AGENT_TOOLS else ""
+
         return f"""You are a Principal Cloud Architect specialising in Spark right-sizing and cost optimisation.
 Determine the OPTIMAL compute configuration using the actual runtime evidence below.
+{tool_guidance}
 Rule-based analysis is provided as a starting point — override it where the evidence justifies.
 
 ══════════════════════════════════════════════════════
