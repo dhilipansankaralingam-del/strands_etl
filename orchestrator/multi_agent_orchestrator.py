@@ -65,13 +65,15 @@ from .agents import (
     create_recommendation_agent,
     create_learning_agent,
     create_scientific_agent,
+    create_memory_agent,
+    create_chatbot_agent,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 _ORCHESTRATOR_SYSTEM_PROMPT = """
-You are a **Master ETL Orchestrator Agent** coordinating 16 specialist sub-agents in a 5-phase pipeline.
+You are a **Master ETL Orchestrator Agent** coordinating 18 specialist sub-agents in a 5-phase pipeline.
 
 Your responsibilities:
 1. Delegate analysis tasks to specialist agents via the provided tools
@@ -133,7 +135,7 @@ class MultiAgentOrchestrator:
         self.region      = region
         self.max_workers = max_workers
 
-        logger.info("Initialising 16 specialist agents …")
+        logger.info("Initialising 18 specialist agents …")
 
         # ── Phase 1 ────────────────────────────────────────────────────────────
         self._sizing_agent             = create_sizing_agent(model_id, region)
@@ -161,22 +163,26 @@ class MultiAgentOrchestrator:
         self._recommendation_agent     = create_recommendation_agent(model_id, region)
         self._learning_agent           = create_learning_agent(model_id, region)
 
+        # ── Cross-cutting (available in all phases) ────────────────────────────
+        self._memory_agent             = create_memory_agent(model_id, region)
+        self._chatbot_agent            = create_chatbot_agent(model_id, region)
+
         # ── Wrap every specialist as a tool for the OrchestratorAgent ──────────
         self._tools = [
             agent_as_tool(self._sizing_agent,             name="sizing_agent",
-                          description="Analyse data volumes, skew risk, partition efficiency"),
+                          description="Analyse data volumes, skew risk, partition efficiency, Iceberg snapshot health, file distribution"),
             agent_as_tool(self._dq_agent,                 name="data_quality_agent",
-                          description="Run data quality checks and generate DQ rules"),
+                          description="Run data quality checks, generate DQ rules, auto-heal issues, profile column statistics"),
             agent_as_tool(self._compliance_agent,         name="compliance_agent",
                           description="Detect PII columns and generate masking code"),
             agent_as_tool(self._code_analyzer_agent,      name="code_analyzer_agent",
-                          description="Line-by-line PySpark anti-pattern analysis"),
+                          description="Line-by-line PySpark anti-pattern analysis, compound cross-agent issues, Zipf skew patterns"),
             agent_as_tool(self._column_lineage_agent,     name="column_lineage_agent",
                           description="Trace column-level data lineage and render diagrams"),
             agent_as_tool(self._delta_iceberg_agent,      name="delta_iceberg_agent",
                           description="Detect Delta/Iceberg format and emit maintenance SQL"),
             agent_as_tool(self._resource_allocator_agent, name="resource_allocator_agent",
-                          description="Right-size Glue workers and compare cloud costs"),
+                          description="Right-size Glue workers, compare cloud costs, scientific allocation (Amdahl + Little's Law)"),
             agent_as_tool(self._rec_applier_agent,        name="recommendation_applier_agent",
                           description="Apply Spark configs and fix anti-patterns in scripts"),
             agent_as_tool(self._job_generator_agent,      name="job_generator_agent",
@@ -184,7 +190,7 @@ class MultiAgentOrchestrator:
             agent_as_tool(self._execution_agent,          name="execution_agent",
                           description="Submit and monitor AWS Glue or EMR jobs"),
             agent_as_tool(self._glue_metrics_agent,       name="glue_metrics_agent",
-                          description="Fetch and analyse Glue CloudWatch metrics"),
+                          description="Fetch and analyse Glue CloudWatch metrics, derive Spark config overrides"),
             agent_as_tool(self._spark_event_log_agent,    name="spark_event_log_agent",
                           description="Parse Spark event logs for bottlenecks and skew"),
             agent_as_tool(self._script_tester_agent,      name="script_tester_agent",
@@ -192,9 +198,13 @@ class MultiAgentOrchestrator:
             agent_as_tool(self._recommendation_agent,     name="recommendation_agent",
                           description="Synthesise ROI-driven recommendations and implementation plan"),
             agent_as_tool(self._learning_agent,           name="learning_agent",
-                          description="Persist pipeline learning vectors and retrieve history"),
+                          description="Capture learning vectors, anomaly detection, trend forecasting, workload fingerprinting, adaptive thresholds, self-improving context"),
             agent_as_tool(self._scientific_agent,         name="scientific_agent",
-                          description="Run scientific algorithms: Amdahl, Euler growth, Zipf skew, Planck hot-partition, Newton cooling, Monte Carlo cost, Little's Law, Shannon entropy, Bloom filter, Shewhart control charts, Fourier periodicity, Pareto ranking"),
+                          description="14 scientific algorithms: Amdahl, Euler, Zipf, Planck, Newton, Monte Carlo, Little's Law, Shannon, Bloom filter, Shewhart, Fourier, Pareto"),
+            agent_as_tool(self._memory_agent,             name="memory_agent",
+                          description="Semantic long-term memory (mem0 + DynamoDB): store/search insights, summarise agent knowledge, manage memory TTL"),
+            agent_as_tool(self._chatbot_agent,            name="chatbot_agent",
+                          description="ETL knowledge chatbot with local RAG: answer ETL questions, index pipeline runs, recommend from knowledge base"),
         ]
 
         self._orchestrator = Agent(
