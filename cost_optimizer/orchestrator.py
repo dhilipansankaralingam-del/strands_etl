@@ -95,7 +95,12 @@ class CostOptimizationOrchestrator:
         )
 
         # Phase 1: Size Analysis (runs first)
-        size_result = self.agents['size_analyzer'].analyze(input_data, {})
+        # Pass glue_metrics so size_analyzer LLM prompt can correlate runtime
+        # signals (heap pressure, worker utilisation) with table storage findings.
+        size_result = self.agents['size_analyzer'].analyze(
+            input_data,
+            {'glue_metrics': glue_metrics or {}},
+        )
 
         # Build context for next agents — full size analysis passed so LLM agents can
         # correlate actual table telemetry (file counts, skew, Iceberg health) with code patterns
