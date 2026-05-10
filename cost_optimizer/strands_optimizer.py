@@ -482,6 +482,47 @@ FROM {tbl_ref}$manifests
             "empty_manifests":        int(_f("empty_manifests")),
         })
 
+    # ── Cold partitions: per-partition last_updated_at (Iceberg 1.4+) ────────
+    # last_updated_at is NULL on tables created before Iceberg 1.4; the query
+    # filters those out with IS NOT NULL so the aggregate is still meaningful.
+    cold_threshold_days = 700
+    cold_partitions_sql = f"""
+SELECT
+    count(*)                                                              AS total_partition_count,
+    count(CASE WHEN last_updated_at IS NOT NULL
+                AND last_updated_at < (current_timestamp - INTERVAL '{cold_threshold_days}' DAY)
+               THEN 1 END)                                               AS cold_partition_count,
+    round(
+        sum(CASE WHEN last_updated_at IS NOT NULL
+                  AND last_updated_at < (current_timestamp - INTERVAL '{cold_threshold_days}' DAY)
+                 THEN total_size ELSE 0 END
+        ) / (1024.0 * 1024 * 1024), 4)                                  AS cold_size_gb,
+    count(CASE WHEN last_updated_at IS NOT NULL THEN 1 END)              AS partitions_with_ts,
+    date_diff('day',
+        min(CASE WHEN last_updated_at IS NOT NULL
+                      AND last_updated_at < (current_timestamp - INTERVAL '{cold_threshold_days}' DAY)
+                 THEN last_updated_at END),
+        current_timestamp)                                               AS oldest_cold_partition_days
+FROM {tbl_ref}$partitions
+""".strip()
+    cold_rows = _run_athena_query(cold_partitions_sql, database, output_s3, region)
+    if cold_rows:
+        r = cold_rows[0]
+        def _f(k: str, default: float = 0.0) -> float:
+            try: return float(r.get(k) or default)
+            except: return default
+        partitions_with_ts = int(_f("partitions_with_ts"))
+        # Only store if last_updated_at is actually populated (Iceberg 1.4+)
+        if partitions_with_ts > 0:
+            result["cold_partitions"] = {
+                "total_partition_count":   int(_f("total_partition_count")),
+                "cold_partition_count":    int(_f("cold_partition_count")),
+                "cold_size_gb":            _f("cold_size_gb"),
+                "partitions_with_ts":      partitions_with_ts,
+                "oldest_cold_partition_days": int(_f("oldest_cold_partition_days")),
+                "source":                  "iceberg_partitions_last_updated_at",
+            }
+
     return result
 
 

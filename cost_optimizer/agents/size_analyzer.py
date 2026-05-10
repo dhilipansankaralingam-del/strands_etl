@@ -67,12 +67,54 @@ _FILE_CV_WARN      = 1.5
 _BROADCAST_BYTES   = 100 * 1024 * 1024
 _LARGE_TABLE_GB    = 100
 _XLARGE_TABLE_GB   = 500
-_COLD_PARTITION_DAYS = 90        # partitions not touched in 90 days → cold
+_COLD_PARTITION_DAYS = 700       # partitions not touched in 700 days → cold
 _REDUNDANCY_THRESHOLD = 0.80     # 80% shared column names → likely duplicate
-_S3_PRICE_PER_GB_MONTH = 0.023  # standard S3 pricing
-_COMPRESSION_POOR  = 0.60        # ratio > 0.6 = worse than CSV
+_S3_PRICE_PER_GB_MONTH  = 0.023   # standard S3 pricing
+_GLACIER_DA_PER_GB_MONTH = 0.004  # S3 Glacier Deep Archive pricing
+_COMPRESSION_POOR  = 0.60         # ratio > 0.6 = worse than CSV
 _COMPRESSION_GOOD  = 0.30
 _COMPRESSION_EXCEL = 0.10
+
+
+def _build_cold_result(
+    cold_gb: float,
+    cold_count: Optional[int],
+    total_count: Optional[int],
+    oldest_days: int,
+    live_gb: float,
+    now: datetime,
+    source: str,
+) -> Dict:
+    """Shared result builder for all cold-partition strategies."""
+    s3_monthly   = round(cold_gb * _S3_PRICE_PER_GB_MONTH,  2)
+    glac_monthly = round(cold_gb * _GLACIER_DA_PER_GB_MONTH, 2)
+    saving       = round(s3_monthly - glac_monthly, 2)
+    cold_pct     = round(cold_gb / max(live_gb, 0.001) * 100, 1)
+    risk         = "high" if oldest_days > 1095 else "medium" if oldest_days > _COLD_PARTITION_DAYS else "none"
+    result: Dict = {
+        "source":               source,
+        "cold_threshold_days":  _COLD_PARTITION_DAYS,
+        "oldest_cold_days":     oldest_days,
+        "cold_risk":            risk,
+        "estimated_cold_gb":    cold_gb,
+        "cold_pct_of_table":    cold_pct,
+        "s3_monthly_usd":       s3_monthly,
+        "glacier_monthly_usd":  glac_monthly,
+        "potential_saving_usd": saving,
+    }
+    if cold_count is not None:
+        result["cold_partition_count"] = cold_count
+    if total_count is not None:
+        result["total_partition_count"] = total_count
+        result["cold_partition_pct"] = round(cold_count / max(total_count, 1) * 100, 1)
+    if saving > 1:
+        result["recommendation"] = (
+            f"Archive ~{cold_gb:.1f} GB ({cold_pct:.0f}% of table) "
+            f"untouched for >{_COLD_PARTITION_DAYS} days "
+            f"to S3 Glacier Deep Archive. "
+            f"Save ~${saving:.2f}/month (${saving * 12:.0f}/year)."
+        )
+    return result
 
 
 class SizeAnalyzerAgent(CostOptimizerAgent):
@@ -543,7 +585,7 @@ Return a JSON object with this exact structure:
             iceberg_issues = self._iceberg_health_issues(tbl, file_stats)
             growth_info  = self._compute_growth_rate(iceberg_s)
             comp_health  = self._compression_health(tbl, iceberg_s)
-            cold_info    = self._cold_partition_analysis(iceberg_s)
+            cold_info    = self._cold_partition_analysis(iceberg_s, tbl)
             orphan_est   = self._estimate_orphan_files(iceberg_s, file_stats)
             storage_cost = self._table_storage_cost(iceberg_s, file_stats, comp_gb)
 
@@ -690,8 +732,8 @@ Return a JSON object with this exact structure:
     # ── Enhancement 5: Data growth forecasting ────────────────────────────────
 
     def _compute_growth_rate(self, iceberg_s: Dict) -> Dict:
-        oldest = iceberg_s.get("oldest_snapshot_ts", "")
-        newest = iceberg_s.get("newest_snapshot_ts", "")
+        oldest    = iceberg_s.get("oldest_snapshot_ts", "")
+        newest    = iceberg_s.get("newest_snapshot_ts", "")
         total_gb  = iceberg_s.get("total_size_gb", 0.0)
         added_rec = iceberg_s.get("total_added_records", 0)
         if not oldest or not newest or total_gb == 0:
@@ -710,21 +752,38 @@ Return a JSON object with this exact structure:
             if not t0 or not t1:
                 return {}
             span_days = max((t1 - t0).days, 1)
-            # Use added_records as proxy for growth (not total_gb which is current size)
-            bytes_per_row   = 500  # mid-range estimate
-            added_gb        = added_rec * bytes_per_row * 0.25 / (1024 ** 3)  # parquet compressed
-            gb_per_day      = added_gb / span_days
-            days_to_2x      = int(total_gb / gb_per_day) if gb_per_day > 0 else None
-            projected_90d   = round(total_gb + gb_per_day * 90, 2)
-            monthly_cost_now= round(total_gb * _S3_PRICE_PER_GB_MONTH, 2)
-            monthly_cost_90d= round(projected_90d * _S3_PRICE_PER_GB_MONTH, 2)
+
+            # Derive compressed bytes-per-row from $files stats (already fetched).
+            # total_size_gb and total_records both come from the current-snapshot
+            # $files query, so their ratio is the real on-disk bytes per live record.
+            live_records = iceberg_s.get("total_records", 0)
+            if live_records > 0:
+                bytes_per_row_compressed = (total_gb * (1024 ** 3)) / live_records
+            else:
+                # Fallback: use avg_file_size_mb and file_cnt if record count missing
+                avg_mb   = iceberg_s.get("avg_file_size_mb", 128.0)
+                file_cnt = iceberg_s.get("file_cnt", 1)
+                # Estimate ~1M rows per 128 MB parquet file as conservative floor
+                est_rows = max(file_cnt * 1_000_000, 1)
+                bytes_per_row_compressed = (avg_mb * 1024 * 1024 * file_cnt) / est_rows
+
+            # added_records from $snapshots counts every record written (including
+            # later-deleted ones), so growth is slightly over-estimated on CDC tables.
+            added_gb   = added_rec * bytes_per_row_compressed / (1024 ** 3)
+            gb_per_day = added_gb / span_days
+
+            days_to_2x       = int(total_gb / gb_per_day) if gb_per_day > 0 else None
+            projected_90d    = round(total_gb + gb_per_day * 90, 2)
+            monthly_cost_now = round(total_gb    * _S3_PRICE_PER_GB_MONTH, 2)
+            monthly_cost_90d = round(projected_90d * _S3_PRICE_PER_GB_MONTH, 2)
             return {
-                "span_days":            span_days,
-                "gb_per_day":           round(gb_per_day, 3),
-                "days_to_2x":           days_to_2x,
-                "projected_90d_gb":     projected_90d,
-                "monthly_cost_now_usd": monthly_cost_now,
-                "monthly_cost_90d_usd": monthly_cost_90d,
+                "span_days":              span_days,
+                "bytes_per_row_actual":   round(bytes_per_row_compressed, 2),
+                "gb_per_day":             round(gb_per_day, 3),
+                "days_to_2x":             days_to_2x,
+                "projected_90d_gb":       projected_90d,
+                "monthly_cost_now_usd":   monthly_cost_now,
+                "monthly_cost_90d_usd":   monthly_cost_90d,
             }
         except Exception:
             return {}
@@ -834,7 +893,41 @@ Return a JSON object with this exact structure:
 
     # ── Enhancement 9: Hot / cold partition age ───────────────────────────────
 
-    def _cold_partition_analysis(self, iceberg_s: Dict) -> Dict:
+    def _cold_partition_analysis(self, iceberg_s: Dict, tbl: Dict) -> Dict:
+        """
+        Determine cold (unaccessed) data volume using the most accurate source available.
+
+        Strategy priority:
+          1. Iceberg $partitions.last_updated_at  — per-partition timestamps (Iceberg 1.4+)
+          2. Glue get_partitions CreationTime     — for Hive-style non-Iceberg tables
+          3. Date-arithmetic heuristic            — fallback using oldest_snapshot_ts
+        """
+        now      = datetime.utcnow()
+        live_gb  = iceberg_s.get("total_size_gb", tbl.get("size_gb", 0.0))
+        is_iceberg = tbl.get("is_iceberg", False)
+
+        # ── Strategy 1: Iceberg $partitions.last_updated_at ──────────────────
+        cold_partitions = iceberg_s.get("cold_partitions")  # injected by _iceberg_table_stats
+        if cold_partitions is not None:
+            cold_gb      = round(cold_partitions.get("cold_size_gb", 0.0), 2)
+            cold_count   = cold_partitions.get("cold_partition_count", 0)
+            total_parts  = cold_partitions.get("total_partition_count", 1)
+            source       = "iceberg_partitions_last_updated_at"
+            oldest_days  = cold_partitions.get("oldest_cold_partition_days", 0)
+            return _build_cold_result(
+                cold_gb, cold_count, total_parts, oldest_days,
+                live_gb, now, source
+            )
+
+        # ── Strategy 2: Glue get_partitions (Hive-style non-Iceberg tables) ─
+        if not is_iceberg:
+            database   = tbl.get("database", "")
+            table_name = tbl.get("table", tbl.get("name", ""))
+            glue_cold  = self._glue_cold_partitions(database, table_name, live_gb)
+            if glue_cold:
+                return glue_cold
+
+        # ── Strategy 3: date-arithmetic heuristic ────────────────────────────
         oldest = iceberg_s.get("oldest_snapshot_ts", "")
         if not oldest:
             return {}
@@ -845,34 +938,50 @@ Return a JSON object with this exact structure:
                     try: return datetime.strptime(ts[:26], fmt[:len(ts)])
                     except: continue
                 return None
-            t0  = _parse(oldest)
+            t0 = _parse(oldest)
             if not t0:
                 return {}
-            now = datetime.utcnow()
             age_days = (now - t0).days
             if age_days < _COLD_PARTITION_DAYS:
-                return {"oldest_data_age_days": age_days, "cold_risk": "none"}
-            live_gb  = iceberg_s.get("total_size_gb", 0.0)
-            # Rough: data older than 90 days is ~(age-90)/age fraction of total
-            cold_frac    = max(0, (age_days - _COLD_PARTITION_DAYS)) / max(age_days, 1)
-            cold_gb      = round(live_gb * cold_frac, 2)
-            glacier_gb   = cold_gb
-            s3_monthly   = round(cold_gb * _S3_PRICE_PER_GB_MONTH, 2)
-            glac_monthly = round(glacier_gb * 0.004, 2)  # Glacier Deep Archive: $0.004/GB
-            saving        = round(s3_monthly - glac_monthly, 2)
-            return {
-                "oldest_data_age_days":  age_days,
-                "cold_risk":             "high" if age_days > 365 else "medium",
-                "estimated_cold_gb":     cold_gb,
-                "s3_monthly_usd":        s3_monthly,
-                "glacier_monthly_usd":   glac_monthly,
-                "potential_saving_usd":  saving,
-                "recommendation": (
-                    f"Archive ~{cold_gb:.1f} GB older than {_COLD_PARTITION_DAYS} days "
-                    f"to S3 Glacier Deep Archive. "
-                    f"Save ~${saving:.2f}/month (${saving*12:.0f}/year)."
-                ) if saving > 1 else None,
-            }
+                return {"oldest_data_age_days": age_days, "cold_risk": "none",
+                        "source": "heuristic_snapshot_age"}
+            cold_frac = max(0, (age_days - _COLD_PARTITION_DAYS)) / max(age_days, 1)
+            cold_gb   = round(live_gb * cold_frac, 2)
+            return _build_cold_result(
+                cold_gb, None, None, age_days, live_gb, now,
+                "heuristic_snapshot_age"
+            )
+        except Exception:
+            return {}
+
+    def _glue_cold_partitions(self, database: str, table_name: str, live_gb: float) -> Dict:
+        """Use Glue get_partitions CreationTime for Hive-style table cold detection."""
+        if not database or not table_name:
+            return {}
+        try:
+            import boto3
+            glue   = boto3.client("glue")
+            paginator = glue.get_paginator("get_partitions")
+            cutoff = datetime.utcnow()
+            cold_count = 0
+            total_count = 0
+            oldest_days = 0
+            for page in paginator.paginate(DatabaseName=database, TableName=table_name):
+                for part in page.get("Partitions", []):
+                    total_count += 1
+                    created = part.get("CreationTime")
+                    if created:
+                        age = (cutoff - created.replace(tzinfo=None)).days
+                        if age > _COLD_PARTITION_DAYS:
+                            cold_count += 1
+                            oldest_days = max(oldest_days, age)
+            if total_count == 0:
+                return {}
+            cold_gb = round(live_gb * cold_count / total_count, 2)
+            return _build_cold_result(
+                cold_gb, cold_count, total_count, oldest_days,
+                live_gb, cutoff, "glue_partition_creation_time"
+            )
         except Exception:
             return {}
 
