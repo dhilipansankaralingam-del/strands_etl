@@ -1,0 +1,20 @@
+{
+  "_comment": "CloudWatch metrics from a skewed Glue job run — orders + order_items + customers pipeline",
+  "_note": "Time series values are sampled every 5 minutes over a 50-minute job run (10 data points)",
+
+  "glue.ALL.jvm.heap.usage": [0.52, 0.61, 0.74, 0.88, 0.95, 0.98, 0.97, 0.94, 0.91, 0.89],
+
+  "glue.driver.system.cpuSystemLoad": [0.82, 0.88, 0.91, 0.90, 0.86, 0.84, 0.83, 0.85, 0.84, 0.83],
+
+  "glue.ALL.system.cpuSystemLoad":    [0.74, 0.81, 0.85, 0.47, 0.22, 0.16, 0.12, 0.11, 0.10, 0.10],
+
+  "glue.driver.workerutilized":       [20.0, 19.0, 17.0, 11.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+
+  "glue.driver.aggregate.numCompletedStages": [0, 3, 7, 9, 10, 10, 10, 10, 10, 10],
+
+  "glue.driver.ExecutorAllocationManager.executors.numberAllExecutors": [20.0, 22.0, 24.0, 24.0, 22.0, 20.0, 17.0, 14.0, 12.0, 12.0],
+
+  "glue.driver.aggregate.shuffleBytesWritten": [0, 142345678, 3891234567, 9823456789, 12456789012, 12456789012, 12456789012, 12456789012, 12456789012, 12456789012],
+
+  "glue.driver.aggregate.recordsRead": [0, 450000000, 2100000000, 5200000000, 5400000000, 5400000000, 5400000000, 5400000000, 5400000000, 5400000000]
+}
