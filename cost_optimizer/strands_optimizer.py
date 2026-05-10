@@ -598,21 +598,27 @@ def _glue_table_info(
                     record_count = iceberg_meta.get("total_records", record_count)
                     file_count   = iceberg_meta.get("file_cnt", 0)
             else:
-                log.debug(
-                    "Iceberg table %s.%s detected but --athena-output-s3 not set; "
-                    "S3 listing may over-count due to historical snapshot files.",
-                    database, table_name,
+                # No Athena → use Glue table parameters (totalSize / numFiles / numRows).
+                # These are synced by Glue crawlers and are accurate for the current
+                # snapshot.  Do NOT fall back to S3 listing: for Iceberg tables the
+                # S3 prefix contains files from all historical snapshots (logically
+                # deleted but physically still present until expire_snapshots runs),
+                # so an object listing massively over-counts live data.
+                print(
+                    f"  [WARN] Iceberg table {database}.{table_name}: "
+                    f"--athena-output-s3 not set. Using Glue catalog stats "
+                    f"(totalSize={size_bytes:,} B, numRows={record_count:,}). "
+                    f"Pass --athena-output-s3 for accurate $files/$snapshots data."
                 )
-                iceberg_meta = {"warning": "S3 listing used — sizes inflated by old snapshots"}
-                # Fall back to S3 listing but warn
-                if size_bytes == 0 and location.startswith("s3"):
-                    bkt, pfx = _parse_s3_path(location)
-                    sizes = _get_s3_object_sizes(bkt, pfx)
-                    if sizes:
-                        file_count = len(sizes)
-                        size_bytes = sum(sizes)
-                        if record_count == 0:
-                            record_count = max(1, size_bytes // 500)
+                iceberg_meta = {
+                    "warning": "Glue catalog stats used — add --athena-output-s3 for Iceberg precision",
+                    "source":  "glue_catalog_params",
+                }
+                # Glue totalSize (size_bytes) is already read from Parameters above.
+                # If Glue has no stats either, estimate from record_count heuristic.
+                if size_bytes == 0 and record_count > 0:
+                    size_bytes = record_count * 500   # ~500 bytes/row compressed estimate
+                    iceberg_meta["size_estimated"] = True
         else:
             # ── Non-Iceberg: use Glue stats; fall back to S3 listing ──────────────
             if size_bytes == 0 and location.startswith("s3"):

@@ -413,7 +413,15 @@ class CostOptimizerAgent(ABC):
 
         Use --show-prompts / set_llm_verbose(True) to see full prompt + response text.
         """
-        prompt        = self._build_llm_prompt(input_data, context)
+        try:
+            prompt = self._build_llm_prompt(input_data, context)
+        except Exception as _prompt_exc:
+            import traceback as _tb
+            print(f"\n  [WARN] {self.AGENT_NAME} — _build_llm_prompt failed "
+                  f"({type(_prompt_exc).__name__}: {_prompt_exc}); falling back to rule-based")
+            print(f"  {_tb.format_exc().strip()}")
+            return self._analyze_rule_based(input_data, context)
+
         response_text = ""
         input_tokens  = 0
         output_tokens = 0
