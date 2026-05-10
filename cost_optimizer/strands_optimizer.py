@@ -3766,7 +3766,10 @@ def _resolve_table_args(
         # Check for small-file problem on the resolved location
         location = info.get("location", "")
         if location.startswith("s3"):
-            sf = detect_small_file_problem(location=location, database=db, table_name=tbl)
+            sf = detect_small_file_problem(
+                location=location, database=db, table_name=tbl,
+                athena_output_s3=athena_output_s3,
+            )
             if sf.get("has_problem"):
                 print(
                     f"    ⚠ Small-file problem: {sf['file_count']} files, "
@@ -3898,7 +3901,10 @@ def _run_one(
             db  = tbl.get("database", "")
             tn  = tbl.get("table", "")
             if loc or (db and tn):
-                sf = detect_small_file_problem(location=loc, database=db, table_name=tn)
+                sf = detect_small_file_problem(
+                    location=loc, database=db, table_name=tn,
+                    athena_output_s3=athena_output_s3,
+                )
                 if sf.get("has_problem"):
                     print(f"\n  [SMALL FILE] {tn}: {sf['file_count']} files "
                           f"avg {sf['avg_file_size_mb']:.1f} MB [{sf['severity'].upper()}]")
