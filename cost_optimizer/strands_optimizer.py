@@ -3499,11 +3499,20 @@ Examples:
     p.add_argument("--config", metavar="FILE",
                    help="JSON file with table definitions (omit for auto-detection)")
     p.add_argument(
-        "--tables", nargs="+", metavar="DB.TABLE",
+        "--tables", nargs="+", metavar="TABLE",
         help=(
-            "One or more tables as db.table (e.g. sales_db.transactions customer_db.customers). "
-            "Resolved via Glue Catalog for accurate size/partition data. "
+            "One or more tables as db.table or bare name (e.g. orders order_items). "
+            "Use db.table for Glue Catalog lookup; bare names need --database to enable Glue. "
+            "Falls back to heuristics when Glue is unavailable. "
             "Takes precedence over --config when both are given."
+        ),
+    )
+    p.add_argument(
+        "--database", default="", metavar="DB",
+        help=(
+            "Default Glue database for bare table names passed via --tables. "
+            "E.g. --tables orders customers --database sales_db  resolves both "
+            "via Glue as sales_db.orders and sales_db.customers."
         ),
     )
     p.add_argument("--processing-mode", choices=["full", "delta"], default="full",
@@ -3695,13 +3704,16 @@ def _load_config(config_path: str) -> List[Dict]:
     return [data]
 
 
-def _resolve_table_args(table_args: List[str]) -> List[Dict]:
+def _resolve_table_args(table_args: List[str], default_db: str = "") -> List[Dict]:
     """
-    Convert CLI  --tables db.table [db.table ...]  to enriched table dicts.
+    Convert CLI  --tables [db.table | table] ...  to enriched table dicts.
 
     Each entry is first looked up in the Glue Catalog for accurate size,
     partition column, and file location; falls back to heuristics if Glue
     is unavailable or the table is not found.
+
+    default_db: used when a bare table name is given (no dot).  Set via
+                --database so Glue can be queried without a db.table prefix.
     """
     tables: List[Dict] = []
     for entry in table_args:
@@ -3709,7 +3721,7 @@ def _resolve_table_args(table_args: List[str]) -> List[Dict]:
         if "." in entry:
             db, tbl = entry.split(".", 1)
         else:
-            db, tbl = "", entry
+            db, tbl = default_db, entry
 
         print(f"  Resolving table: {entry} ...", end=" ", flush=True)
         info = _glue_table_info(db, tbl) if db else {}
@@ -3921,8 +3933,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Resolve input tables  (--tables takes priority over --config)
     config_tables: Optional[List[Dict]] = None
     if args.tables:
-        print(f"\nResolving {len(args.tables)} table(s) from --tables arg:")
-        config_tables = _resolve_table_args(args.tables)
+        default_db = getattr(args, "database", "") or ""
+        if default_db:
+            print(f"\nResolving {len(args.tables)} table(s) from --tables (default db: {default_db}):")
+        else:
+            print(f"\nResolving {len(args.tables)} table(s) from --tables arg:")
+        config_tables = _resolve_table_args(args.tables, default_db=default_db)
         print(f"  → {len(config_tables)} table(s) resolved\n")
     elif args.config:
         try:
