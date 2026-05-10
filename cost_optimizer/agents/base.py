@@ -488,26 +488,42 @@ class CostOptimizerAgent(ABC):
                     )
 
                 client = _boto3.client("bedrock-runtime", region_name=self.region)
-                body   = _json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens":        8096,
-                    "system":            system_prompt,
-                    "messages":          [{"role": "user", "content": prompt}],
-                })
 
-                resp      = client.invoke_model(modelId=self.model_id, body=body)
-                resp_body = _json.loads(resp["body"].read())
-                call_type = "bedrock_direct"
+                if self.AGENT_TOOLS:
+                    # ── Agentic loop: Claude calls tools via tool_use protocol ─
+                    tools_info = f"{len(self.AGENT_TOOLS)} tools, max_iter={self.MAX_ITERATIONS}"
+                    print(f"  │ boto3 agentic mode [{tools_info}]{' ' * max(0, _BOX_W - 22 - len(tools_info))}│")
+                    response_text, input_tokens, output_tokens = self._call_boto3_agentic(
+                        prompt, system_prompt, client
+                    )
+                    call_type = "bedrock_agentic"
+                    estimated = input_tokens == 0
+                    if estimated:
+                        input_tokens  = max(1, len(prompt) // 4)
+                        output_tokens = max(1, len(response_text) // 4)
+                    print(f"  │ boto3 agentic call SUCCESS{' ' * (_BOX_W - 30)}│")
+                    _log.info("[LLM/bedrock_agentic] %s — call succeeded", self.AGENT_NAME)
+                else:
+                    # ── Single-shot: no tools, one prompt → one response ───────
+                    body   = _json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens":        8096,
+                        "system":            system_prompt,
+                        "messages":          [{"role": "user", "content": prompt}],
+                    })
+                    resp      = client.invoke_model(modelId=self.model_id, body=body)
+                    resp_body = _json.loads(resp["body"].read())
+                    call_type = "bedrock_direct"
 
-                usage         = resp_body.get("usage", {})
-                input_tokens  = usage.get("input_tokens",  max(1, len(prompt) // 4))
-                output_tokens = usage.get("output_tokens", 0)
-                estimated     = "input_tokens" not in usage
+                    usage         = resp_body.get("usage", {})
+                    input_tokens  = usage.get("input_tokens",  max(1, len(prompt) // 4))
+                    output_tokens = usage.get("output_tokens", 0)
+                    estimated     = "input_tokens" not in usage
 
-                content       = resp_body.get("content", [])
-                response_text = content[0].get("text", "") if content else ""
-                print(f"  │ boto3 bedrock-runtime call SUCCESS{' ' * (_BOX_W - 38)}│")
-                _log.info("[LLM/bedrock_direct] %s — call succeeded", self.AGENT_NAME)
+                    content       = resp_body.get("content", [])
+                    response_text = content[0].get("text", "") if content else ""
+                    print(f"  │ boto3 bedrock-runtime call SUCCESS{' ' * (_BOX_W - 38)}│")
+                    _log.info("[LLM/bedrock_direct] %s — call succeeded", self.AGENT_NAME)
 
             except _NoCreds as exc:
                 hints = _aws_error_hints("NoCredentialsError", self.region, self.model_id)
@@ -559,6 +575,90 @@ class CostOptimizerAgent(ABC):
         )
 
         return self._parse_llm_response(response_text)
+
+    def _call_boto3_agentic(self, prompt: str, system_prompt: str, client) -> tuple:
+        """
+        Native boto3 agentic tool-calling loop using Anthropic tool_use over Bedrock.
+
+        Used when strands-agents is not installed.  Gives Claude access to
+        AGENT_TOOLS through the standard multi-turn tool_use protocol:
+          1. Send prompt + tool schemas
+          2. If stop_reason == tool_use → execute each tool, feed results back
+          3. Repeat up to MAX_ITERATIONS
+          4. Return the final text response
+
+        Returns (response_text, total_input_tokens, total_output_tokens).
+        """
+        try:
+            from .pipeline_tools import get_boto3_tool_schemas, execute_tool_call
+        except ImportError:
+            return "", 0, 0
+
+        tool_schemas = get_boto3_tool_schemas(self.AGENT_TOOLS)
+        if not tool_schemas:
+            return "", 0, 0
+
+        messages      = [{"role": "user", "content": prompt}]
+        total_input   = 0
+        total_output  = 0
+        iteration     = 0
+
+        while iteration <= self.MAX_ITERATIONS:
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens":        8096,
+                "system":            system_prompt,
+                "tools":             tool_schemas,
+                "messages":          messages,
+            })
+            resp      = client.invoke_model(modelId=self.model_id, body=body)
+            resp_body = json.loads(resp["body"].read())
+
+            usage         = resp_body.get("usage", {})
+            total_input  += usage.get("input_tokens",  0)
+            total_output += usage.get("output_tokens", 0)
+
+            stop_reason = resp_body.get("stop_reason", "end_turn")
+            content     = resp_body.get("content", [])
+
+            messages.append({"role": "assistant", "content": content})
+
+            if stop_reason != "tool_use" or iteration >= self.MAX_ITERATIONS:
+                text = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                return text, total_input, total_output
+
+            # Execute tool calls and collect results
+            tool_results = []
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                t_name  = block.get("name", "")
+                t_input = block.get("input", {})
+                t_id    = block.get("id", "")
+
+                short_in  = json.dumps(t_input)[:80]
+                print(f"  │ [tool→] {t_name}({short_in}){' ' * max(0, _BOX_W - 14 - len(t_name) - len(short_in))}│")
+                result   = execute_tool_call(t_name, t_input)
+                short_out = json.dumps(result)[:80]
+                print(f"  │ [←tool] {short_out}{' ' * max(0, _BOX_W - 10 - len(short_out))}│")
+                _log.info("[boto3_agentic] tool=%s result=%s", t_name, short_out)
+
+                tool_results.append({
+                    "type":        "tool_result",
+                    "tool_use_id": t_id,
+                    "content":     json.dumps(result),
+                })
+
+            if not tool_results:
+                break
+
+            messages.append({"role": "user", "content": tool_results})
+            iteration += 1
+
+        return "", total_input, total_output
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """Build prompt for LLM analysis."""

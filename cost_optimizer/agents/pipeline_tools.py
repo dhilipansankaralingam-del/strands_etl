@@ -15,7 +15,8 @@ Design rules:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import json as _json
+from typing import Any, Dict, List, Optional
 
 # ── Strands decorator (graceful no-op when package absent) ───────────────────
 try:
@@ -345,3 +346,247 @@ RECOMMENDATIONS_AGENT_TOOLS: list = [
     detect_cost_anomaly,             # when ≥5 historical metric points
     detect_metric_periodicity,       # when ≥8 metric time-series points
 ]
+
+
+# =============================================================================
+# BOTO3 NATIVE TOOL-CALLING SUPPORT
+# Used when strands-agents is NOT installed.  Provides the same agentic loop
+# via the Anthropic tool_use protocol directly over Bedrock bedrock-runtime.
+# =============================================================================
+
+# Bedrock-compatible JSON schema for each tool — manually kept in sync with
+# the function signatures above.
+_BOTO3_TOOL_SCHEMAS: Dict[str, Dict] = {
+    "compute_amdahls_ceiling": {
+        "name": "compute_amdahls_ceiling",
+        "description": (
+            "Amdahl's Law: maximum parallel speedup S(N)=1/(s+(1-s)/N). "
+            "Call when collect(), toPandas(), show() or iterate_collect() are detected — "
+            "these run on the driver only and hard-cap the benefit of extra workers. "
+            "Returns amdahl_speedup, theoretical_max_speedup, diminishing_returns_elbow, recommendation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "serial_fraction_pct": {
+                    "type": "number",
+                    "description": "Estimated % of job that is serial (0–99). Each collect/toPandas counts ~8%.",
+                },
+                "current_workers": {
+                    "type": "integer",
+                    "description": "Current or proposed Glue / EMR worker count.",
+                },
+            },
+            "required": ["serial_fraction_pct", "current_workers"],
+        },
+    },
+    "compute_spot_risk": {
+        "name": "compute_spot_risk",
+        "description": (
+            "Spot interruption risk: P(survive t hours) = (1 − p_hourly)^t. "
+            "Call before recommending EMR Spot or EKS Spot to quantify net savings "
+            "after expected restart cost. Only recommend Spot if net_savings_pct > 30 "
+            "AND p_survive > 0.75. "
+            "Returns p_survive_full_job, p_interrupted, net_savings_pct, recommendation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_duration_hours": {
+                    "type": "number",
+                    "description": "Estimated wall-clock duration in hours.",
+                },
+                "instance_type": {
+                    "type": "string",
+                    "description": "EC2 instance type, e.g. r5.4xlarge. Family sets interruption rate.",
+                },
+                "checkpoint_interval_hours": {
+                    "type": "number",
+                    "description": "Checkpoint interval in hours. 0 = no checkpointing (full restart).",
+                },
+            },
+            "required": ["job_duration_hours"],
+        },
+    },
+    "compute_skew_model": {
+        "name": "compute_skew_model",
+        "description": (
+            "Zipf / power-law skew model using the Hill estimator. "
+            "Call when skew_ratio (max_partition / avg_partition) > 3. "
+            "Derives the optimal salt_factor mathematically (not a guess). "
+            "Returns zipf_alpha, skew_severity, recommended_salt_factor, spark_salting_snippet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "partition_sizes": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "List of partition sizes (record counts or bytes). Minimum 2 values.",
+                },
+                "table_name": {
+                    "type": "string",
+                    "description": "Display label for the table.",
+                },
+            },
+            "required": ["partition_sizes"],
+        },
+    },
+    "compute_growth_forecast": {
+        "name": "compute_growth_forecast",
+        "description": (
+            "Euler exponential growth: N(t) = N0 * e^(r*t). "
+            "Call when a table has a measurable daily growth rate. "
+            "More accurate than linear for compounding write patterns. "
+            "Returns projected_gb, doubling_time_days, milestones, monthly_storage_cost_increase_usd."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name":       {"type": "string", "description": "Table label."},
+                "current_size_gb":  {"type": "number", "description": "Table size today in GB."},
+                "daily_growth_gb":  {"type": "number", "description": "GB added per day."},
+                "forecast_days":    {"type": "integer", "description": "Forecast horizon (default 90 days)."},
+            },
+            "required": ["table_name", "current_size_gb", "daily_growth_gb"],
+        },
+    },
+    "compute_bloom_filter_value": {
+        "name": "compute_bloom_filter_value",
+        "description": (
+            "Bloom filter I/O savings: P(FP)=(1-e^(-kn/m))^k. "
+            "Call for every table > 1 GB in a JOIN that is not a broadcast candidate. "
+            "Returns false_positive_rate, io_saved_gb, worth_enabling, iceberg_ddl."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name":             {"type": "string", "description": "The probed (larger) table."},
+                "table_size_gb":          {"type": "number", "description": "Current live size in GB."},
+                "join_selectivity_pct":   {"type": "number", "description": "% of rows that match (default 5)."},
+                "num_distinct_join_keys": {"type": "integer", "description": "Distinct join key values in the build table."},
+            },
+            "required": ["table_name", "table_size_gb"],
+        },
+    },
+    "compute_shuffle_partitions": {
+        "name": "compute_shuffle_partitions",
+        "description": (
+            "Little's Law: L = λ·W → optimal spark.sql.shuffle.partitions. "
+            "Call when shuffle stage is the bottleneck or AQE is producing tiny tasks. "
+            "Returns optimal_shuffle_partitions, task_throughput_per_sec, executor_utilisation, spark_config."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "avg_task_duration_sec": {"type": "number",  "description": "Mean Spark task duration in seconds."},
+                "num_executors":         {"type": "integer", "description": "Total executor cores = workers × vCPU_per_worker."},
+                "total_tasks":           {"type": "integer", "description": "Total tasks in the slowest stage (optional)."},
+            },
+            "required": ["avg_task_duration_sec", "num_executors"],
+        },
+    },
+    "rank_recommendations_by_impact": {
+        "name": "rank_recommendations_by_impact",
+        "description": (
+            "Pareto 80/20: score = estimated_savings_percent / sqrt(effort_hours). "
+            "Call FIRST, ALWAYS — identifies which 20% of fixes deliver 80% of savings. "
+            "Returns pareto_front (quick-wins), ranked_recommendations, pareto_count, interpretation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recommendations": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "List of dicts, each with at minimum: "
+                        "{title: str, estimated_savings_percent: float, effort_hours: float}."
+                    ),
+                },
+            },
+            "required": ["recommendations"],
+        },
+    },
+    "detect_cost_anomaly": {
+        "name": "detect_cost_anomaly",
+        "description": (
+            "Shewhart X-bar 3-sigma control chart + Western Electric rules. "
+            "Call when glue_metrics has ≥ 5 historical data points for any metric. "
+            "Returns z_score, zone (normal/1σ/2σ/3σ), is_anomaly, ucl_3sigma, lcl_3sigma, signals."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "historical_values": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Previous measurements oldest→newest, NOT including current value.",
+                },
+                "current_value": {"type": "number", "description": "The new observation to test."},
+                "metric_label":  {"type": "string", "description": "Label e.g. heap_peak or cost_usd."},
+            },
+            "required": ["historical_values", "current_value"],
+        },
+    },
+    "detect_metric_periodicity": {
+        "name": "detect_metric_periodicity",
+        "description": (
+            "Discrete Fourier Transform: dominant period in a CloudWatch time series. "
+            "Call when glue_metrics has ≥ 8 data points to distinguish periodic vs structural issues. "
+            "Returns dominant_period_hr, dominant_label (hourly/daily/weekly), top_frequencies, interpretation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metric_time_series": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Ordered metric values (cost, heap%, CPU%).",
+                },
+                "sample_interval_minutes": {
+                    "type": "integer",
+                    "description": "Sampling cadence in minutes (CloudWatch default = 5).",
+                },
+                "metric_name": {"type": "string", "description": "Display label."},
+            },
+            "required": ["metric_time_series"],
+        },
+    },
+}
+
+# Function name → callable mapping (works whether strands decorator applied or not)
+_TOOL_FN_MAP: Dict[str, Any] = {
+    "compute_amdahls_ceiling":        compute_amdahls_ceiling,
+    "compute_spot_risk":              compute_spot_risk,
+    "compute_skew_model":             compute_skew_model,
+    "compute_growth_forecast":        compute_growth_forecast,
+    "compute_bloom_filter_value":     compute_bloom_filter_value,
+    "compute_shuffle_partitions":     compute_shuffle_partitions,
+    "rank_recommendations_by_impact": rank_recommendations_by_impact,
+    "detect_cost_anomaly":            detect_cost_anomaly,
+    "detect_metric_periodicity":      detect_metric_periodicity,
+}
+
+
+def get_boto3_tool_schemas(tools: list) -> List[Dict]:
+    """Return Bedrock-compatible tool schema dicts for the given tool list."""
+    schemas = []
+    for fn in tools:
+        name = getattr(fn, "__name__", None) or getattr(fn, "name", str(fn))
+        schema = _BOTO3_TOOL_SCHEMAS.get(name)
+        if schema:
+            schemas.append(schema)
+    return schemas
+
+
+def execute_tool_call(tool_name: str, tool_input: Dict) -> Dict:
+    """Execute a pipeline tool by name and return its result dict."""
+    fn = _TOOL_FN_MAP.get(tool_name)
+    if fn is None:
+        return {"error": f"Unknown tool: {tool_name}"}
+    try:
+        result = fn(**tool_input)
+        return result if isinstance(result, dict) else {"result": result}
+    except Exception as exc:
+        return {"error": str(exc), "tool": tool_name, "input": tool_input}
