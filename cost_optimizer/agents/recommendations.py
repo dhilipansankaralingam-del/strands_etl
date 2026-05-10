@@ -67,8 +67,8 @@ class RecommendationsAgent(CostOptimizerAgent):
         if all_recs:
             try:
                 result["pareto_ranking"] = pareto_rank_recommendations(all_recs)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  [WARN] pareto_rank_recommendations skipped: {type(exc).__name__}: {exc}")
 
         glue_metrics = context.get('glue_metrics', {})
         if glue_metrics:
@@ -83,8 +83,8 @@ class RecommendationsAgent(CostOptimizerAgent):
                             label=metric,
                         )
                         result["cost_anomaly"]["metric"] = metric
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(f"  [WARN] shewhart_control_chart({metric}) skipped: {type(exc).__name__}: {exc}")
                     break  # one metric is enough for anomaly detection
 
             # 3. Fourier periodicity — find dominant period in time series
@@ -97,8 +97,8 @@ class RecommendationsAgent(CostOptimizerAgent):
                         )
                         fp["metric_analyzed"] = metric
                         result["workload_periodicity"] = fp
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(f"  [WARN] fourier_periodicity({metric}) skipped: {type(exc).__name__}: {exc}")
                     break
 
         return result

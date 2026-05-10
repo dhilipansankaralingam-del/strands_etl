@@ -386,6 +386,9 @@ class CostOptimizerAgent(ABC):
             return result
 
         except Exception as e:
+            import traceback
+            print(f"\n  [ERROR] {self.AGENT_NAME} — unhandled exception: {type(e).__name__}: {e}")
+            print(f"  {traceback.format_exc().strip()}")
             return AnalysisResult(
                 agent_name=self.AGENT_NAME,
                 success=False,
@@ -481,7 +484,8 @@ class CostOptimizerAgent(ABC):
                 try:
                     from ..prompts.super_prompts import get_prompt as _get_prompt
                     system_prompt = _get_prompt(self.AGENT_NAME)
-                except Exception:
+                except Exception as _sp_exc:
+                    print(f"  │ [WARN] Could not load system prompt for {self.AGENT_NAME}: {_sp_exc}{' ' * max(0, _BOX_W - 60)}│")
                     system_prompt = (
                         "You are an expert AWS Glue / PySpark cost-optimization assistant. "
                         "Respond with a valid JSON object only."
@@ -529,6 +533,8 @@ class CostOptimizerAgent(ABC):
                 hints = _aws_error_hints("NoCredentialsError", self.region, self.model_id)
                 _box_error("boto3/bedrock", "NoCredentialsError", str(exc), hints)
                 _log.error("[LLM/bedrock_direct] NoCredentialsError: %s", exc)
+                print(f"\n  [ERROR] NoCredentialsError: {exc}")
+                for h in hints: print(f"  → {h}")
                 _box_divider("FALLBACK")
                 print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
                 _box_bottom()
@@ -540,6 +546,8 @@ class CostOptimizerAgent(ABC):
                 hints = _aws_error_hints(code, self.region, self.model_id)
                 _box_error("boto3/bedrock", code, msg, hints)
                 _log.error("[LLM/bedrock_direct] ClientError %s: %s", code, msg)
+                print(f"\n  [ERROR] Bedrock ClientError {code}: {msg}")
+                for h in hints: print(f"  → {h}")
                 _box_divider("FALLBACK")
                 print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
                 _box_bottom()
@@ -549,15 +557,20 @@ class CostOptimizerAgent(ABC):
                 hints = _aws_error_hints("EndpointResolutionError", self.region, self.model_id)
                 _box_error("boto3/bedrock", "EndpointResolutionError", str(exc), hints)
                 _log.error("[LLM/bedrock_direct] EndpointResolutionError: %s", exc)
+                print(f"\n  [ERROR] EndpointResolutionError: {exc}")
+                for h in hints: print(f"  → {h}")
                 _box_divider("FALLBACK")
                 print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
                 _box_bottom()
                 return self._analyze_rule_based(input_data, context)
 
             except Exception as exc:
+                import traceback as _tb
                 _box_error("boto3/bedrock", type(exc).__name__, str(exc),
                            [f"Unexpected error — check logs for details."])
                 _log.error("[LLM/bedrock_direct] %s: %s", type(exc).__name__, exc, exc_info=True)
+                print(f"\n  [ERROR] {type(exc).__name__}: {exc}")
+                print(f"  {_tb.format_exc().strip()}")
                 _box_divider("FALLBACK")
                 print(f"  │ Falling back to rule-based analysis (no LLM){' ' * (_BOX_W - 49)}│")
                 _box_bottom()
@@ -660,7 +673,7 @@ class CostOptimizerAgent(ABC):
 
         return "", total_input, total_output
 
-    def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
+    def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:  # noqa: E303
         """Build prompt for LLM analysis."""
         return f"""
 Analyze the following PySpark job for cost optimization:

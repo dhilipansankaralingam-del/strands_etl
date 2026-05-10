@@ -785,7 +785,8 @@ Return a JSON object with this exact structure:
                 "monthly_cost_now_usd":   monthly_cost_now,
                 "monthly_cost_90d_usd":   monthly_cost_90d,
             }
-        except Exception:
+        except Exception as exc:
+            print(f"  [WARN] _compute_growth_rate skipped: {type(exc).__name__}: {exc}")
             return {}
 
     # ── Enhancement 6: Storage cost attribution ───────────────────────────────
@@ -951,7 +952,8 @@ Return a JSON object with this exact structure:
                 cold_gb, None, None, age_days, live_gb, now,
                 "heuristic_snapshot_age"
             )
-        except Exception:
+        except Exception as exc:
+            print(f"  [WARN] _cold_partition_analysis skipped: {type(exc).__name__}: {exc}")
             return {}
 
     def _glue_cold_partitions(self, database: str, table_name: str, live_gb: float) -> Dict:
@@ -982,7 +984,8 @@ Return a JSON object with this exact structure:
                 cold_gb, cold_count, total_count, oldest_days,
                 live_gb, cutoff, "glue_partition_creation_time"
             )
-        except Exception:
+        except Exception as exc:
+            print(f"  [WARN] _glue_cold_partitions({database}.{table_name}) skipped: {type(exc).__name__}: {exc}")
             return {}
 
     # ── Enhancement 10: Cross-table redundancy ────────────────────────────────

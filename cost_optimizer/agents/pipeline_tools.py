@@ -584,9 +584,14 @@ def execute_tool_call(tool_name: str, tool_input: Dict) -> Dict:
     """Execute a pipeline tool by name and return its result dict."""
     fn = _TOOL_FN_MAP.get(tool_name)
     if fn is None:
-        return {"error": f"Unknown tool: {tool_name}"}
+        msg = f"Unknown tool: {tool_name}"
+        print(f"  [TOOL ERROR] {msg}")
+        return {"error": msg}
     try:
         result = fn(**tool_input)
         return result if isinstance(result, dict) else {"result": result}
     except Exception as exc:
+        import traceback
+        print(f"  [TOOL ERROR] {tool_name} raised {type(exc).__name__}: {exc}")
+        print(f"  {traceback.format_exc().strip()}")
         return {"error": str(exc), "tool": tool_name, "input": tool_input}
