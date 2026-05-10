@@ -549,8 +549,8 @@ Return a JSON object with this exact structure:
     # ── Per-table analysis ─────────────────────────────────────────────────────
 
     def _analyze_table(self, tbl: Dict, processing_mode: str) -> Dict:
-        record_count = tbl.get("record_count", tbl.get("records", 0))
-        column_count = tbl.get("column_count", tbl.get("columns", 30))
+        record_count = int(tbl.get("record_count", tbl.get("records", 0)) or 0)
+        column_count = int(tbl.get("column_count", tbl.get("columns", 30)) or 30)
         fmt          = (tbl.get("format") or "parquet").lower()
         table_name   = tbl.get("table", tbl.get("name", "unknown"))
         is_iceberg   = tbl.get("is_iceberg", fmt == "iceberg")
@@ -565,8 +565,9 @@ Return a JSON object with this exact structure:
         comp_ratio = self.COMPRESSION_RATIO.get(fmt, 0.30)
         comp_bytes = raw_bytes * comp_ratio
 
-        if "size_gb" in tbl:
-            comp_bytes = tbl["size_gb"] * (1024 ** 3)
+        size_gb_val = tbl.get("size_gb")
+        if size_gb_val is not None:
+            comp_bytes = float(size_gb_val) * (1024 ** 3)
             raw_bytes  = comp_bytes / comp_ratio
 
         comp_gb    = comp_bytes / (1024 ** 3)
@@ -581,13 +582,26 @@ Return a JSON object with this exact structure:
         orphan_est:     Dict      = {}
 
         if is_iceberg:
-            iceberg_s    = tbl.get("iceberg_stats", {})
-            iceberg_issues = self._iceberg_health_issues(tbl, file_stats)
-            growth_info  = self._compute_growth_rate(iceberg_s)
-            comp_health  = self._compression_health(tbl, iceberg_s)
-            cold_info    = self._cold_partition_analysis(iceberg_s, tbl)
-            orphan_est   = self._estimate_orphan_files(iceberg_s, file_stats)
-            storage_cost = self._table_storage_cost(iceberg_s, file_stats, comp_gb)
+            iceberg_s = tbl.get("iceberg_stats", {})
+            _step = "iceberg_health_issues"
+            try:
+                iceberg_issues = self._iceberg_health_issues(tbl, file_stats)
+                _step = "compute_growth_rate"
+                growth_info    = self._compute_growth_rate(iceberg_s)
+                _step = "compression_health"
+                comp_health    = self._compression_health(tbl, iceberg_s)
+                _step = "cold_partition_analysis"
+                cold_info      = self._cold_partition_analysis(iceberg_s, tbl)
+                _step = "estimate_orphan_files"
+                orphan_est     = self._estimate_orphan_files(iceberg_s, file_stats)
+                _step = "table_storage_cost"
+                storage_cost   = self._table_storage_cost(iceberg_s, file_stats, comp_gb)
+            except Exception as _exc:
+                import traceback as _tb
+                print(f"  [ERROR] _analyze_table({table_name}) failed at {_step}: "
+                      f"{type(_exc).__name__}: {_exc}")
+                print(f"  {_tb.format_exc().strip()}")
+                raise
 
         return {
             "table":                  table_name,
@@ -740,10 +754,16 @@ Return a JSON object with this exact structure:
             return {}
         try:
             def _parse(ts: str):
-                for fmt in ("%Y-%m-%d %H:%M:%S.%f %Z", "%Y-%m-%dT%H:%M:%S.%fZ",
-                            "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+                # Normalize: strip trailing timezone label before trying formats
+                clean = ts.strip().rstrip("Z").replace(" UTC", "").replace(" utc", "")
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S",
+                ):
                     try:
-                        return datetime.strptime(ts[:26], fmt[:len(ts)])
+                        return datetime.strptime(clean, fmt)
                     except Exception:
                         continue
                 return None
@@ -934,9 +954,14 @@ Return a JSON object with this exact structure:
             return {}
         try:
             def _parse(ts: str):
-                for fmt in ("%Y-%m-%d %H:%M:%S.%f %Z", "%Y-%m-%dT%H:%M:%S.%fZ",
-                            "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
-                    try: return datetime.strptime(ts[:26], fmt[:len(ts)])
+                clean = ts.strip().rstrip("Z").replace(" UTC", "").replace(" utc", "")
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S",
+                ):
+                    try: return datetime.strptime(clean, fmt)
                     except: continue
                 return None
             t0 = _parse(oldest)
