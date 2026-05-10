@@ -51,7 +51,8 @@ class CostOptimizationOrchestrator:
         processing_mode: str = 'full',
         current_config: Dict = None,
         additional_context: Dict = None,
-        glue_metrics: Dict = None
+        glue_metrics: Dict = None,
+        agents: List[str] = None,
     ) -> Dict[str, Any]:
         """
         Analyze a single PySpark script.
@@ -94,6 +95,12 @@ class CostOptimizationOrchestrator:
             additional_context=merged_context
         )
 
+        # Determine which agents to run
+        ALL_AGENTS = ["size_analyzer", "code_analyzer", "resource_allocator", "recommendations"]
+        run_agents = set(agents) if agents else set(ALL_AGENTS)
+        if agents:
+            print(f"  [INFO] Running agents: {', '.join(sorted(run_agents))}")
+
         import json as _json
         print("\n" + "=" * 60)
         print("  [DEBUG] AnalysisInput")
@@ -116,16 +123,17 @@ class CostOptimizationOrchestrator:
         print(f"  additional_context keys: {list(input_data.additional_context.keys())}")
         print("=" * 60 + "\n")
 
-        # Phase 1: Size Analysis (runs first)
-        # Pass glue_metrics so size_analyzer LLM prompt can correlate runtime
-        # signals (heap pressure, worker utilisation) with table storage findings.
-        size_result = self.agents['size_analyzer'].analyze(
-            input_data,
-            {'glue_metrics': glue_metrics or {}},
-        )
+        _skipped = AnalysisResult(agent_name="skipped", success=True, analysis={}, recommendations=[])
 
-        # Build context for next agents — full size analysis passed so LLM agents can
-        # correlate actual table telemetry (file counts, skew, Iceberg health) with code patterns
+        # Phase 1: Size Analysis (runs first)
+        if 'size_analyzer' in run_agents:
+            size_result = self.agents['size_analyzer'].analyze(
+                input_data,
+                {'glue_metrics': glue_metrics or {}},
+            )
+        else:
+            size_result = _skipped
+
         context = {
             'effective_size_gb': size_result.analysis.get('effective_size_gb', 100),
             'skew_risk_score': size_result.analysis.get('skew_risk_score', 20),
@@ -135,41 +143,43 @@ class CostOptimizationOrchestrator:
         }
 
         # Phase 2: Code Analysis and Resource Allocation (can run in parallel)
-        if self.parallel:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                code_future = executor.submit(
-                    self.agents['code_analyzer'].analyze, input_data, context
-                )
-                resource_future = executor.submit(
-                    self.agents['resource_allocator'].analyze, input_data, context
-                )
+        run_code     = 'code_analyzer'     in run_agents
+        run_resource = 'resource_allocator' in run_agents
 
-                code_result = code_future.result()
-                resource_result = resource_future.result()
+        if run_code or run_resource:
+            if self.parallel and run_code and run_resource:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    code_future     = executor.submit(self.agents['code_analyzer'].analyze,     input_data, context)
+                    resource_future = executor.submit(self.agents['resource_allocator'].analyze, input_data, context)
+                    code_result     = code_future.result()
+                    resource_result = resource_future.result()
+            else:
+                code_result     = self.agents['code_analyzer'].analyze(input_data, context)     if run_code     else _skipped
+                resource_result = self.agents['resource_allocator'].analyze(input_data, context) if run_resource else _skipped
         else:
-            code_result = self.agents['code_analyzer'].analyze(input_data, context)
-            resource_result = self.agents['resource_allocator'].analyze(input_data, context)
+            code_result     = _skipped
+            resource_result = _skipped
 
-        # Update context with code analysis results
         context.update({
             'complexity_score': code_result.analysis.get('complexity', {}).get('complexity_score', 50),
             'join_count': code_result.analysis.get('complexity', {}).get('join_count', 0),
             'anti_pattern_count': code_result.analysis.get('anti_pattern_count', 0)
         })
 
-        # Phase 3: Recommendations — receives full outputs from ALL prior agents so the
-        # LLM prompt can detect compound issues (e.g., tiny files + broadcast = OOM)
-        full_context = {
-            'size_analyzer': size_result.analysis,
-            'size_analyzer_full': size_result.analysis,
-            'code_analyzer': code_result.analysis,
-            'code_analyzer_full': code_result.analysis,
-            'resource_allocator': resource_result.analysis,
-            'glue_metrics': glue_metrics or {},
-        }
-        full_context.update(context)
-
-        reco_result = self.agents['recommendations'].analyze(input_data, full_context)
+        # Phase 3: Recommendations
+        if 'recommendations' in run_agents:
+            full_context = {
+                'size_analyzer': size_result.analysis,
+                'size_analyzer_full': size_result.analysis,
+                'code_analyzer': code_result.analysis,
+                'code_analyzer_full': code_result.analysis,
+                'resource_allocator': resource_result.analysis,
+                'glue_metrics': glue_metrics or {},
+            }
+            full_context.update(context)
+            reco_result = self.agents['recommendations'].analyze(input_data, full_context)
+        else:
+            reco_result = _skipped
 
         # Compile final results
         total_time = time.time() - start_time

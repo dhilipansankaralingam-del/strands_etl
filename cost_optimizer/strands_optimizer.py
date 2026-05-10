@@ -1100,6 +1100,7 @@ def analyze_pyspark_script(
     current_worker_type: str = "G.2X",
     executor_memory_gb: float = 4.0,
     athena_output_s3: str = "",
+    agents: Optional[List[str]] = None,
 ) -> Dict:
     """
     Run full cost-optimization analysis on a single PySpark script.
@@ -1155,6 +1156,8 @@ def analyze_pyspark_script(
         source_tables   = tables,
         processing_mode = processing_mode,
         current_config  = current_config or {},
+        glue_metrics    = glue_metrics,
+        agents          = agents,
     )
 
     if result.get("success"):
@@ -3554,6 +3557,18 @@ Examples:
                    help="Check detected S3 locations for small-file problems")
     p.add_argument("--show-lines", action="store_true",
                    help="Print annotated source with inline findings")
+    p.add_argument(
+        "--agents",
+        nargs="+",
+        metavar="AGENT",
+        default=None,
+        choices=["size_analyzer", "code_analyzer", "resource_allocator", "recommendations"],
+        help=(
+            "Run only specific agents (space-separated). "
+            "Choices: size_analyzer, code_analyzer, resource_allocator, recommendations. "
+            "Default: all four agents. Example: --agents size_analyzer"
+        ),
+    )
 
     # ── Apply-fixes mode ─────────────────────────────────────────────────────
     p.add_argument("--apply-fixes", action="store_true",
@@ -3710,7 +3725,11 @@ def _load_config(config_path: str) -> List[Dict]:
     return [data]
 
 
-def _resolve_table_args(table_args: List[str], default_db: str = "") -> List[Dict]:
+def _resolve_table_args(
+    table_args: List[str],
+    default_db: str = "",
+    athena_output_s3: str = "",
+) -> List[Dict]:
     """
     Convert CLI  --tables [db.table | table] ...  to enriched table dicts.
 
@@ -3718,8 +3737,10 @@ def _resolve_table_args(table_args: List[str], default_db: str = "") -> List[Dic
     partition column, and file location; falls back to heuristics if Glue
     is unavailable or the table is not found.
 
-    default_db: used when a bare table name is given (no dot).  Set via
-                --database so Glue can be queried without a db.table prefix.
+    default_db:       used when a bare table name is given (no dot).  Set via
+                      --database so Glue can be queried without a db.table prefix.
+    athena_output_s3: forwarded to _glue_table_info so Iceberg $files /
+                      $snapshots queries run when the flag is provided.
     """
     tables: List[Dict] = []
     for entry in table_args:
@@ -3730,7 +3751,7 @@ def _resolve_table_args(table_args: List[str], default_db: str = "") -> List[Dic
             db, tbl = default_db, entry
 
         print(f"  Resolving table: {entry} ...", end=" ", flush=True)
-        info = _glue_table_info(db, tbl) if db else {}
+        info = _glue_table_info(db, tbl, athena_output_s3) if db else {}
         if info:
             source = info.get("source", "glue_catalog")
             size_note = (
@@ -3770,6 +3791,7 @@ def _run_one(
     current_worker_type: str = "G.2X",
     executor_memory_gb: float = 4.0,
     athena_output_s3: str = "",
+    agents: Optional[List[str]] = None,
 ) -> Dict:
     job_name = Path(script_path).stem
     print(f"\n{'─'*65}")
@@ -3787,6 +3809,7 @@ def _run_one(
         current_worker_type = current_worker_type,
         executor_memory_gb  = executor_memory_gb,
         athena_output_s3    = athena_output_s3,
+        agents              = agents,
     )
 
     if not result.get("success"):
@@ -3944,7 +3967,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\nResolving {len(args.tables)} table(s) from --tables (default db: {default_db}):")
         else:
             print(f"\nResolving {len(args.tables)} table(s) from --tables arg:")
-        config_tables = _resolve_table_args(args.tables, default_db=default_db)
+        config_tables = _resolve_table_args(
+            args.tables,
+            default_db=default_db,
+            athena_output_s3=getattr(args, "athena_output_s3", ""),
+        )
         print(f"  → {len(config_tables)} table(s) resolved\n")
     elif args.config:
         try:
@@ -3980,6 +4007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             current_worker_type = getattr(args, "worker_type", "G.2X"),
             executor_memory_gb  = getattr(args, "executor_memory_gb", 4.0),
             athena_output_s3    = getattr(args, "athena_output_s3", ""),
+            agents              = getattr(args, "agents", None),
         )
         all_results[script_path] = result
 
