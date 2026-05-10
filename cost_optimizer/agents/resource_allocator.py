@@ -108,7 +108,9 @@ class ResourceAllocatorAgent(CostOptimizerAgent):
         glue_metrics = context.get('glue_metrics', {})
         avg_task_sec = 0.0
         for metric, vals in glue_metrics.items():
-            if 'task' in metric.lower() and 'duration' in metric.lower() and vals:
+            if not isinstance(vals, list) or not vals:
+                continue
+            if 'task' in metric.lower() and 'duration' in metric.lower():
                 avg_task_sec = sum(vals) / len(vals)
                 break
         if avg_task_sec > 0:
@@ -174,7 +176,7 @@ class ResourceAllocatorAgent(CostOptimizerAgent):
         worker_util_min = 1.0
         if glue_metrics:
             for m, vals in glue_metrics.items():
-                if not vals:
+                if not isinstance(vals, list) or not vals:
                     continue
                 metrics_lines.append(
                     f"  {m}: min={min(vals):.2f} max={max(vals):.2f} last={vals[-1]:.2f}"

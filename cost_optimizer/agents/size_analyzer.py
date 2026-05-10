@@ -551,7 +551,7 @@ Return a JSON object with this exact structure:
     def _analyze_table(self, tbl: Dict, processing_mode: str) -> Dict:
         record_count = tbl.get("record_count", tbl.get("records", 0))
         column_count = tbl.get("column_count", tbl.get("columns", 30))
-        fmt          = tbl.get("format", "parquet").lower()
+        fmt          = (tbl.get("format") or "parquet").lower()
         table_name   = tbl.get("table", tbl.get("name", "unknown"))
         is_iceberg   = tbl.get("is_iceberg", fmt == "iceberg")
 
@@ -1085,7 +1085,7 @@ Return a JSON object with this exact structure:
             return "high",   f"Partition skew {skew_ratio:.1f}× from $partitions"
         if skew_ratio > _SKEW_WARN:
             return "medium", f"Partition skew {skew_ratio:.1f}× from $partitions"
-        part_col = tbl.get("partition_column", "")
+        part_col = tbl.get("partition_column") or ""
         if part_col.lower() in ("date", "dt", "process_date", "event_date"):
             return "medium", "Date partition may be uneven"
         if tbl.get("record_count", 0) < 100_000:
