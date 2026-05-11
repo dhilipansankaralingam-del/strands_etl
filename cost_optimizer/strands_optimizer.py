@@ -3725,58 +3725,48 @@ def _load_config(config_path: str) -> List[Dict]:
     return [data]
 
 
-def _resolve_table_args(
-    table_args: List[str],
-    default_db: str = "",
-    athena_output_s3: str = "",
-) -> List[Dict]:
+def _resolve_table_args(table_args: List[str], athena_output_s3: str = "") -> List[Dict]:
     """
-    Convert CLI  --tables [db.table | table] ...  to enriched table dicts.
+    For each db.table entry run the four Iceberg Athena metadata queries
+    ($files, $snapshots, $partitions, $manifests) and return a table dict
+    with iceberg_stats populated.
 
-    Each entry is first looked up in the Glue Catalog for accurate size,
-    partition column, and file location; falls back to heuristics if Glue
-    is unavailable or the table is not found.
-
-    default_db:       used when a bare table name is given (no dot).  Set via
-                      --database so Glue can be queried without a db.table prefix.
-    athena_output_s3: forwarded to _glue_table_info so Iceberg $files /
-                      $snapshots queries run when the flag is provided.
+    Tables must be in db.table format.  --athena-output-s3 is required.
     """
+    if not athena_output_s3:
+        print("  [ERROR] --athena-output-s3 is required to fetch table stats.")
+        return []
+
     tables: List[Dict] = []
     for entry in table_args:
         entry = entry.strip()
-        if "." in entry:
-            db, tbl = entry.split(".", 1)
-        else:
-            db, tbl = default_db, entry
+        if "." not in entry:
+            print(f"  [SKIP] '{entry}': must be db.table format (e.g. sales_db.orders)")
+            continue
+        db, tbl = entry.split(".", 1)
 
-        print(f"  Resolving table: {entry} ...", end=" ", flush=True)
-        info = _glue_table_info(db, tbl, athena_output_s3) if db else {}
-        if info:
-            source = info.get("source", "glue_catalog")
-            size_note = (
-                f"{info['size_gb']:.2f} GB" if "size_gb" in info
-                else f"{info.get('record_count', 0):,} rows (estimated)"
-            )
-            print(f"[{source}] {size_note}")
-        else:
-            info = _heuristic_table_info(tbl, db)
-            print(f"[heuristic] {info.get('record_count', 0):,} rows (name-based estimate)")
+        print(f"  Querying {db}.{tbl} ...", end=" ", flush=True)
+        stats = _iceberg_table_stats(db, tbl, athena_output_s3)
 
-        # Check for small-file problem on the resolved location
-        location = info.get("location", "")
-        if location.startswith("s3"):
-            sf = detect_small_file_problem(
-                location=location, database=db, table_name=tbl,
-                athena_output_s3=athena_output_s3,
-            )
-            if sf.get("has_problem"):
-                print(
-                    f"    ⚠ Small-file problem: {sf['file_count']} files, "
-                    f"avg {sf['avg_file_size_mb']:.1f} MB [{sf['severity'].upper()}]"
-                )
+        if "error" in stats:
+            print(f"FAILED — {stats['error']}")
+            continue
 
-        tables.append(info)
+        size_gb = stats.get("total_size_gb", 0.0)
+        records = stats.get("total_records", 0)
+        files   = stats.get("file_cnt", 0)
+        print(f"{size_gb:.3f} GB | {files:,} files | {records:,} records")
+
+        tables.append({
+            "database":      db,
+            "table":         tbl,
+            "is_iceberg":    True,
+            "size_gb":       size_gb,
+            "record_count":  records,
+            "file_count":    files,
+            "iceberg_stats": stats,
+        })
+
     return tables
 
 
@@ -3968,17 +3958,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Resolve input tables  (--tables takes priority over --config)
     config_tables: Optional[List[Dict]] = None
     if args.tables:
-        default_db = getattr(args, "database", "") or ""
-        if default_db:
-            print(f"\nResolving {len(args.tables)} table(s) from --tables (default db: {default_db}):")
-        else:
-            print(f"\nResolving {len(args.tables)} table(s) from --tables arg:")
+        print(f"\nFetching Athena stats for {len(args.tables)} table(s):")
         config_tables = _resolve_table_args(
             args.tables,
-            default_db=default_db,
             athena_output_s3=getattr(args, "athena_output_s3", ""),
         )
-        print(f"  → {len(config_tables)} table(s) resolved\n")
+        print(f"  → {len(config_tables)} table(s) ready\n")
     elif args.config:
         try:
             config_tables = _load_config(args.config)

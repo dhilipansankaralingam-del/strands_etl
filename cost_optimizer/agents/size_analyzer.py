@@ -138,68 +138,52 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
     # ── Public entry point ─────────────────────────────────────────────────────
 
     def _analyze_rule_based(self, input_data: AnalysisInput, context: Dict) -> AnalysisResult:
-        tables_detail:  List[Dict] = []
-        total_raw_bytes: int       = 0
-        total_comp_bytes: int      = 0
-        skew_risks:     List[Dict] = []
+        """
+        Builds a basic analysis dict directly from Athena iceberg_stats.
+        No heuristics or Glue scanning — stats come from $files/$snapshots/$partitions/$manifests.
+        """
+        tables = input_data.source_tables
+        if not tables:
+            return AnalysisResult(
+                agent_name=self.AGENT_NAME, success=False, analysis={}, recommendations=[],
+                errors=["No source tables. Pass --tables db.table and --athena-output-s3."],
+            )
 
-        for tbl in input_data.source_tables:
-            ta = self._analyze_table(tbl, input_data.processing_mode)
-            tables_detail.append(ta)
-            total_raw_bytes  += ta["raw_size_bytes"]
-            total_comp_bytes += ta["compressed_size_bytes"]
-            if ta.get("skew_risk", "low") != "low":
-                skew_risks.append({
-                    "table":  tbl.get("table", tbl.get("name", "unknown")),
-                    "risk":   ta["skew_risk"],
-                    "reason": ta.get("skew_reason", ""),
-                })
+        total_gb    = sum(t.get("size_gb", 0) for t in tables)
+        total_files = sum(t.get("file_count", 0) for t in tables)
+        total_recs  = sum(t.get("record_count", 0) for t in tables)
 
-        delta_ratio  = (self._estimate_delta_ratio(input_data)
-                        if input_data.processing_mode == "delta" else 1.0)
-        join_factor  = self._estimate_join_amplification(input_data, context)
-        effective_gb = (total_comp_bytes * delta_ratio * join_factor) / (1024 ** 3)
-        total_raw_gb = total_raw_bytes  / (1024 ** 3)
-        total_comp_gb= total_comp_bytes / (1024 ** 3)
-
-        skew_score   = self._calculate_skew_score(skew_risks, input_data)
-        part_eff     = self._analyze_partitions(input_data.source_tables)
-        iceberg_hlth = self._aggregate_iceberg_health(tables_detail)
-        cross_redund = self._detect_cross_table_redundancy(tables_detail)
-        storage_cost = self._aggregate_storage_costs(tables_detail)
+        tables_summary = []
+        for t in tables:
+            s = t.get("iceberg_stats", {})
+            tables_summary.append({
+                "table":          t.get("table"),
+                "database":       t.get("database"),
+                "size_gb":        t.get("size_gb", 0),
+                "record_count":   t.get("record_count", 0),
+                "file_cnt":       s.get("file_cnt", 0),
+                "avg_file_mb":    s.get("avg_file_size_mb", 0),
+                "tiny_files":     s.get("tiny_file_cnt", 0),
+                "snapshot_count": s.get("snapshot_count", 0),
+                "skew_ratio":     s.get("skew_ratio", 1.0),
+                "manifest_count": s.get("manifest_count", 0),
+            })
 
         analysis = {
-            "total_raw_size_gb":           round(total_raw_gb, 2),
-            "total_compressed_size_gb":    round(total_comp_gb, 2),
-            "effective_size_gb":           round(effective_gb, 2),
-            "processing_mode":             input_data.processing_mode,
-            "delta_ratio":                 round(delta_ratio, 3),
-            "join_amplification_factor":   round(join_factor, 2),
-            "skew_risk_score":             skew_score,
-            "skew_risk_factors":           skew_risks,
-            "partition_efficiency_score":  part_eff["score"],
-            "partition_recommendations":   part_eff["recommendations"],
-            "tables_analyzed":             len(tables_detail),
-            "tables_detail":               tables_detail,
-            "iceberg_health":              iceberg_hlth,
-            "cross_table_redundancy":      cross_redund,
-            "storage_cost_summary":        storage_cost,
-            "size_confidence":             self._calculate_confidence(input_data),
+            "effective_size_gb": round(total_gb, 3),
+            "total_files":       total_files,
+            "total_records":     total_recs,
+            "tables_analyzed":   len(tables),
+            "tables_summary":    tables_summary,
+            "skew_risk_score":   0,
+            "join_amplification_factor": 1.0,
         }
-
-        recs = self._generate_recommendations(analysis, tables_detail)
-        analysis["scientific_analysis"] = self._run_scientific_analysis(tables_detail)
         return AnalysisResult(
-            agent_name      = self.AGENT_NAME,
-            success         = True,
-            analysis        = analysis,
-            recommendations = recs,
-            metrics         = {
-                "total_tables":      len(tables_detail),
-                "effective_size_gb": analysis["effective_size_gb"],
-                "skew_risk_score":   skew_score,
-                "monthly_s3_cost":   storage_cost.get("total_monthly_usd", 0),
-            },
+            agent_name=self.AGENT_NAME,
+            success=True,
+            analysis=analysis,
+            recommendations=[],
+            metrics={"effective_size_gb": total_gb, "total_tables": len(tables)},
         )
 
     # ── Scientific analysis ────────────────────────────────────────────────────
@@ -291,101 +275,81 @@ class SizeAnalyzerAgent(CostOptimizerAgent):
 
     def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
         """
-        Sends the full Iceberg metadata telemetry to the LLM so it can reason
-        across dimensions that rule-based logic misses:
-          - Join key ↔ partition skew correlation
-          - Growth rate → cost inflection point timing
-          - Schema similarity → cross-table duplicate detection
-          - Compression anomalies → format or encoding issues
-          - Cold partition archival opportunity windows
+        Builds LLM prompt directly from Athena $files/$snapshots/$partitions/$manifests
+        query results already stored in each table's iceberg_stats.
+        No rule-based pre-analysis — the Athena stats ARE the input.
         """
-        # Run rule-based first to give LLM the structured stats as input
-        rule_result = self._analyze_rule_based(input_data, context)
-        rule_analysis = rule_result.analysis
+        tables_with_stats = [t for t in input_data.source_tables if t.get("iceberg_stats")]
+        if not tables_with_stats:
+            raise ValueError(
+                "No iceberg_stats found. Ensure --tables uses db.table format "
+                "and --athena-output-s3 is set."
+            )
 
-        # Build per-table telemetry blocks
+        # Build per-table telemetry directly from Athena query results
         table_telemetry = []
-        for tbl in input_data.source_tables:
+        for tbl in tables_with_stats:
+            s = tbl["iceberg_stats"]
+            fc = s.get("file_cnt", 0)
             entry: Dict[str, Any] = {
-                "table":          tbl.get("table", "unknown"),
-                "database":       tbl.get("database", ""),
-                "format":         tbl.get("format", "parquet"),
-                "is_iceberg":     tbl.get("is_iceberg", False),
-                "record_count":   tbl.get("record_count", 0),
-                "size_gb":        tbl.get("size_gb", 0),
-                "partition_col":  tbl.get("partition_column"),
-                "sizing_source":  tbl.get("source", "unknown"),
+                "table":        tbl.get("table", "unknown"),
+                "database":     tbl.get("database", ""),
+                "size_gb":      tbl.get("size_gb", s.get("total_size_gb", 0)),
+                "record_count": tbl.get("record_count", s.get("total_records", 0)),
+                # ── from $files ───────────────────────────────────────────────
+                "current_files":       fc,
+                "avg_file_mb":         s.get("avg_file_size_mb", 0),
+                "min_file_kb":         s.get("min_file_size_kb", 0),
+                "max_file_mb":         s.get("max_file_size_mb", 0),
+                "tiny_files":          s.get("tiny_file_cnt", 0),
+                "small_files":         s.get("small_file_cnt", 0),
+                "file_size_cv":        s.get("file_size_cv", 0),
+                "partition_count":     s.get("partition_count", 0),
+                # ── from $snapshots ───────────────────────────────────────────
+                "snapshot_count":      s.get("snapshot_count", 0),
+                "oldest_snapshot":     s.get("oldest_snapshot_ts", ""),
+                "newest_snapshot":     s.get("newest_snapshot_ts", ""),
+                "total_added_files":   s.get("total_added_files", 0),
+                "total_deleted_files": s.get("total_deleted_files", 0),
+                "total_added_records": s.get("total_added_records", 0),
+                "total_deleted_records": s.get("total_deleted_records", 0),
+                # ── from $partitions ─────────────────────────────────────────
+                "partition_skew_ratio":    s.get("skew_ratio", 1.0),
+                "min_partition_records":   s.get("min_partition_records", 0),
+                "max_partition_records":   s.get("max_partition_records", 0),
+                "avg_partition_records":   s.get("avg_partition_records", 0),
+                "max_files_in_partition":  s.get("max_files_in_partition", 0),
+                # ── from $manifests ──────────────────────────────────────────
+                "manifest_count":          s.get("manifest_count", 0),
+                "avg_files_per_manifest":  s.get("avg_files_per_manifest", 0),
+                "empty_manifests":         s.get("empty_manifests", 0),
+                # ── derived ──────────────────────────────────────────────────
+                "write_amplification": round(s.get("total_added_files", 0) / max(fc, 1), 1),
             }
-            if tbl.get("iceberg_stats"):
-                s = tbl["iceberg_stats"]
-                entry["iceberg_telemetry"] = {
-                    "current_files":       s.get("file_cnt", 0),
-                    "avg_file_mb":         s.get("avg_file_size_mb", 0),
-                    "tiny_files":          s.get("tiny_file_cnt", 0),
-                    "small_files":         s.get("small_file_cnt", 0),
-                    "file_size_cv":        s.get("file_size_cv", 0),
-                    "total_size_gb":       s.get("total_size_gb", 0),
-                    "snapshot_count":      s.get("snapshot_count", 0),
-                    "oldest_snapshot":     s.get("oldest_snapshot_ts", ""),
-                    "newest_snapshot":     s.get("newest_snapshot_ts", ""),
-                    "total_added_files":   s.get("total_added_files", 0),
-                    "total_deleted_files": s.get("total_deleted_files", 0),
-                    "total_added_records": s.get("total_added_records", 0),
-                    "partition_count":     s.get("partition_count", 0),
-                    "partition_skew":      s.get("skew_ratio", 1.0),
-                    "manifest_count":      s.get("manifest_count", 0),
-                    "write_amplification": round(
-                        s.get("total_added_files", 0) / max(s.get("file_cnt", 1), 1), 1
-                    ),
-                }
-                # Growth rate
-                gr = self._compute_growth_rate(s)
-                if gr:
-                    entry["iceberg_telemetry"]["growth_gb_per_day"]    = gr["gb_per_day"]
-                    entry["iceberg_telemetry"]["days_to_2x_size"]       = gr.get("days_to_2x")
-                    entry["iceberg_telemetry"]["projected_size_90d_gb"] = gr.get("projected_90d_gb")
-                # Compression
-                cr = self._compute_compression_ratio(tbl, s)
-                if cr is not None:
-                    entry["iceberg_telemetry"]["compression_ratio"] = cr
-                    entry["iceberg_telemetry"]["compression_health"] = (
-                        "poor" if cr > _COMPRESSION_POOR else
-                        "adequate" if cr > _COMPRESSION_GOOD else
-                        "good" if cr > _COMPRESSION_EXCEL else "excellent"
-                    )
+            # Growth rate from snapshot timestamps
+            gr = self._compute_growth_rate(s)
+            if gr:
+                entry["growth_gb_per_day"]    = gr.get("gb_per_day")
+                entry["days_to_2x_size"]       = gr.get("days_to_2x")
+                entry["projected_size_90d_gb"] = gr.get("projected_90d_gb")
             table_telemetry.append(entry)
-
-        cross_redund = rule_analysis.get("cross_table_redundancy", {})
-        storage_cost = rule_analysis.get("storage_cost_summary", {})
-
-        # Run scientific algorithms on already-gathered table stats
-        rule_tables = rule_result.analysis.get("tables_detail",
-                      [{"table": t.get("table", ""), "file_stats": {},
-                        "compressed_size_gb": t.get("size_gb", 0),
-                        "growth_forecast": {}, "is_broadcast_candidate": False,
-                        "record_count": t.get("record_count", 0)}
-                       for t in input_data.source_tables])
-        sci = self._run_scientific_analysis(rule_tables)
-        sci_json = json.dumps(sci, indent=2, default=str) if sci.get("per_table") else "  (insufficient data)"
 
         tool_guidance = """
 ━━━━ TOOLS AVAILABLE (call selectively — only when evidence warrants) ━━━━━━━━
   compute_skew_model(partition_sizes, table_name)
-      → CALL IF skew_ratio > 3 in any table's file_stats.
-        Pass a synthetic power-law array if raw partition sizes are unavailable:
-        [avg * skew_ratio^((n-k)/(n-1)) for k in 1..partition_count]
+      → CALL IF partition_skew_ratio > 3 in any table.
   compute_growth_forecast(table_name, current_size_gb, daily_growth_gb)
-      → CALL IF growth_gb_per_day > 0 for any table (from iceberg_telemetry).
+      → CALL IF growth_gb_per_day > 0 for any table.
   compute_bloom_filter_value(table_name, table_size_gb, join_selectivity_pct)
-      → CALL FOR every table > 1 GB that appears in a JOIN in the script AND
-        is NOT a broadcast candidate (is_broadcast_candidate = false).
+      → CALL FOR every table > 1 GB that appears in a JOIN in the script.
 After calling any tools, respond with the JSON object specified below.
 """ if self.AGENT_TOOLS else ""
 
         return f"""
 You are a Senior Data Platform Engineer specializing in Apache Iceberg, AWS Glue,
-and PySpark performance optimization.  Analyze the table telemetry below and the
-PySpark script to produce a comprehensive sizing and health report.
+and PySpark performance optimization.  Analyze the table telemetry below (sourced
+directly from Athena $files / $snapshots / $partitions / $manifests queries) and
+the PySpark script to produce a comprehensive sizing and health report.
 {tool_guidance}
 
 ━━━━ SCRIPT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -395,41 +359,9 @@ Mode: {input_data.processing_mode}
 {input_data.script_content[:3000]}{'... [truncated]' if len(input_data.script_content) > 3000 else ''}
 ```
 
-━━━━ TABLE TELEMETRY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━ TABLE TELEMETRY (from Athena metadata queries) ━━━━━━━━━━━━━━━━━━━━━━━━━
 ```json
 {json.dumps(table_telemetry, indent=2, default=str)}
-```
-
-━━━━ SCIENTIFIC ALGORITHM RESULTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-(Pre-computed mathematical models — cite these in your findings)
-  • exponential_growth  – Euler N(t)=N₀·e^(rt): growth curve, doubling time, 90d projection
-  • zipf_skew           – Zipf α + recommended salt factor (biased from skew_ratio, not raw $partitions)
-  • file_distribution   – Bimodality coefficient BC=(γ₁²+1)/κ: >0.555 = mixed tiny+huge anti-pattern
-  • bloom_filter        – Bloom filter FPP + I/O savings if enabled on join column
-```json
-{sci_json}
-```
-
-━━━━ CROSS-TABLE REDUNDANCY SIGNALS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```json
-{json.dumps(cross_redund, indent=2, default=str)}
-```
-
-━━━━ STORAGE COST BREAKDOWN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```json
-{json.dumps(storage_cost, indent=2, default=str)}
-```
-
-━━━━ RULE-BASED PRE-ANALYSIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-(Use this as a starting point — add LLM-detected patterns on top)
-```json
-{json.dumps({{
-    "effective_size_gb":     rule_analysis.get("effective_size_gb"),
-    "skew_risk_score":       rule_analysis.get("skew_risk_score"),
-    "partition_efficiency":  rule_analysis.get("partition_efficiency_score"),
-    "iceberg_health":        rule_analysis.get("iceberg_health", {{}}).get("health"),
-    "rule_recommendations":  [r.get("title") for r in rule_result.recommendations[:8]],
-}}, indent=2)}
 ```
 
 ━━━━ ANALYSIS GUIDELINES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
