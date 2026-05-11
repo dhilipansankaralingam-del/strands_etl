@@ -53,10 +53,29 @@ def compute_amdahls_ceiling(serial_fraction_pct: float, current_workers: int) ->
     from .scientific_tools import amdahls_law
     if not (0 < serial_fraction_pct < 100):
         return {"error": "serial_fraction_pct must be between 1 and 99"}
-    return amdahls_law(
+
+    print(f"\n  ┌─ Tool: compute_amdahls_ceiling ─────────────────────────────────")
+    print(f"  │  Algorithm : Amdahl's Law  S(N) = 1 / (s + (1-s)/N)")
+    print(f"  │  Purpose   : Finds the hard ceiling on parallel speedup.")
+    print(f"  │              Even with infinite workers, a job with {serial_fraction_pct:.0f}% serial")
+    print(f"  │              code can never go faster than {100/serial_fraction_pct:.1f}× — adding")
+    print(f"  │              workers beyond the elbow point wastes money.")
+    print(f"  │  Inputs    : serial={serial_fraction_pct}%  workers={current_workers}")
+
+    result = amdahls_law(
         serial_fraction=serial_fraction_pct / 100.0,
         num_workers=max(1, int(current_workers)),
     )
+
+    speedup   = result.get("amdahl_speedup", 0)
+    max_spdup = result.get("theoretical_max_speedup", 0)
+    elbow     = result.get("diminishing_returns_elbow", 0)
+    print(f"  │  Result    : current speedup={speedup:.2f}×  max possible={max_spdup:.1f}×")
+    print(f"  │              diminishing-returns elbow at {elbow} workers")
+    print(f"  │  Benefit   : Prevents over-provisioning workers past the point")
+    print(f"  │              where each extra worker costs more than it saves.")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
 
 
 @strands_tool
@@ -87,6 +106,15 @@ def compute_spot_risk(
     }
     family = instance_type.split(".")[0].lower()
     rate   = _rates.get(family, 0.07)
+
+    print(f"\n  ┌─ Tool: compute_spot_risk ───────────────────────────────────────")
+    print(f"  │  Algorithm : Survival probability  P(survive t hrs) = (1-p)^t")
+    print(f"  │  Purpose   : Spot instances are ~70% cheaper but can be reclaimed")
+    print(f"  │              at any time. This computes whether the expected")
+    print(f"  │              restart cost erodes the discount below the break-even.")
+    print(f"  │  Inputs    : duration={job_duration_hours}h  instance={instance_type}")
+    print(f"  │              hourly_interrupt_rate={rate:.0%}  checkpoint={checkpoint_interval_hours}h")
+
     result = spot_interruption_risk(
         job_duration_hours=max(0.1, job_duration_hours),
         hourly_interruption_rate=rate,
@@ -94,6 +122,13 @@ def compute_spot_risk(
     )
     result["instance_type"]   = instance_type
     result["instance_family"] = family
+
+    p_survive = result.get("p_survive_full_job", 0)
+    net_save  = result.get("net_savings_pct", 0)
+    print(f"  │  Result    : P(survive)={p_survive:.1%}  net savings={net_save:.1f}%")
+    print(f"  │  Benefit   : Only recommend Spot if net_savings > 30% AND")
+    print(f"  │              P(survive) > 75% — avoids false economy.")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -123,9 +158,32 @@ def compute_skew_model(partition_sizes: List, table_name: str = "") -> Dict:
     sizes = [float(x) for x in partition_sizes]
     if len(sizes) < 2:
         return {"error": "Need at least 2 partition sizes"}
+
+    label = table_name or "table"
+    print(f"\n  ┌─ Tool: compute_skew_model  [{label}] ───────────────────────────")
+    print(f"  │  Algorithm : Zipf / power-law  size(k) ∝ k^(-α)")
+    print(f"  │              α estimated via Hill estimator on {len(sizes)} partition sizes.")
+    print(f"  │  What it means:")
+    print(f"  │    α ≈ 0   → uniform (no skew, good)")
+    print(f"  │    α ≈ 1   → standard Zipf (rank-2 partition has half of rank-1's data)")
+    print(f"  │    α > 2   → extreme skew (one partition dominates → stragglers / OOM)")
+    print(f"  │  Purpose   : Derives the SALT FACTOR mathematically — instead of")
+    print(f"  │              guessing 'try 8 buckets', gives the exact N that balances")
+    print(f"  │              the distribution given the measured α.")
+    print(f"  │  Benefit   : Salting eliminates join stragglers. The salt factor N")
+    print(f"  │              tells Spark to explode the skewed key into N sub-keys,")
+    print(f"  │              spreading load evenly across executors.")
+    print(f"  │  Inputs    : {len(sizes)} partition sizes, max={max(sizes):,.0f}  min={min(sizes):,.0f}")
+
     result = zipf_skew_model(partition_sizes=sizes)
     if table_name:
         result["table_name"] = table_name
+
+    alpha    = result.get("zipf_alpha", 0)
+    severity = result.get("skew_severity", "UNKNOWN")
+    salt     = result.get("recommended_salt_factor", 1)
+    print(f"  │  Result    : α={alpha:.3f}  severity={severity}  salt_factor={salt}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -153,13 +211,32 @@ def compute_growth_forecast(
     from .scientific_tools import exponential_growth
     if current_size_gb <= 0 or daily_growth_gb <= 0:
         return {"error": "current_size_gb and daily_growth_gb must be > 0"}
+
     daily_rate = daily_growth_gb / current_size_gb
-    result     = exponential_growth(
+    print(f"\n  ┌─ Tool: compute_growth_forecast  [{table_name}] ─────────────────")
+    print(f"  │  Algorithm : Euler exponential growth  N(t) = N₀ · e^(r·t)")
+    print(f"  │  Why not linear? Each day's new data is added to a LARGER base,")
+    print(f"  │  so the absolute GB added tomorrow is slightly more than today.")
+    print(f"  │  Exponential captures this compounding; linear under-estimates.")
+    print(f"  │  Inputs    : current={current_size_gb:.2f} GB  daily_growth={daily_growth_gb:.4f} GB/day")
+    print(f"  │              daily_rate r={daily_rate:.6f}  horizon={forecast_days} days")
+    print(f"  │  Benefit   : Tells you WHEN the table will hit cost thresholds,")
+    print(f"  │              doubling time, and whether current workers will cope")
+    print(f"  │              in 90 days — so you plan capacity before the breach.")
+
+    result = exponential_growth(
         initial_gb=current_size_gb,
         daily_rate=daily_rate,
         days=forecast_days,
     )
     result["table_name"] = table_name
+
+    proj      = result.get("projected_gb", 0)
+    doubling  = result.get("doubling_time_days", 0)
+    cost_inc  = result.get("monthly_storage_cost_increase_usd", 0)
+    print(f"  │  Result    : {forecast_days}d projection={proj:.2f} GB  doubling={doubling:.0f} days")
+    print(f"  │              monthly cost increase ≈ ${cost_inc:.2f}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -185,6 +262,23 @@ def compute_bloom_filter_value(
     Returns: false_positive_rate, io_saved_gb, worth_enabling, iceberg_ddl.
     """
     from .scientific_tools import bloom_filter_savings
+
+    print(f"\n  ┌─ Tool: compute_bloom_filter_value  [{table_name}] ──────────────")
+    print(f"  │  Algorithm : Bloom filter  P(FP) = (1 - e^(-k·n/m))^k")
+    print(f"  │              k_optimal = (m/n)·ln2")
+    print(f"  │  What is a Bloom filter?")
+    print(f"  │    A probabilistic bit-array that answers 'is this join key in")
+    print(f"  │    the build side?' in O(1) — before reading any data from S3.")
+    print(f"  │    If the answer is NO (definitely not), Spark skips that row")
+    print(f"  │    entirely.  If YES (probably yes), it reads and checks.")
+    print(f"  │    False positives cause unnecessary reads; false negatives are")
+    print(f"  │    impossible — correctness is guaranteed.")
+    print(f"  │  Benefit   : With {join_selectivity_pct:.0f}% selectivity, {100-join_selectivity_pct:.0f}% of rows")
+    print(f"  │              CAN be skipped. Bloom filters capture most of that")
+    print(f"  │              savings with only a few MB of memory overhead.")
+    print(f"  │  Inputs    : table={table_size_gb:.2f} GB  selectivity={join_selectivity_pct}%")
+    print(f"  │              distinct_keys={num_distinct_join_keys:,}")
+
     result = bloom_filter_savings(
         table_size_gb=table_size_gb,
         join_selectivity=join_selectivity_pct / 100.0,
@@ -192,6 +286,13 @@ def compute_bloom_filter_value(
         bits_per_key=10,
     )
     result["table_name"] = table_name
+
+    io_saved = result.get("io_saved_gb", 0)
+    fpr      = result.get("false_positive_rate", 0)
+    worth    = result.get("worth_enabling", False)
+    print(f"  │  Result    : io_saved={io_saved:.2f} GB  false_positive_rate={fpr:.4f}")
+    print(f"  │              worth_enabling={worth}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -222,11 +323,32 @@ def compute_shuffle_partitions(
     from .scientific_tools import littles_law_parallelism
     if avg_task_duration_sec <= 0:
         return {"error": "avg_task_duration_sec must be > 0"}
-    return littles_law_parallelism(
+
+    print(f"\n  ┌─ Tool: compute_shuffle_partitions ──────────────────────────────")
+    print(f"  │  Algorithm : Little's Law  L = λ · W")
+    print(f"  │              L = tasks in flight  λ = throughput  W = task duration")
+    print(f"  │  What it solves:")
+    print(f"  │    Too few shuffle partitions → huge tasks, executor OOM.")
+    print(f"  │    Too many partitions → thousands of tiny 1-sec tasks,")
+    print(f"  │    scheduler overhead dominates, executors sit idle between tasks.")
+    print(f"  │    Little's Law finds the sweet spot where all {num_executors} cores")
+    print(f"  │    stay busy with tasks of the right size (~2-4 min each).")
+    print(f"  │  Inputs    : avg_task={avg_task_duration_sec}s  executors={num_executors}")
+
+    result = littles_law_parallelism(
         avg_task_sec=avg_task_duration_sec,
         num_executors=max(1, int(num_executors)),
         total_tasks=total_tasks,
     )
+
+    opt_parts = result.get("optimal_shuffle_partitions", 0)
+    util      = result.get("executor_utilisation", 0)
+    print(f"  │  Result    : optimal_shuffle_partitions={opt_parts}")
+    print(f"  │              executor_utilisation={util:.1%}")
+    print(f"  │  Benefit   : Setting spark.sql.shuffle.partitions={opt_parts} ensures")
+    print(f"  │              tasks are right-sized — no OOM, no scheduling waste.")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
 
 
 # =============================================================================
@@ -253,7 +375,23 @@ def rank_recommendations_by_impact(recommendations: List) -> Dict:
     recs = [dict(r) if not isinstance(r, dict) else r for r in recommendations]
     if not recs:
         return {"error": "recommendations list is empty"}
-    return pareto_rank_recommendations(recs)
+
+    print(f"\n  ┌─ Tool: rank_recommendations_by_impact ──────────────────────────")
+    print(f"  │  Algorithm : Pareto 80/20  score = savings% / √effort_hours")
+    print(f"  │  What it does:")
+    print(f"  │    Ranks {len(recs)} recommendations by impact-per-effort.")
+    print(f"  │    High savings + low effort = highest score (quick wins).")
+    print(f"  │    √effort penalises large efforts gently — a 4-hour fix with")
+    print(f"  │    40% savings still beats a 1-hour fix with 5% savings.")
+    print(f"  │  Benefit   : Ensures the implementation roadmap leads with the")
+    print(f"  │              20% of changes that deliver 80% of the cost reduction.")
+
+    result = pareto_rank_recommendations(recs)
+
+    pareto_n = result.get("pareto_count", 0)
+    print(f"  │  Result    : {pareto_n} recommendations in Pareto front (quick wins)")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
 
 
 @strands_tool
@@ -280,11 +418,33 @@ def detect_cost_anomaly(
     hist = [float(v) for v in historical_values]
     if len(hist) < 4:
         return {"error": "Need at least 4 historical values for control chart"}
-    return shewhart_control_chart(
+
+    print(f"\n  ┌─ Tool: detect_cost_anomaly  [{metric_label}] ───────────────────")
+    print(f"  │  Algorithm : Shewhart X-bar 3σ control chart")
+    print(f"  │              + Western Electric alarm rules")
+    print(f"  │  What it does:")
+    print(f"  │    Computes mean (μ) and std (σ) of {len(hist)} historical runs.")
+    print(f"  │    UCL = μ + 3σ,  LCL = μ - 3σ  (99.7% confidence band).")
+    print(f"  │    A point outside UCL/LCL is a statistically significant spike,")
+    print(f"  │    not just noise — something structurally changed.")
+    print(f"  │    Western Electric rules catch subtler patterns: 2 of 3 points")
+    print(f"  │    in 2σ zone, 4 of 5 in 1σ zone, 8 consecutive on one side.")
+    print(f"  │  Benefit   : Catches regressions (skew introduced, new anti-pattern)")
+    print(f"  │              before they compound into incidents or cost overruns.")
+    print(f"  │  Inputs    : {len(hist)} historical values  current={current_value}")
+
+    result = shewhart_control_chart(
         history=hist,
         current_value=float(current_value),
         label=metric_label,
     )
+
+    z     = result.get("z_score", 0)
+    zone  = result.get("zone", "?")
+    anom  = result.get("is_anomaly", False)
+    print(f"  │  Result    : z_score={z:.2f}  zone={zone}  is_anomaly={anom}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
 
 
 @strands_tool
@@ -311,12 +471,35 @@ def detect_metric_periodicity(
     series = [float(v) for v in metric_time_series]
     if len(series) < 8:
         return {"error": "Need at least 8 data points for DFT"}
+
+    label = metric_name or "metric"
+    print(f"\n  ┌─ Tool: detect_metric_periodicity  [{label}] ────────────────────")
+    print(f"  │  Algorithm : Discrete Fourier Transform (DFT)")
+    print(f"  │              Converts time-domain signal → frequency-domain.")
+    print(f"  │  What it does:")
+    print(f"  │    Decomposes {len(series)} data points into frequency components.")
+    print(f"  │    The dominant frequency tells you the repeating cycle length")
+    print(f"  │    (e.g. 24h = daily batch, 168h = weekly ETL).")
+    print(f"  │  Why it matters:")
+    print(f"  │    A spike every 24h = expected batch load (schedule OPTIMIZE")
+    print(f"  │    in the trough window to avoid overlap).")
+    print(f"  │    A spike with no period = structural issue (skew, OOM, bad join)")
+    print(f"  │    that won't resolve itself — needs a code fix.")
+    print(f"  │  Benefit   : Distinguishes 'schedule this differently' from")
+    print(f"  │              'fix the code' — very different remediation paths.")
+    print(f"  │  Inputs    : {len(series)} points  interval={sample_interval_minutes}min")
+
     result = fourier_periodicity(
         time_series=series,
         sample_interval_minutes=sample_interval_minutes,
     )
     if metric_name:
         result["metric_name"] = metric_name
+
+    period = result.get("dominant_period_hr", 0)
+    dlabel = result.get("dominant_label", "?")
+    print(f"  │  Result    : dominant_period={period:.1f}h  ({dlabel})")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -354,8 +537,6 @@ RECOMMENDATIONS_AGENT_TOOLS: list = [
 # via the Anthropic tool_use protocol directly over Bedrock bedrock-runtime.
 # =============================================================================
 
-# Bedrock-compatible JSON schema for each tool — manually kept in sync with
-# the function signatures above.
 _BOTO3_TOOL_SCHEMAS: Dict[str, Dict] = {
     "compute_amdahls_ceiling": {
         "name": "compute_amdahls_ceiling",
