@@ -1,0 +1,15 @@
+{
+  "schema_version": "2.0",
+  "job_name": "customer_order_summary_glue",
+  "generated_at": "2026-05-05T18:25:48.171909+00:00",
+  "batch_summary": {
+    "scripts_analyzed": 1,
+    "total_anti_patterns": 0,
+    "total_potential_annual_savings_usd": 534.8,
+    "avg_savings_percent": 80.0,
+    "top_anti_patterns": []
+  },
+  "scripts": [
+    "pyscript/customer_order_summary_glue.py"
+  ]
+}

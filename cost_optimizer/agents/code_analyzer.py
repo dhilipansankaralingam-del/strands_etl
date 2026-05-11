@@ -1,0 +1,823 @@
+"""
+Code Analyzer Agent
+===================
+
+Analyzes PySpark code for anti-patterns, optimization opportunities,
+and provides specific recommendations for cost reduction.
+"""
+
+import json
+import re
+from typing import Dict, List, Any, Tuple
+from .base import CostOptimizerAgent, AnalysisInput, AnalysisResult, CodePatternMatcher
+
+try:
+    from .scientific_tools import amdahls_law
+    _HAS_SCIENTIFIC = True
+except ImportError:
+    _HAS_SCIENTIFIC = False
+
+try:
+    from .pipeline_tools import CODE_AGENT_TOOLS as _CODE_AGENT_TOOLS
+except ImportError:
+    _CODE_AGENT_TOOLS = []
+
+
+class CodeAnalyzerAgent(CostOptimizerAgent):
+    """Analyzes PySpark code for optimization opportunities."""
+
+    AGENT_NAME     = "code_analyzer"
+    AGENT_TOOLS    = _CODE_AGENT_TOOLS   # compute_amdahls_ceiling, compute_shuffle_partitions
+    MAX_ITERATIONS = 2                   # detect serial ops → Amdahl; detect shuffle bottleneck → Little's Law
+
+    # Anti-patterns with severity and cost impact
+    ANTI_PATTERNS = {
+        'collect_large': {
+            'pattern': r'\.collect\(\)',
+            'severity': 'critical',
+            'cost_impact': 'high',
+            'description': 'collect() brings all data to driver - causes OOM on large data',
+            'fix': 'Use .take(n), .first(), or write to storage instead'
+        },
+        'toPandas_large': {
+            'pattern': r'\.toPandas\(\)',
+            'severity': 'critical',
+            'cost_impact': 'high',
+            'description': 'toPandas() brings all data to driver memory',
+            'fix': 'Process in Spark, or use .limit() before toPandas()'
+        },
+        'crossJoin': {
+            'pattern': r'\.crossJoin\(',
+            'severity': 'critical',
+            'cost_impact': 'critical',
+            'description': 'Cross join creates cartesian product - exponential data explosion',
+            'fix': 'Add proper join conditions or filter before join'
+        },
+        'udf_usage': {
+            'pattern': r'@udf|udf\(|\.udf\.',
+            'severity': 'high',
+            'cost_impact': 'high',
+            'description': 'UDFs bypass Catalyst optimizer - 10-100x slower than built-in',
+            'fix': 'Replace with Spark SQL functions: concat, when, regexp_extract, etc.'
+        },
+        'select_star': {
+            'pattern': r'\.select\(\s*"\*"\s*\)|\.select\(\s*\'\*\'\s*\)',
+            'severity': 'medium',
+            'cost_impact': 'medium',
+            'description': 'SELECT * reads unnecessary columns',
+            'fix': 'Select only needed columns: .select("col1", "col2")'
+        },
+        'repartition_1': {
+            'pattern': r'\.repartition\(1\)',
+            'severity': 'high',
+            'cost_impact': 'high',
+            'description': 'Repartition(1) forces all data to single partition - kills parallelism',
+            'fix': 'Use .coalesce() for reducing partitions, or repartition to appropriate number'
+        },
+        'coalesce_1_before_large_op': {
+            'pattern': r'\.coalesce\(1\).*\.(join|groupBy|agg)',
+            'severity': 'high',
+            'cost_impact': 'high',
+            'description': 'Coalesce(1) before join/groupBy kills parallelism',
+            'fix': 'Move coalesce to after transformations, before write'
+        },
+        'count_without_cache': {
+            'pattern': r'\.count\(\)[\s\S]{0,200}\.count\(\)',
+            'severity': 'medium',
+            'cost_impact': 'medium',
+            'description': 'Multiple count() calls recompute entire lineage',
+            'fix': 'Cache DataFrame before multiple actions: df.cache().count()'
+        },
+        'show_in_production': {
+            'pattern': r'\.show\(',
+            'severity': 'low',
+            'cost_impact': 'low',
+            'description': '.show() triggers action - unnecessary in production',
+            'fix': 'Remove .show() calls or guard with debug flag'
+        },
+        'no_predicate_pushdown': {
+            'pattern': r'\.filter\(.*\)[\s\S]*\.read\.',
+            'severity': 'medium',
+            'cost_impact': 'medium',
+            'description': 'Filter after read prevents predicate pushdown',
+            'fix': 'Move filter conditions into read: spark.read.filter() or WHERE clause'
+        },
+        'repeated_read': {
+            'pattern': r'spark\.read[\s\S]*?spark\.read',
+            'severity': 'medium',
+            'cost_impact': 'medium',
+            'description': 'Multiple reads of same data source',
+            'fix': 'Read once, cache if needed, and reuse DataFrame'
+        },
+        'string_concat_udf': {
+            'pattern': r'lambda.*\+.*str|lambda.*format\(',
+            'severity': 'medium',
+            'cost_impact': 'medium',
+            'description': 'String concatenation in lambda/UDF',
+            'fix': 'Use concat() or concat_ws() Spark functions'
+        },
+        'for_loop_processing': {
+            'pattern': r'for\s+\w+\s+in\s+\w+\.collect\(\)',
+            'severity': 'critical',
+            'cost_impact': 'critical',
+            'description': 'Processing data in Python for-loop defeats Spark parallelism',
+            'fix': 'Use Spark transformations: map, flatMap, withColumn, etc.'
+        },
+        'persist_no_unpersist': {
+            'pattern': r'\.(cache|persist)\(',
+            'needs_validation': 'unpersist',
+            'severity': 'low',
+            'cost_impact': 'low',
+            'description': 'Cache/persist without unpersist may waste memory',
+            'fix': 'Add .unpersist() when DataFrame is no longer needed'
+        }
+    }
+
+    # Spark configurations for optimization
+    SPARK_CONFIGS = {
+        'shuffle_partitions': {
+            'config': 'spark.sql.shuffle.partitions',
+            'default': '200',
+            'recommendation': 'Set to 2-4x cluster cores for small data, increase for large shuffles',
+            'impact': 'Reduces shuffle overhead'
+        },
+        'adaptive_enabled': {
+            'config': 'spark.sql.adaptive.enabled',
+            'default': 'false',
+            'recommended': 'true',
+            'recommendation': 'Enable adaptive query execution for automatic optimization',
+            'impact': 'Auto-tunes joins, skew handling, partitions'
+        },
+        'adaptive_coalesce': {
+            'config': 'spark.sql.adaptive.coalescePartitions.enabled',
+            'default': 'false',
+            'recommended': 'true',
+            'recommendation': 'Auto-coalesce small partitions after shuffle',
+            'impact': 'Reduces task overhead'
+        },
+        'adaptive_skew': {
+            'config': 'spark.sql.adaptive.skewJoin.enabled',
+            'default': 'false',
+            'recommended': 'true',
+            'recommendation': 'Enable automatic skew join handling',
+            'impact': 'Prevents skew-related slow tasks'
+        },
+        'broadcast_threshold': {
+            'config': 'spark.sql.autoBroadcastJoinThreshold',
+            'default': '10MB',
+            'recommendation': 'Increase to 100MB-500MB if memory allows',
+            'impact': 'Avoids shuffle for small table joins'
+        },
+        'dynamic_allocation': {
+            'config': 'spark.dynamicAllocation.enabled',
+            'default': 'false',
+            'recommended': 'true',
+            'recommendation': 'Enable for variable workloads',
+            'impact': 'Scale executors based on load'
+        }
+    }
+
+    def _analyze_rule_based(self, input_data: AnalysisInput, context: Dict) -> AnalysisResult:
+        """Rule-based code analysis."""
+
+        code = input_data.script_content
+        lines = code.split('\n')
+
+        # Detect anti-patterns
+        anti_patterns = self._detect_anti_patterns(code, lines)
+
+        # Analyze code complexity
+        complexity = self._analyze_complexity(code)
+
+        # Detect optimization opportunities
+        optimizations = self._detect_optimizations(code, context)
+
+        # Recommend Spark configs
+        spark_configs = self._recommend_spark_configs(code, context)
+
+        # Detect skew mitigations
+        skew_mitigations = self._detect_skew_mitigations(code, context)
+
+        # Calculate optimization score
+        optimization_score = self._calculate_optimization_score(
+            anti_patterns, optimizations, complexity
+        )
+
+        # Estimate cost reduction
+        cost_reduction = self._estimate_cost_reduction(anti_patterns, optimizations)
+
+        analysis = {
+            'anti_patterns': anti_patterns,
+            'anti_pattern_count': len(anti_patterns),
+            'critical_issues': sum(1 for p in anti_patterns if p['severity'] == 'critical'),
+            'complexity': complexity,
+            'optimizations': optimizations,
+            'spark_configs': spark_configs,
+            'skew_mitigations': skew_mitigations,
+            'optimization_score': optimization_score,
+            'estimated_cost_reduction_percent': cost_reduction,
+            'lines_of_code': len(lines),
+            'code_quality_score': max(0, 100 - (len(anti_patterns) * 10)),
+            'scientific_analysis': self._run_scientific_analysis(anti_patterns, complexity, context),
+        }
+
+        recommendations = self._generate_recommendations(analysis)
+
+        return AnalysisResult(
+            agent_name=self.AGENT_NAME,
+            success=True,
+            analysis=analysis,
+            recommendations=recommendations,
+            metrics={
+                'anti_pattern_count': len(anti_patterns),
+                'critical_issues': analysis['critical_issues'],
+                'optimization_score': optimization_score,
+                'join_count': complexity['join_count'],
+                'window_function_count': complexity['window_function_count']
+            }
+        )
+
+    def _run_scientific_analysis(
+        self, anti_patterns: List[Dict], complexity: Dict, context: Dict
+    ) -> Dict:
+        """
+        Apply Amdahl's Law using serial fraction derived from detected anti-patterns.
+        Tells the LLM the hard mathematical ceiling on worker-count scaling.
+        """
+        if not _HAS_SCIENTIFIC:
+            return {}
+
+        # Serial operations detected in the code
+        SERIAL_OPS = {'collect_large', 'toPandas_large', 'show_in_production', 'iterate_collect'}
+        serial_count = sum(
+            p.get('count', 1) for p in anti_patterns if p.get('pattern', '') in SERIAL_OPS
+        )
+        has_cross_join = any(p.get('pattern') == 'crossJoin' for p in anti_patterns)
+        # Each serial pattern contributes ~8% serial overhead; cross joins add driver-side work
+        serial_fraction = min(0.65, serial_count * 0.08 + (0.05 if has_cross_join else 0.0))
+        serial_fraction = max(0.02, serial_fraction)  # at least 2% serial overhead
+
+        cur_workers = int(
+            context.get('current_config', {}).get('number_of_workers')
+            or context.get('workers', 10)
+        )
+        result = amdahls_law(serial_fraction=serial_fraction, num_workers=cur_workers)
+        result['estimated_serial_fraction_pct'] = round(serial_fraction * 100, 1)
+        result['serial_patterns_found'] = [
+            p.get('pattern') for p in anti_patterns if p.get('pattern') in SERIAL_OPS
+        ]
+        return {"amdahls_law": result}
+
+    def _build_llm_prompt(self, input_data: AnalysisInput, context: Dict) -> str:
+        """Size-aware LLM prompt: correlates every line with actual Iceberg table telemetry."""
+
+        # ── Size telemetry summary per table ─────────────────────────────────
+        size_full = context.get('size_analyzer_full', {})
+        table_findings = size_full.get('table_findings', {})
+
+        table_lines: List[str] = []
+        for tbl, findings in table_findings.items():
+            fs    = findings.get('file_stats',             {})
+            ih    = findings.get('iceberg_health',         {})
+            gf    = findings.get('growth_forecast',        {})
+            sc    = findings.get('storage_cost',           {})
+            cold  = findings.get('cold_partition_analysis',{})
+            comp  = findings.get('compression',            {})
+
+            line = (
+                f"  {tbl}: "
+                f"{fs.get('total_size_gb', 0):.2f} GB | "
+                f"files={fs.get('file_count', 0):,} | "
+                f"avg={fs.get('avg_file_mb', 0):.1f} MB | "
+                f"tiny={fs.get('tiny_file_count', 0):,} | "
+                f"skew={fs.get('skew_ratio', 1.0):.1f}x | "
+                f"snapshots={ih.get('snapshot_count', 0)} | "
+                f"write_amp={ih.get('write_amplification', 1.0):.1f}x | "
+                f"growth={gf.get('gb_per_day', 0):.2f} GB/day | "
+                f"storage=${sc.get('monthly_total_usd', 0):.2f}/mo | "
+                f"cold={cold.get('cold_data_estimate_gb', 0):.0f} GB | "
+                f"compress={comp.get('label', 'unknown')}"
+            )
+            table_lines.append(line)
+
+            # Iceberg health issues inline
+            for issue in ih.get('issues', []):
+                table_lines.append(
+                    f"    [{issue.get('severity','').upper()}] {issue.get('description','')}"
+                )
+
+        table_ctx = "\n".join(table_lines) if table_lines else "  (no Iceberg telemetry available)"
+
+        # Cross-table redundancy
+        redundancy  = size_full.get('cross_table_redundancy', {})
+        storage_agg = size_full.get('aggregate_storage_costs', {})
+
+        # Glue metrics summary
+        glue_metrics = context.get('glue_metrics', {})
+        metrics_lines: List[str] = []
+        if glue_metrics:
+            for metric, values in glue_metrics.items():
+                if values:
+                    metrics_lines.append(
+                        f"  {metric}: min={min(values):.2f} max={max(values):.2f} "
+                        f"last={values[-1]:.2f}"
+                    )
+        metrics_ctx = "\n".join(metrics_lines) if metrics_lines else "  (no runtime metrics)"
+
+        # Rule-based pre-scan (fast, gives LLM a starting point)
+        rule = self._analyze_rule_based(input_data, context)
+        rule_anti  = [{"pattern": p["pattern"], "severity": p["severity"],
+                        "lines": p["line_numbers"]}
+                       for p in rule.analysis.get('anti_patterns', [])]
+        rule_opts  = [o["category"] for o in rule.analysis.get('optimizations', [])]
+
+        # Numbered script
+        numbered = "\n".join(
+            f"{i+1:4d}  {ln}"
+            for i, ln in enumerate(input_data.script_content.splitlines())
+        )
+
+        tool_guidance = """
+TOOLS AVAILABLE (call selectively — only when the code evidence warrants it):
+  compute_amdahls_ceiling(serial_fraction_pct, current_workers)
+      → CALL IF collect(), toPandas(), show(), or iterate_collect() appear in the script.
+        Estimate serial_fraction_pct = count_of_serial_ops × 8, capped at 65.
+        current_workers comes from JOB METADATA below.
+  compute_shuffle_partitions(avg_task_duration_sec, num_executors)
+      → CALL IF Glue runtime metrics include a task-duration metric (look in
+        GLUE RUNTIME METRICS section). num_executors = workers × vCPU_per_worker.
+After calling any tools, respond with the JSON object specified below.
+""" if self.AGENT_TOOLS else ""
+
+        return f"""You are an expert AWS Glue / PySpark cost-optimization engineer.
+Perform a **size-aware line-by-line code review** — every finding must reference the
+actual Iceberg table telemetry provided below.
+{tool_guidance}
+
+═══════════════════════════════════════════════════════════════
+SIZING TELEMETRY  (from SizeAnalyzerAgent — Athena $files data)
+═══════════════════════════════════════════════════════════════
+{table_ctx}
+
+CROSS-TABLE REDUNDANCY:
+{json.dumps(redundancy, indent=2) if redundancy else "  (none detected)"}
+
+AGGREGATE STORAGE:  live={storage_agg.get('total_live_gb', 0):.1f} GB  \
+dead={storage_agg.get('total_dead_gb', 0):.1f} GB  \
+monthly_cost=${storage_agg.get('total_monthly_usd', 0):.2f}
+
+═══════════════════════════════════════════════════════════════
+GLUE RUNTIME METRICS  (CloudWatch)
+═══════════════════════════════════════════════════════════════
+{metrics_ctx}
+
+═══════════════════════════════════════════════════════════════
+RULE-BASED PRE-SCAN  (deterministic, fast)
+═══════════════════════════════════════════════════════════════
+Anti-patterns: {json.dumps(rule_anti, indent=2)}
+Missed optimizations: {json.dumps(rule_opts, indent=2)}
+
+═══════════════════════════════════════════════════════════════
+SCIENTIFIC ANALYSIS  (Amdahl's Law — worker scaling ceiling)
+═══════════════════════════════════════════════════════════════
+{json.dumps(rule.analysis.get('scientific_analysis', {}), indent=2, default=str)}
+Interpretation:
+  • amdahl_speedup      — actual speedup achievable at the current worker count
+  • theoretical_max     — hard ceiling regardless of how many workers are added
+  • diminishing_returns_elbow — worker count past which marginal gain < 1%
+  • If serial_fraction > 30%, adding workers is wasteful — fix serial ops first
+
+═══════════════════════════════════════════════════════════════
+PYSPARK SCRIPT  (with line numbers)
+═══════════════════════════════════════════════════════════════
+```python
+{numbered}
+```
+
+═══════════════════════════════════════════════════════════════
+ANALYSIS GUIDELINES  — 8 dimensions
+═══════════════════════════════════════════════════════════════
+
+1. ANTI-PATTERNS × TABLE SIZE
+   • tiny_file_count > 10k on a read → each file = 1 task → executor overload
+   • collect() / toPandas() on a table > 1 GB → guaranteed driver OOM
+   • crossJoin on any table > 100 MB → exponential data explosion
+
+2. JOIN ANALYSIS × ACTUAL TABLE GB
+   • table_size_gb < 0.5 GB → add broadcast() hint → eliminate shuffle entirely
+   • table_size_gb > 8 GB → warn: broadcast risks OOM on the driver
+   • skew_ratio > 3x on the join key → recommend salting or AQE skewJoin hint
+
+3. PARTITION SKEW CORRELATION
+   • If skew_ratio > 5x AND the skewed column is a join/groupBy key → straggler tasks
+   • Recommend df.repartition(n, "skewed_col") BEFORE the heavy operation
+
+4. ICEBERG-SPECIFIC CODE PATTERNS
+   • tiny_file_count > 10k → recommend OPTIMIZE … REWRITE DATA USING bin-pack in Athena
+   • snapshot_count > 30 → recommend VACUUM / expire_snapshots() call before job
+   • write_amplification > 5x → incremental read (startSnapshotId) saves 80%+ I/O
+   • No pushdown filter on partitioned Iceberg table → full table scan
+
+5. CACHE / PERSIST RECOMMENDATIONS
+   • Same table > 1 GB reused 2+ times → cache() and unpersist() after last use
+   • table_size_gb < 0.2 GB → MEMORY_ONLY storage level
+   • table_size_gb 0.2–2 GB → MEMORY_AND_DISK
+   • table_size_gb > 2 GB → DISK_ONLY or avoid caching
+
+6. SPARK CONFIG CALIBRATED TO ACTUAL DATA SIZE
+   • shuffle.partitions = max(200, round(total_size_gb * 3))
+   • autoBroadcastJoinThreshold = 10% of executor memory
+   • executor.memory: 2× max single-partition size with 20% safety margin
+
+7. WINDOW FUNCTION OPTIMIZATION × SKEW
+   • Multiple Window.partitionBy on the same column → consolidate into one window spec
+   • Window on a column with skew_ratio > 5x → single executor holds the full skewed partition → OOM risk
+
+8. SCRIPT-TO-TELEMETRY HOTSPOT MAPPING
+   • Identify the SINGLE most expensive line: which table read/join dominates compute
+   • Connect dots explicitly: "line N reads TABLE (X files, Y GB) → line M joins it → Z shuffle overhead"
+   • If cold_data_estimate_gb > 0 and no date filter present → cold scan waste
+
+Respond ONLY with a JSON object:
+{{
+  "anti_patterns": [
+    {{"pattern": "name", "severity": "critical|high|medium|low", "cost_impact": "...",
+      "description": "...", "fix": "...", "line_numbers": [...]}}
+  ],
+  "anti_pattern_count": <int>,
+  "critical_issues": <int>,
+  "complexity": {{
+    "join_count": <int>, "window_function_count": <int>, "aggregation_count": <int>,
+    "complexity_score": <0-100>, "skew_risk_factors": [...]
+  }},
+  "optimizations": [
+    {{"category": "...", "recommendation": "...", "implementation": "...",
+      "estimated_savings_percent": <int>, "effort": "low|medium|high"}}
+  ],
+  "spark_configs": [
+    {{"config": "...", "current_value": "...", "recommended_value": "...", "reason": "..."}}
+  ],
+  "skew_mitigations": [...],
+  "iceberg_specific": [
+    {{"action": "OPTIMIZE|VACUUM|incremental_read|pushdown", "table": "...",
+      "reason": "...", "sql_or_code": "..."}}
+  ],
+  "line_hotspots": [
+    {{"line": <int>, "severity": "critical|high|medium|low",
+      "description": "...", "table": "...", "size_context": "...", "fix": "..."}}
+  ],
+  "top_expensive_line": {{"line": <int>, "reason": "...", "table": "...", "size_gb": <float>}},
+  "optimization_score": <0-100>,
+  "estimated_cost_reduction_percent": <int>,
+  "code_quality_score": <0-100>,
+  "recommendations": [
+    {{"priority": "P0|P1|P2|P3", "category": "code|config|iceberg|storage",
+      "title": "...", "description": "...", "implementation": "...",
+      "lines": [<int>], "estimated_savings_percent": <int>,
+      "size_evidence": "quote the specific telemetry that triggered this rec"}}
+  ]
+}}
+"""
+
+    def _detect_anti_patterns(self, code: str, lines: List[str]) -> List[Dict]:
+        """Detect anti-patterns in code."""
+        detected = []
+
+        for name, pattern_info in self.ANTI_PATTERNS.items():
+            pattern = pattern_info['pattern']
+            matches = []
+
+            for i, line in enumerate(lines, 1):
+                if re.search(pattern, line, re.IGNORECASE):
+                    matches.append({
+                        'line': i,
+                        'content': line.strip()[:100]
+                    })
+
+            if matches:
+                # Check for validation patterns (e.g., cache without unpersist)
+                if 'needs_validation' in pattern_info:
+                    validation = pattern_info['needs_validation']
+                    if validation in code.lower():
+                        continue  # Skip if validation pattern found
+
+                detected.append({
+                    'pattern': name,
+                    'severity': pattern_info['severity'],
+                    'cost_impact': pattern_info['cost_impact'],
+                    'description': pattern_info['description'],
+                    'fix': pattern_info['fix'],
+                    'occurrences': matches,
+                    'line_numbers': [m['line'] for m in matches]
+                })
+
+        return detected
+
+    def _analyze_complexity(self, code: str) -> Dict:
+        """Analyze code complexity."""
+        return {
+            'join_count': CodePatternMatcher.count_joins(code),
+            'window_function_count': CodePatternMatcher.count_window_functions(code),
+            'aggregation_count': CodePatternMatcher.count_aggregations(code),
+            'udf_count': len(re.findall(r'@udf|udf\(', code, re.IGNORECASE)),
+            'distinct_count': len(re.findall(r'\.distinct\(', code, re.IGNORECASE)),
+            'sort_count': len(re.findall(r'\.sort\(|\.orderBy\(', code, re.IGNORECASE)),
+            'union_count': len(re.findall(r'\.union\(|\.unionAll\(', code, re.IGNORECASE)),
+            'skew_risk_factors': CodePatternMatcher.detect_skew_risk(code),
+            'complexity_score': self._calculate_complexity_score(code)
+        }
+
+    def _calculate_complexity_score(self, code: str) -> int:
+        """Calculate overall complexity score 0-100."""
+        score = 20  # Base score
+
+        # Add complexity for various patterns
+        score += CodePatternMatcher.count_joins(code) * 8
+        score += CodePatternMatcher.count_window_functions(code) * 10
+        score += CodePatternMatcher.count_aggregations(code) * 3
+        score += len(re.findall(r'@udf|udf\(', code, re.IGNORECASE)) * 15
+        score += len(re.findall(r'\.distinct\(', code, re.IGNORECASE)) * 5
+        score += len(re.findall(r'\.sort\(|\.orderBy\(', code, re.IGNORECASE)) * 5
+
+        return min(100, score)
+
+    def _detect_optimizations(self, code: str, context: Dict) -> List[Dict]:
+        """Detect optimization opportunities."""
+        optimizations = []
+
+        # Check for missing broadcast hints
+        join_count = CodePatternMatcher.count_joins(code)
+        broadcast_count = len(re.findall(r'broadcast\(', code, re.IGNORECASE))
+
+        if join_count > 0 and broadcast_count == 0:
+            optimizations.append({
+                'category': 'join_optimization',
+                'recommendation': 'Add broadcast hints for small tables',
+                'implementation': 'from pyspark.sql.functions import broadcast\ndf.join(broadcast(small_df), "key")',
+                'estimated_savings_percent': 15,
+                'effort': 'low'
+            })
+
+        # Check for missing cache
+        action_count = len(re.findall(r'\.(count|collect|show|write|save)\(', code, re.IGNORECASE))
+        cache_count = len(re.findall(r'\.(cache|persist)\(', code, re.IGNORECASE))
+
+        if action_count > 1 and cache_count == 0:
+            optimizations.append({
+                'category': 'caching',
+                'recommendation': 'Cache intermediate DataFrames used multiple times',
+                'implementation': 'df = df.cache()\n# ... multiple actions ...\ndf.unpersist()',
+                'estimated_savings_percent': 30,
+                'effort': 'low'
+            })
+
+        # Check for predicate pushdown opportunity
+        if re.search(r'\.read[\s\S]*?\.filter\(', code, re.IGNORECASE):
+            optimizations.append({
+                'category': 'io_optimization',
+                'recommendation': 'Move filter predicates to read for pushdown',
+                'implementation': 'spark.read.parquet(path).filter("date = \'2024-01-01\'")',
+                'estimated_savings_percent': 20,
+                'effort': 'low'
+            })
+
+        # Check for column pruning
+        if re.search(r'\.read[\s\S]{0,100}\.select\(', code, re.IGNORECASE):
+            pass  # Already has column selection
+        elif '.read' in code:
+            optimizations.append({
+                'category': 'io_optimization',
+                'recommendation': 'Select only needed columns early',
+                'implementation': 'df = df.select("col1", "col2", "col3")',
+                'estimated_savings_percent': 10,
+                'effort': 'low'
+            })
+
+        # Check for coalesce before write
+        if re.search(r'\.write[\s\S]{0,50}\.save|\.write[\s\S]{0,50}\.parquet', code, re.IGNORECASE):
+            if not re.search(r'\.coalesce\([^)]+\)[\s\S]{0,50}\.write', code, re.IGNORECASE):
+                optimizations.append({
+                    'category': 'io_optimization',
+                    'recommendation': 'Add coalesce before write to control output files',
+                    'implementation': 'df.coalesce(num_files).write.parquet(output_path)',
+                    'estimated_savings_percent': 5,
+                    'effort': 'low'
+                })
+
+        # Check for window function optimization
+        window_count = CodePatternMatcher.count_window_functions(code)
+        if window_count > 3:
+            optimizations.append({
+                'category': 'window_optimization',
+                'recommendation': 'Consolidate window functions with same partition',
+                'implementation': 'Use single window spec for multiple window operations',
+                'estimated_savings_percent': 10,
+                'effort': 'medium'
+            })
+
+        # Check for AQE opportunity
+        if 'spark.sql.adaptive.enabled' not in code and join_count > 0:
+            optimizations.append({
+                'category': 'config_optimization',
+                'recommendation': 'Enable Adaptive Query Execution',
+                'implementation': '.config("spark.sql.adaptive.enabled", "true")',
+                'estimated_savings_percent': 20,
+                'effort': 'low'
+            })
+
+        return optimizations
+
+    def _recommend_spark_configs(self, code: str, context: Dict) -> List[Dict]:
+        """Recommend Spark configurations."""
+        configs = []
+
+        # Get context from size analysis
+        effective_size_gb = context.get('effective_size_gb', 100)
+        join_count = CodePatternMatcher.count_joins(code)
+
+        # Shuffle partitions
+        if effective_size_gb < 10:
+            shuffle_partitions = 50
+        elif effective_size_gb < 100:
+            shuffle_partitions = 200
+        elif effective_size_gb < 500:
+            shuffle_partitions = 400
+        else:
+            shuffle_partitions = 800
+
+        configs.append({
+            'config': 'spark.sql.shuffle.partitions',
+            'current_value': '200 (default)',
+            'recommended_value': str(shuffle_partitions),
+            'reason': f'Based on data size ({effective_size_gb:.0f} GB)'
+        })
+
+        # AQE configs
+        configs.extend([
+            {
+                'config': 'spark.sql.adaptive.enabled',
+                'current_value': 'false',
+                'recommended_value': 'true',
+                'reason': 'Enables automatic query optimization'
+            },
+            {
+                'config': 'spark.sql.adaptive.coalescePartitions.enabled',
+                'current_value': 'false',
+                'recommended_value': 'true',
+                'reason': 'Auto-coalesces small partitions'
+            },
+            {
+                'config': 'spark.sql.adaptive.skewJoin.enabled',
+                'current_value': 'false',
+                'recommended_value': 'true',
+                'reason': 'Handles skewed joins automatically'
+            }
+        ])
+
+        # Broadcast threshold
+        if join_count > 0:
+            configs.append({
+                'config': 'spark.sql.autoBroadcastJoinThreshold',
+                'current_value': '10MB',
+                'recommended_value': '100MB',
+                'reason': 'Increase broadcast threshold to reduce shuffles'
+            })
+
+        return configs
+
+    def _detect_skew_mitigations(self, code: str, context: Dict) -> List[Dict]:
+        """Detect if skew mitigations are present and recommend if needed."""
+        mitigations = []
+
+        skew_risk = context.get('skew_risk_score', 0)
+        join_count = CodePatternMatcher.count_joins(code)
+
+        # Check if salting is used
+        has_salting = 'salt' in code.lower() or 'rand()' in code.lower()
+
+        # Check if skew hint is used
+        has_skew_hint = 'skew' in code.lower()
+
+        if skew_risk > 50 and not has_salting:
+            mitigations.append({
+                'technique': 'Key Salting',
+                'applicable': True,
+                'implemented': False,
+                'implementation': '''
+# Add salt to skewed key
+from pyspark.sql.functions import concat, lit, floor, rand
+
+num_salt_buckets = 10
+df_large = df_large.withColumn("salt", floor(rand() * num_salt_buckets))
+df_large = df_large.withColumn("salted_key", concat(col("join_key"), lit("_"), col("salt")))
+
+# Explode small table
+df_small_exploded = df_small.crossJoin(
+    spark.range(num_salt_buckets).withColumnRenamed("id", "salt")
+)
+df_small_exploded = df_small_exploded.withColumn(
+    "salted_key", concat(col("join_key"), lit("_"), col("salt"))
+)
+
+# Join on salted key
+result = df_large.join(df_small_exploded, "salted_key")
+''',
+                'estimated_improvement': '50-80% for skewed joins'
+            })
+
+        if join_count > 3 and not has_skew_hint:
+            mitigations.append({
+                'technique': 'Skew Join Hint',
+                'applicable': True,
+                'implemented': False,
+                'implementation': '''
+# Enable skew join optimization
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256MB")
+''',
+                'estimated_improvement': '30-50% for skewed joins'
+            })
+
+        return mitigations
+
+    def _calculate_optimization_score(self, anti_patterns: List, optimizations: List, complexity: Dict) -> int:
+        """Calculate overall optimization score 0-100."""
+        score = 100
+
+        # Deduct for anti-patterns
+        for pattern in anti_patterns:
+            if pattern['severity'] == 'critical':
+                score -= 20
+            elif pattern['severity'] == 'high':
+                score -= 10
+            elif pattern['severity'] == 'medium':
+                score -= 5
+            else:
+                score -= 2
+
+        # Deduct for missed optimizations
+        score -= len(optimizations) * 3
+
+        # Deduct for high complexity without mitigations
+        if complexity['complexity_score'] > 70:
+            score -= 10
+
+        return max(0, score)
+
+    def _estimate_cost_reduction(self, anti_patterns: List, optimizations: List) -> int:
+        """Estimate potential cost reduction from fixes."""
+        reduction = 0
+
+        # Anti-pattern fixes
+        impact_map = {'critical': 25, 'high': 15, 'medium': 8, 'low': 3}
+        for pattern in anti_patterns:
+            reduction += impact_map.get(pattern['cost_impact'], 5)
+
+        # Optimization opportunities
+        for opt in optimizations:
+            reduction += opt.get('estimated_savings_percent', 5)
+
+        # Cap at 80% - can't reduce to zero
+        return min(80, reduction)
+
+    def _generate_recommendations(self, analysis: Dict) -> List[Dict]:
+        """Generate prioritized recommendations."""
+        recommendations = []
+
+        # Critical anti-patterns first
+        for pattern in analysis['anti_patterns']:
+            if pattern['severity'] in ('critical', 'high'):
+                recommendations.append({
+                    'priority': 'P0' if pattern['severity'] == 'critical' else 'P1',
+                    'category': 'code',
+                    'title': f"Fix: {pattern['pattern'].replace('_', ' ').title()}",
+                    'description': pattern['description'],
+                    'implementation': pattern['fix'],
+                    'lines': pattern['line_numbers'],
+                    'estimated_savings_percent': 15 if pattern['severity'] == 'critical' else 10
+                })
+
+        # Optimization opportunities
+        for opt in analysis['optimizations']:
+            recommendations.append({
+                'priority': 'P1' if opt['effort'] == 'low' else 'P2',
+                'category': opt['category'],
+                'title': opt['recommendation'],
+                'implementation': opt['implementation'],
+                'estimated_savings_percent': opt['estimated_savings_percent']
+            })
+
+        # Spark config recommendations
+        if analysis['spark_configs']:
+            recommendations.append({
+                'priority': 'P0',
+                'category': 'config',
+                'title': 'Apply Optimal Spark Configurations',
+                'description': 'Update Spark configurations for better performance',
+                'configs': analysis['spark_configs'],
+                'estimated_savings_percent': 20
+            })
+
+        return recommendations

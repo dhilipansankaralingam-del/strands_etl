@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PySpark Optimizer – Batch Summary – customer_order_summary_glue</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222}
+  h1{background:#1a237e;color:#fff;padding:16px 24px;border-radius:8px;margin:0 0 20px}
+  h2{color:#1a237e;border-bottom:2px solid #1a237e;padding-bottom:4px;margin-top:28px}
+  .cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+  .card{background:#fff;border-radius:8px;padding:16px 24px;flex:1;min-width:140px;
+          box-shadow:0 1px 4px rgba(0,0,0,.12)}
+  .card .val{font-size:28px;font-weight:700;color:#1a237e}
+  .card .lbl{font-size:12px;color:#666;margin-top:4px}
+  .savings .val{color:#2e7d32}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
+          overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+  th{background:#1a237e;color:#fff;padding:10px 12px;text-align:left;font-size:13px}
+  td{padding:8px 12px;border-bottom:1px solid #eee;font-size:13px}
+  tr:last-child td{border-bottom:none}
+  .footer{margin-top:32px;font-size:11px;color:#999;text-align:center}
+</style>
+</head>
+<body>
+<h1>PySpark Cost Optimizer — Batch Summary — customer_order_summary_glue</h1>
+<p style="color:#555">Generated: 2026-05-05 &nbsp;|&nbsp; Region: us-west-2</p>
+
+<div class="cards">
+  <div class="card"><div class="val">1</div><div class="lbl">Scripts analysed</div></div>
+  <div class="card"><div class="val">0</div><div class="lbl">Total anti-patterns</div></div>
+  <div class="card savings"><div class="val">80%</div><div class="lbl">Avg potential savings</div></div>
+  <div class="card savings"><div class="val">$535</div><div class="lbl">Total annual savings</div></div>
+</div>
+
+<h2>Per-Script Results</h2>
+<table>
+<thead><tr><th>Script</th><th>Anti-patterns</th><th>Savings %</th><th>Annual Savings</th></tr></thead>
+<tbody><tr><td>✔ customer_order_summary_glue</td><td style='text-align:center;color:#2e7d32;font-weight:700'>0 (0 crit)</td><td style='text-align:right'>80%</td><td style='text-align:right'>$535</td></tr>
+</tbody>
+</table>
+
+<h2>Top Anti-patterns Across All Scripts</h2>
+<table>
+<thead><tr><th>Pattern</th><th>Count</th><th>Frequency</th></tr></thead>
+<tbody></tbody>
+</table>
+
+<div class="footer">strands_optimizer v2.0 — us.anthropic.claude-3-7-sonnet-20250219-v1:0</div>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "_description": "Sample source tables configuration for cost optimization analysis",
+  "_instructions": "Provide record counts or size_gb for accurate analysis",
+
+  "tables": [
+    {
+      "database": "sales_db",
+      "table": "transactions",
+      "record_count": 50000000,
+      "column_count": 35,
+      "format": "parquet",
+      "location": "s3://data-lake/sales/transactions/",
+      "partition_column": "transaction_date",
+      "has_skew": false
+    },
+    {
+      "database": "customer_db",
+      "table": "customers",
+      "record_count": 5000000,
+      "column_count": 25,
+      "format": "parquet",
+      "location": "s3://data-lake/customer/customers/",
+      "partition_column": null,
+      "broadcast": true
+    },
+    {
+      "database": "product_db",
+      "table": "products",
+      "record_count": 100000,
+      "column_count": 20,
+      "format": "parquet",
+      "location": "s3://data-lake/product/products/",
+      "broadcast": true
+    },
+    {
+      "database": "events_db",
+      "table": "clickstream",
+      "record_count": 500000000,
+      "column_count": 45,
+      "format": "parquet",
+      "location": "s3://data-lake/events/clickstream/",
+      "partition_column": "event_date",
+      "has_skew": true,
+      "_note": "Very large table with date skew"
+    }
+  ]
+}

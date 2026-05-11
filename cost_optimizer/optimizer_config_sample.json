@@ -1,0 +1,69 @@
+{
+  "_description": "Sample config for strands_optimizer.  Pass with --config optimizer_config_sample.json",
+  "_instructions": [
+    "tables: list every source table read by the job(s).",
+    "Provide record_count or size_gb for accurate sizing; omit both to use heuristics.",
+    "optimizer: tune output, S3 destination and analysis flags.",
+    "current_job_config: mirrors your current Glue/EMR job settings."
+  ],
+
+  "tables": [
+    {
+      "database":         "sales_db",
+      "table":            "transactions",
+      "record_count":     50000000,
+      "column_count":     35,
+      "format":           "parquet",
+      "location":         "s3://my-data-lake/sales/transactions/",
+      "partition_column": "transaction_date",
+      "has_skew":         false
+    },
+    {
+      "database":         "customer_db",
+      "table":            "customers",
+      "record_count":     5000000,
+      "column_count":     25,
+      "format":           "parquet",
+      "location":         "s3://my-data-lake/customer/customers/",
+      "broadcast":        true
+    },
+    {
+      "database":         "product_db",
+      "table":            "products",
+      "record_count":     100000,
+      "column_count":     20,
+      "format":           "parquet",
+      "location":         "s3://my-data-lake/product/products/",
+      "broadcast":        true
+    },
+    {
+      "database":         "events_db",
+      "table":            "clickstream",
+      "record_count":     500000000,
+      "column_count":     45,
+      "format":           "parquet",
+      "location":         "s3://my-data-lake/events/clickstream/",
+      "partition_column": "event_date",
+      "has_skew":         true,
+      "_note":            "Very large table with date skew – small-file check recommended"
+    }
+  ],
+
+  "current_job_config": {
+    "platform":          "glue",
+    "worker_type":       "G.2X",
+    "number_of_workers": 10,
+    "processing_mode":   "full",
+    "runs_per_day":      1
+  },
+
+  "optimizer": {
+    "use_llm":           false,
+    "show_line_findings": true,
+    "check_small_files": true,
+    "s3_bucket":         "my-optimizer-results",
+    "s3_prefix":         "optimizer-results",
+    "output_dir":        "optimizer_reports",
+    "interactive":       false
+  }
+}
