@@ -101,28 +101,6 @@ class CostOptimizationOrchestrator:
         if agents:
             print(f"  [INFO] Running agents: {', '.join(sorted(run_agents))}")
 
-        import json as _json
-        print("\n" + "=" * 60)
-        print("  [DEBUG] AnalysisInput")
-        print("=" * 60)
-        print(f"  script_path     : {input_data.script_path}")
-        print(f"  processing_mode : {input_data.processing_mode}")
-        print(f"  job_name        : {input_data.job_name}")
-        print(f"  script_content  : {len(input_data.script_content)} chars")
-        print(f"  current_config  : {input_data.current_config}")
-        print(f"  source_tables   : {len(input_data.source_tables)} table(s)")
-        for i, t in enumerate(input_data.source_tables, 1):
-            keys = [k for k in t if k != "iceberg_stats"]
-            ice  = t.get("iceberg_stats", {})
-            print(f"    [{i}] {t.get('database','')}.{t.get('table','?')} | "
-                  f"format={t.get('format','?')} | is_iceberg={t.get('is_iceberg','?')} | "
-                  f"size_gb={t.get('size_gb','N/A')} | records={t.get('record_count','N/A')} | "
-                  f"partition_col={t.get('partition_column','N/A')}")
-            if ice:
-                print(f"         iceberg_stats keys: {list(ice.keys())}")
-        print(f"  additional_context keys: {list(input_data.additional_context.keys())}")
-        print("=" * 60 + "\n")
-
         _skipped = AnalysisResult(agent_name="skipped", success=True, analysis={}, recommendations=[])
 
         # Phase 1: Size Analysis (runs first)

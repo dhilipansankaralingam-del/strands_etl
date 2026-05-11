@@ -1128,24 +1128,7 @@ def analyze_pyspark_script(
         detection = auto_detect_tables(script_path, athena_output_s3=athena_output_s3)
         tables = detection.get("tables", [])
 
-    # ── Always store resolved tables so _run_one / --small-files can use them
-    # regardless of whether they came from --config or auto-detection.
     _state["detected_tables"][script_path] = tables
-
-    # ── Auto small-file scan for every table that has an S3 location ──────────
-    # Runs unconditionally (no --small-files flag needed) so the results are
-    # available to the recommendations context below.
-    for tbl in tables:
-        loc = tbl.get("location", "")
-        db  = tbl.get("database", "")
-        tn  = tbl.get("table", "")
-        if loc.startswith("s3") or (db and tn):
-            sf = detect_small_file_problem(
-                location=loc, database=db, table_name=tn,
-                athena_output_s3=athena_output_s3,
-            )
-            if sf.get("has_problem"):
-                tbl["_small_file_report"] = sf   # carry into orchestrator context
 
     orchestrator = CostOptimizationOrchestrator(
         use_llm  = use_llm,
@@ -3516,14 +3499,7 @@ Examples:
             "Takes precedence over --config when both are given."
         ),
     )
-    p.add_argument(
-        "--database", default="", metavar="DB",
-        help=(
-            "Default Glue database for bare table names passed via --tables. "
-            "E.g. --tables orders customers --database sales_db  resolves both "
-            "via Glue as sales_db.orders and sales_db.customers."
-        ),
-    )
+
     p.add_argument("--processing-mode", choices=["full", "delta"], default="full",
                    help="Processing mode: full (default) or delta/incremental")
     p.add_argument("--workers", type=int, default=None,
