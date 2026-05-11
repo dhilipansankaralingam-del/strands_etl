@@ -346,24 +346,15 @@ class CostOptimizerAgent(ABC):
                 )
                 tools = self.AGENT_TOOLS or []
                 if tools:
-                    agent_kwargs["tools"]          = tools
-                    agent_kwargs["max_iterations"] = self.MAX_ITERATIONS
+                    agent_kwargs["tools"] = tools
                     _log.info(
-                        "[agent/%s] agentic mode: %d tools, max_iterations=%d",
-                        self.AGENT_NAME, len(tools), self.MAX_ITERATIONS,
+                        "[agent/%s] agentic mode: %d tools",
+                        self.AGENT_NAME, len(tools),
                     )
                 else:
                     _log.info("[agent/%s] single-shot mode (no tools)", self.AGENT_NAME)
 
                 self._agent = Agent(**agent_kwargs)
-            except TypeError as _te:
-                # Older strands builds don't accept max_iterations in the constructor.
-                agent_kwargs.pop("max_iterations", None)
-                self._agent = Agent(**agent_kwargs)
-                _log.warning(
-                    "[agent/%s] max_iterations not supported by this strands build (%s); "
-                    "running without iteration cap", self.AGENT_NAME, _te,
-                )
 
             except ImportError:
                 raise ImportError(
