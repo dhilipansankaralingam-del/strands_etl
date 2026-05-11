@@ -808,3 +808,352 @@ def pareto_rank_recommendations(
             f"Focus there first (Pareto 80/20 principle)."
         ),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Benford's Law test
+#     P(d) = log10(1 + 1/d)   for first digit d ∈ {1..9}
+#     Chi-square goodness-of-fit against the expected distribution.
+#     Used to detect data fabrication, ETL bugs, or systematic rounding.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def benford_law_test(digit_counts: Dict[str, int]) -> Dict[str, Any]:
+    """
+    Chi-square test of first-digit distribution against Benford's Law.
+
+    digit_counts: {"1": n1, "2": n2, ..., "9": n9}
+                  (keys are string digits 1-9, values are observed counts)
+
+    Returns: chi_square, p_value_approx, conformity_score (0-100),
+             expected_pct, observed_pct, anomalous_digits, interpretation.
+    """
+    expected_pct = {
+        str(d): math.log10(1 + 1 / d) * 100 for d in range(1, 10)
+    }
+    total = sum(digit_counts.get(str(d), 0) for d in range(1, 10))
+    if total < 100:
+        return {"error": "Need at least 100 observations for Benford test"}
+
+    chi_sq = 0.0
+    observed_pct: Dict[str, float] = {}
+    anomalous: List[str] = []
+    for d in range(1, 10):
+        key = str(d)
+        obs = digit_counts.get(key, 0)
+        exp = expected_pct[key] / 100.0 * total
+        observed_pct[key] = round(obs / total * 100, 2)
+        if exp > 0:
+            chi_sq += (obs - exp) ** 2 / exp
+        # Flag digit if observed deviates > 5 percentage points from expected
+        if abs(observed_pct[key] - expected_pct[key]) > 5:
+            anomalous.append(key)
+
+    # Degrees of freedom = 8 (9 digits - 1)
+    # Critical values (chi-square, df=8): p=0.05 → 15.51, p=0.01 → 20.09
+    if chi_sq < 15.51:
+        p_approx, conformity = "p > 0.05 (likely conforms)", min(100, max(0, int(100 - chi_sq * 3)))
+    elif chi_sq < 20.09:
+        p_approx, conformity = "p ≈ 0.01–0.05 (marginal)", max(0, int(60 - chi_sq))
+    else:
+        p_approx, conformity = "p < 0.01 (does NOT conform)", max(0, int(40 - chi_sq // 2))
+
+    return {
+        "model":            "Benford's Law: P(d) = log10(1 + 1/d)",
+        "chi_square":       round(chi_sq, 3),
+        "p_value_approx":   p_approx,
+        "conformity_score": conformity,
+        "expected_pct":     {k: round(v, 2) for k, v in expected_pct.items()},
+        "observed_pct":     observed_pct,
+        "total_values":     total,
+        "anomalous_digits": anomalous,
+        "interpretation": (
+            f"χ²={chi_sq:.2f} (df=8). {p_approx}. "
+            f"{'Conforms to Benford — natural data.' if not anomalous else 'Anomalous digits: ' + ', '.join(anomalous) + ' — possible ETL bug, rounding, or fabrication.'}"
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Z-score outlier detection
+#     z = (x - μ) / σ   — flags values > n_sigma standard deviations from mean
+#     Also computes IQR fences as a non-parametric alternative.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def zscore_outlier_score(
+    col_stats: Dict[str, Any],
+    n_sigma: float = 3.0,
+) -> Dict[str, Any]:
+    """
+    Z-score and IQR outlier analysis from aggregated column statistics.
+
+    col_stats: {
+        "column": "amount",
+        "min": 0.01, "max": 99999.99,
+        "mean": 234.56, "stddev": 456.78,
+        "total_rows": 1000000,
+        "null_count": 500,
+        "p25": 45.0, "p50": 120.0, "p75": 380.0   # optional
+    }
+    n_sigma: threshold — default 3.0 (99.7% of normal distribution)
+
+    Returns: z_score_max, z_score_min, iqr_upper_fence, iqr_lower_fence,
+             outlier_risk (NONE/LOW/MEDIUM/HIGH/EXTREME), interpretation.
+    """
+    col   = col_stats.get("column", "unknown")
+    mn    = col_stats.get("min",    0.0)
+    mx    = col_stats.get("max",    0.0)
+    mean  = col_stats.get("mean",   0.0)
+    std   = col_stats.get("stddev", 0.0)
+    p25   = col_stats.get("p25")
+    p75   = col_stats.get("p75")
+
+    result: Dict[str, Any] = {
+        "model":  f"Z-score: z = (x - μ) / σ, n_sigma={n_sigma}",
+        "column": col,
+    }
+
+    if std and std > 0:
+        z_max = (mx   - mean) / std
+        z_min = (mn   - mean) / std
+        result["z_score_max"] = round(z_max, 2)
+        result["z_score_min"] = round(z_min, 2)
+        risk_z = (
+            "EXTREME" if max(abs(z_max), abs(z_min)) > 10 else
+            "HIGH"    if max(abs(z_max), abs(z_min)) > 6  else
+            "MEDIUM"  if max(abs(z_max), abs(z_min)) > n_sigma else
+            "LOW"     if max(abs(z_max), abs(z_min)) > n_sigma * 0.8 else
+            "NONE"
+        )
+    else:
+        risk_z = "NONE"
+
+    if p25 is not None and p75 is not None:
+        iqr = p75 - p25
+        iqr_upper = p75 + 1.5 * iqr
+        iqr_lower = p25 - 1.5 * iqr
+        result["iqr"]             = round(iqr, 4)
+        result["iqr_upper_fence"] = round(iqr_upper, 4)
+        result["iqr_lower_fence"] = round(iqr_lower, 4)
+        result["max_exceeds_iqr"] = mx > iqr_upper
+        result["min_exceeds_iqr"] = mn < iqr_lower
+        risk_iqr = "HIGH" if (mx > iqr_upper or mn < iqr_lower) else "NONE"
+    else:
+        risk_iqr = "NONE"
+
+    overall_risk = (
+        "EXTREME" if risk_z == "EXTREME" else
+        "HIGH"    if "HIGH" in (risk_z, risk_iqr) else
+        "MEDIUM"  if risk_z == "MEDIUM" else
+        "LOW"     if risk_z == "LOW" else
+        "NONE"
+    )
+    result["outlier_risk"]  = overall_risk
+    result["interpretation"] = (
+        f"Column '{col}': range=[{mn}, {mx}], mean={mean:.2f}, σ={std:.2f}. "
+        f"Outlier risk: {overall_risk}. "
+        f"{'Max z-score=' + str(result.get('z_score_max','?')) + ' — extreme values present.' if overall_risk in ('HIGH','EXTREME') else 'Distribution looks normal within ' + str(n_sigma) + 'σ.'}"
+    )
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. Jensen-Shannon Divergence (distribution drift)
+#     JSD(P||Q) = ½·KLD(P||M) + ½·KLD(Q||M),   M = ½(P+Q)
+#     Symmetric, bounded [0,1]. 0 = identical, 1 = completely different.
+#     Use to compare column value distributions across snapshots or time windows.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def jensen_shannon_drift(
+    baseline_counts: Dict[str, int],
+    current_counts:  Dict[str, int],
+    column_name: str = "",
+) -> Dict[str, Any]:
+    """
+    Jensen-Shannon Divergence between two categorical/binned distributions.
+
+    baseline_counts: {category: count} from reference snapshot or time window
+    current_counts:  {category: count} from latest snapshot
+
+    Returns: jsd_score (0-1), drift_level (NONE/LOW/MEDIUM/HIGH/CRITICAL),
+             top_shifted_categories, interpretation.
+    """
+    all_keys = set(baseline_counts) | set(current_counts)
+    if not all_keys:
+        return {"error": "Both distributions are empty"}
+
+    b_total = max(sum(baseline_counts.values()), 1)
+    c_total = max(sum(current_counts.values()),  1)
+
+    def kld(p: float, q: float) -> float:
+        if p == 0:
+            return 0.0
+        if q == 0:
+            return float("inf")
+        return p * math.log2(p / q)
+
+    jsd = 0.0
+    shifts: List[Tuple[str, float]] = []
+    for key in all_keys:
+        p = baseline_counts.get(key, 0) / b_total
+        q = current_counts.get(key,  0) / c_total
+        m = (p + q) / 2.0
+        contribution = 0.5 * kld(p, m) + 0.5 * kld(q, m)
+        if math.isfinite(contribution):
+            jsd += contribution
+        shift_pct = (q - p) * 100
+        if abs(shift_pct) > 1:
+            shifts.append((key, round(shift_pct, 2)))
+
+    jsd = min(jsd, 1.0)  # cap at 1 (floating-point safety)
+    shifts.sort(key=lambda x: -abs(x[1]))
+
+    drift_level = (
+        "CRITICAL" if jsd > 0.4 else
+        "HIGH"     if jsd > 0.2 else
+        "MEDIUM"   if jsd > 0.1 else
+        "LOW"      if jsd > 0.02 else
+        "NONE"
+    )
+
+    return {
+        "model":                "Jensen-Shannon Divergence: JSD = ½KLD(P||M)+½KLD(Q||M)",
+        "column":               column_name,
+        "jsd_score":            round(jsd, 4),
+        "drift_level":          drift_level,
+        "top_shifted_categories": [{"category": k, "shift_pct": v} for k, v in shifts[:10]],
+        "interpretation": (
+            f"JSD={jsd:.4f} → {drift_level} drift. "
+            f"{'Distribution matches baseline.' if drift_level == 'NONE' else 'Top shifts: ' + ', '.join(k + '(' + ('+' if v>0 else '') + str(v) + '%)' for k,v in shifts[:3])}"
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. Primary Key Health
+#     Uniqueness ratio, duplicate rate, null rate, composite key entropy.
+#     A healthy PK should have uniqueness_ratio = 1.0 and null_rate = 0.0.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pk_uniqueness_health(
+    total_rows: int,
+    distinct_pk: int,
+    null_pk:     int = 0,
+    pk_columns:  Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Score the health of a primary key based on uniqueness and completeness.
+
+    total_rows:  COUNT(*) from the table
+    distinct_pk: COUNT(DISTINCT pk_col) or COUNT(DISTINCT pk1, pk2, ...)
+    null_pk:     number of rows where any PK column is NULL
+
+    Returns: uniqueness_ratio, duplicate_count, null_rate,
+             health_score (0-100), health_grade, interpretation.
+    """
+    if total_rows <= 0:
+        return {"error": "total_rows must be > 0"}
+
+    uniqueness_ratio = distinct_pk / total_rows
+    duplicate_count  = total_rows - distinct_pk
+    null_rate        = null_pk   / total_rows
+
+    # Health score: starts at 100, penalised by duplicates and nulls
+    dup_penalty  = min(60, (duplicate_count / max(total_rows, 1)) * 10_000)
+    null_penalty = min(30, null_rate * 10_000)
+    health_score = max(0, round(100 - dup_penalty - null_penalty))
+
+    grade = (
+        "A" if health_score >= 95 else
+        "B" if health_score >= 85 else
+        "C" if health_score >= 70 else
+        "D" if health_score >= 50 else
+        "F"
+    )
+
+    return {
+        "model":             "PK Health: uniqueness_ratio = distinct_pk / total_rows",
+        "pk_columns":        pk_columns or [],
+        "total_rows":        total_rows,
+        "distinct_pk":       distinct_pk,
+        "duplicate_count":   duplicate_count,
+        "null_pk":           null_pk,
+        "uniqueness_ratio":  round(uniqueness_ratio, 6),
+        "duplicate_rate_pct": round((1 - uniqueness_ratio) * 100, 4),
+        "null_rate_pct":     round(null_rate * 100, 4),
+        "health_score":      health_score,
+        "health_grade":      grade,
+        "interpretation": (
+            f"PK {pk_columns}: uniqueness={uniqueness_ratio:.4%}, "
+            f"duplicates={duplicate_count:,}, nulls={null_pk:,}. "
+            f"Grade {grade} ({health_score}/100). "
+            f"{'Healthy — PK is unique and complete.' if grade in ('A','B') else 'Issues detected — duplicates or nulls violate PK constraint.'}"
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Completeness weighted score
+#     Weighted completeness = Σ (weight_i * (1 - null_rate_i)) / Σ weight_i
+#     Columns are weighted by role: PK > NOT NULL > regular.
+#     Measures how completely the table is populated.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def completeness_weighted_score(
+    column_null_rates: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Compute a weighted completeness score for a table.
+
+    column_null_rates: list of {
+        "column":   str,
+        "null_pct": float,          # 0-100
+        "role":     "pk"|"required"|"optional"   # optional, defaults to "optional"
+    }
+
+    Returns: overall_score (0-100), worst_columns, interpretation.
+    """
+    if not column_null_rates:
+        return {"error": "column_null_rates must not be empty"}
+
+    role_weight = {"pk": 3.0, "required": 2.0, "optional": 1.0}
+    weighted_sum = 0.0
+    total_weight = 0.0
+    per_col: List[Dict] = []
+
+    for col in column_null_rates:
+        name     = col.get("column", "?")
+        null_pct = float(col.get("null_pct", 0))
+        role     = col.get("role", "optional")
+        weight   = role_weight.get(role, 1.0)
+        complete = max(0.0, 100.0 - null_pct)
+        weighted_sum += weight * complete
+        total_weight += weight
+        per_col.append({
+            "column": name, "role": role,
+            "null_pct": round(null_pct, 3),
+            "completeness_pct": round(complete, 3),
+            "weight": weight,
+        })
+
+    overall = round(weighted_sum / max(total_weight, 1.0), 2)
+    worst   = sorted(per_col, key=lambda x: x["null_pct"], reverse=True)[:5]
+
+    grade = (
+        "A" if overall >= 99   else
+        "B" if overall >= 95   else
+        "C" if overall >= 85   else
+        "D" if overall >= 70   else
+        "F"
+    )
+
+    return {
+        "model":         "Weighted completeness = Σ(w_i × complete_i) / Σw_i",
+        "overall_score": overall,
+        "grade":         grade,
+        "per_column":    per_col,
+        "worst_columns": worst,
+        "interpretation": (
+            f"Overall completeness {overall:.1f}% (grade {grade}). "
+            f"{'Fully populated.' if overall >= 99 else 'Worst columns: ' + ', '.join(c['column'] + '(' + str(c['null_pct']) + '% null)' for c in worst[:3])}"
+        ),
+    }
