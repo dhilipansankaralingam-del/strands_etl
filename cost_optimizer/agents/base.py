@@ -75,6 +75,74 @@ def _box_bottom() -> None:
     print(f"  └{'─' * (_BOX_W - 4)}┘")
 
 
+def _print_iceberg_metrics(source_tables: List[Dict]) -> None:
+    """Print all Iceberg metadata table metrics to console before the LLM call."""
+    tables_with_stats = [t for t in source_tables if t.get("iceberg_stats")]
+    if not tables_with_stats:
+        return
+    W = 72
+    print(f"\n{'─' * W}")
+    print(f"  TABLE METRICS — fed into LLM  ($files / $snapshots / $partitions)")
+    print(f"{'─' * W}")
+    for tbl in tables_with_stats:
+        s = tbl["iceberg_stats"]
+        db_tbl = f"{tbl.get('database', '?')}.{tbl.get('table', '?')}"
+        bar = "─" * max(2, W - 6 - len(db_tbl))
+        print(f"\n  ┌── {db_tbl} {bar}")
+        print(f"  │  [$files — current snapshot only]")
+        print(f"  │    Files           : {s.get('file_cnt', 0):>10,}")
+        print(f"  │    Total size      : {s.get('total_size_gb', 0):>10.3f} GB")
+        print(f"  │    Avg size        : {s.get('avg_file_size_mb', 0):>10.2f} MB")
+        print(f"  │    Min size        : {s.get('min_file_size_kb', 0):>10.2f} KB")
+        print(f"  │    Max size        : {s.get('max_file_size_mb', 0):>10.2f} MB")
+        print(f"  │    Tiny (<10MB)    : {s.get('tiny_file_cnt', 0):>10,}")
+        print(f"  │    Small (<128MB)  : {s.get('small_file_cnt', 0):>10,}")
+        cv = s.get("file_size_cv") or 0.0
+        cv_note = "  ← HIGH variability" if cv > 1 else ""
+        print(f"  │    Size CV         : {cv:>10.3f}{cv_note}")
+        print(f"  │    Records         : {s.get('total_records', 0):>10,}")
+        print(f"  │    Partitions      : {s.get('partition_count', 0):>10,}")
+        if s.get("snapshot_count") is not None:
+            print(f"  │")
+            print(f"  │  [$snapshots]")
+            print(f"  │    Count           : {s.get('snapshot_count', 0):>10,}")
+            print(f"  │    Oldest          : {s.get('oldest_snapshot_ts', 'N/A')}")
+            print(f"  │    Newest          : {s.get('newest_snapshot_ts', 'N/A')}")
+            print(f"  │    Added files     : {s.get('total_added_files', 0):>10,}")
+            print(f"  │    Deleted files   : {s.get('total_deleted_files', 0):>10,}")
+            print(f"  │    Added records   : {s.get('total_added_records', 0):>10,}")
+        if s.get("skew_ratio") is not None:
+            sr = s.get("skew_ratio") or 1.0
+            sr_note = "  ← SKEWED" if sr > 5 else ""
+            print(f"  │")
+            print(f"  │  [$partitions]")
+            print(f"  │    Skew ratio      : {sr:>10.2f}×{sr_note}  (max/avg records per partition)")
+            print(f"  │    Min records     : {s.get('min_partition_records', 0):>10,}")
+            print(f"  │    Max records     : {s.get('max_partition_records', 0):>10,}")
+            print(f"  │    Avg records     : {s.get('avg_partition_records', 0):>10,}")
+        if tbl.get("profile"):
+            prof = tbl["profile"]
+            print(f"  │")
+            print(f"  │  [Data Profile]")
+            pks = prof.get("pk_columns") or []
+            if pks:
+                print(f"  │    PK columns      : {', '.join(pks)}")
+            if prof.get("row_count") is not None:
+                print(f"  │    Row count       : {prof.get('row_count', 0):>10,}")
+            if prof.get("pk_duplicate_count") is not None:
+                print(f"  │    PK duplicates   : {prof.get('pk_duplicate_count', 0):>10,}")
+            high_null = [
+                (c["column"], c.get("null_pct", 0))
+                for c in (prof.get("columns") or [])
+                if c.get("null_pct", 0) > 5
+            ]
+            if high_null:
+                summary = ", ".join(f"{c}({p:.1f}%)" for c, p in high_null[:5])
+                print(f"  │    High-null cols  : {summary}")
+        print(f"  └{'─' * (W - 4)}")
+    print()
+
+
 def _box_error(source: str, exc_type: str, message: str, hints: List[str]) -> None:
     """Print a red-flagged error block inside the LLM call box."""
     _box_divider("ERROR")
@@ -420,6 +488,9 @@ class CostOptimizerAgent(ABC):
                   f"({type(_prompt_exc).__name__}: {_prompt_exc}); falling back to rule-based")
             print(f"  {_tb.format_exc().strip()}")
             return self._analyze_rule_based(input_data, context)
+
+        # ── Print table metrics before LLM call ─────────────────────────────
+        _print_iceberg_metrics(input_data.source_tables)
 
         response_text = ""
         input_tokens  = 0

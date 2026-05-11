@@ -5,6 +5,7 @@ from .size_analyzer import SizeAnalyzerAgent
 from .code_analyzer import CodeAnalyzerAgent
 from .resource_allocator import ResourceAllocatorAgent
 from .recommendations import RecommendationsAgent
+from .data_quality_agent import DataQualityAgent
 from .recommendation_applier import RecommendationApplierAgent
 from .job_generator import JobGeneratorAgent
 from .glue_metrics_analyzer import GlueMetricsAnalyzer
@@ -24,6 +25,7 @@ __all__ = [
     'CodeAnalyzerAgent',
     'ResourceAllocatorAgent',
     'RecommendationsAgent',
+    'DataQualityAgent',
     'RecommendationApplierAgent',
     'JobGeneratorAgent',
     'GlueMetricsAnalyzer',

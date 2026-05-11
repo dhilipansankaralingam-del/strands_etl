@@ -526,6 +526,139 @@ FROM {tbl_ref}$partitions
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Data profiling via Athena
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _profile_table(
+    database:    str,
+    table_name:  str,
+    pk_columns:  List[str],
+    output_s3:   str,
+    region:      str = DEFAULT_REGION,
+) -> Dict:
+    """
+    Run lightweight data-quality profiling queries against an Iceberg table.
+
+    Queries executed:
+      1. information_schema.columns — get all column names and types
+      2. Dynamic null-count query  — null_pct per column
+      3. PK uniqueness check       — distinct_pk, null_pk, duplicate_count
+      4. Benford first-digit scan  — for the first numeric column found
+
+    Returns a profile dict with:
+      {
+        "pk_columns":         [str],
+        "row_count":          int,
+        "pk_distinct_count":  int,
+        "pk_null_count":      int,
+        "pk_duplicate_count": int,
+        "columns": [
+          {"column": str, "data_type": str, "null_pct": float}
+        ],
+        "benford_digits": {
+          "<col>": [int, int, ...9 ints]  # digit_1_count .. digit_9_count
+        }
+      }
+    """
+    if not output_s3:
+        return {"error": "athena_output_s3 required for profiling"}
+
+    profile: Dict[str, Any] = {
+        "pk_columns": pk_columns,
+        "row_count":  0,
+        "pk_distinct_count": 0,
+        "pk_null_count":     0,
+        "pk_duplicate_count": 0,
+        "columns":      [],
+        "benford_digits": {},
+    }
+
+    tbl_ref = f'"{database}"."{table_name}"'
+
+    # ── 1. Discover columns ──────────────────────────────────────────────────
+    cols_sql = f"""
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = '{database}' AND table_name = '{table_name}'
+ORDER BY ordinal_position
+""".strip()
+    cols_rows = _run_athena_query(cols_sql, database, output_s3, region)
+    if not cols_rows:
+        return {"error": f"Could not read information_schema for {database}.{table_name}"}
+
+    all_columns  = [(r["column_name"], r["data_type"]) for r in cols_rows]
+    numeric_cols = [
+        c for c, t in all_columns
+        if any(k in t.lower() for k in ("int", "bigint", "double", "float", "decimal", "numeric"))
+    ]
+
+    # ── 2. Null counts ────────────────────────────────────────────────────────
+    # Build a single query that counts nulls for all columns.
+    # Limit to first 30 columns to avoid overly long queries.
+    sample_cols = [c for c, _ in all_columns[:30]]
+    null_exprs  = ", ".join(
+        f"round(100.0 * SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS {c}__null_pct"
+        for c in sample_cols
+    )
+    null_sql = f"SELECT COUNT(*) AS row_count, {null_exprs} FROM {tbl_ref}"
+    null_rows = _run_athena_query(null_sql, database, output_s3, region)
+    if null_rows:
+        r = null_rows[0]
+        profile["row_count"] = int(r.get("row_count") or 0)
+        profile["columns"] = [
+            {
+                "column":    c,
+                "data_type": dt,
+                "null_pct":  float(r.get(f"{c}__null_pct") or 0),
+            }
+            for c, dt in all_columns[:30]
+        ]
+
+    # ── 3. PK uniqueness ─────────────────────────────────────────────────────
+    if pk_columns and profile["row_count"] > 0:
+        pk_concat = " || '|' || ".join(
+            f"COALESCE(CAST({c} AS VARCHAR), '__NULL__')" for c in pk_columns
+        )
+        null_filter = " OR ".join(f"{c} IS NULL" for c in pk_columns)
+        pk_sql = f"""
+SELECT
+    COUNT(DISTINCT {pk_concat}) AS distinct_pk,
+    SUM(CASE WHEN {null_filter} THEN 1 ELSE 0 END) AS null_pk
+FROM {tbl_ref}
+""".strip()
+        pk_rows = _run_athena_query(pk_sql, database, output_s3, region)
+        if pk_rows:
+            r = pk_rows[0]
+            distinct = int(r.get("distinct_pk") or 0)
+            null_pk  = int(r.get("null_pk") or 0)
+            total    = profile["row_count"]
+            profile["pk_distinct_count"]  = distinct
+            profile["pk_null_count"]      = null_pk
+            profile["pk_duplicate_count"] = max(0, total - distinct)
+
+    # ── 4. Benford first-digit scan (first numeric column, if any) ────────────
+    if numeric_cols:
+        num_col = numeric_cols[0]
+        digit_exprs = ", ".join(
+            f"SUM(CASE WHEN SUBSTR(CAST(ABS({num_col}) AS VARCHAR), 1, 1) = '{d}' THEN 1 ELSE 0 END) AS d{d}"
+            for d in range(1, 10)
+        )
+        benford_sql = f"""
+SELECT {digit_exprs}
+FROM {tbl_ref}
+WHERE {num_col} IS NOT NULL AND {num_col} > 0
+""".strip()
+        bf_rows = _run_athena_query(benford_sql, database, output_s3, region)
+        if bf_rows:
+            r = bf_rows[0]
+            profile["benford_digits"][num_col] = [
+                int(r.get(f"d{d}") or 0) for d in range(1, 10)
+            ]
+
+    return profile
+
+
 def _get_s3_object_sizes(bucket: str, prefix: str) -> List[int]:
     """List object sizes under an S3 prefix.  Returns [] when no access."""
     if not HAS_BOTO3:
@@ -3538,11 +3671,22 @@ Examples:
         nargs="+",
         metavar="AGENT",
         default=None,
-        choices=["size_analyzer", "code_analyzer", "resource_allocator", "recommendations"],
+        choices=["size_analyzer", "code_analyzer", "resource_allocator", "recommendations", "data_quality"],
         help=(
             "Run only specific agents (space-separated). "
-            "Choices: size_analyzer, code_analyzer, resource_allocator, recommendations. "
-            "Default: all four agents. Example: --agents size_analyzer"
+            "Choices: size_analyzer, code_analyzer, resource_allocator, recommendations, data_quality. "
+            "Default: all five agents. Example: --agents size_analyzer data_quality"
+        ),
+    )
+    p.add_argument(
+        "--primary-keys",
+        nargs="+",
+        metavar="DB.TABLE=col1,col2",
+        default=None,
+        help=(
+            "Primary key columns for each table, used by the data_quality agent. "
+            "Format: db.table=col1,col2  (one entry per table). "
+            "Example: --primary-keys sales_db.orders=order_id  analytics.events=event_id,user_id"
         ),
     )
 
@@ -3701,11 +3845,18 @@ def _load_config(config_path: str) -> List[Dict]:
     return [data]
 
 
-def _resolve_table_args(table_args: List[str], athena_output_s3: str = "") -> List[Dict]:
+def _resolve_table_args(
+    table_args:       List[str],
+    athena_output_s3: str = "",
+    primary_keys_map: Optional[Dict[str, List[str]]] = None,
+) -> List[Dict]:
     """
     For each db.table entry run the four Iceberg Athena metadata queries
     ($files, $snapshots, $partitions, $manifests) and return a table dict
     with iceberg_stats populated.
+
+    If primary_keys_map contains an entry for "db.table", also run
+    _profile_table to get DQ metrics (null rates, PK health, Benford digits).
 
     Tables must be in db.table format.  --athena-output-s3 is required.
     """
@@ -3713,15 +3864,18 @@ def _resolve_table_args(table_args: List[str], athena_output_s3: str = "") -> Li
         print("  [ERROR] --athena-output-s3 is required to fetch table stats.")
         return []
 
+    pk_map = primary_keys_map or {}
     tables: List[Dict] = []
+
     for entry in table_args:
         entry = entry.strip()
         if "." not in entry:
             print(f"  [SKIP] '{entry}': must be db.table format (e.g. sales_db.orders)")
             continue
         db, tbl = entry.split(".", 1)
+        key = f"{db}.{tbl}"
 
-        print(f"  Querying {db}.{tbl} ...", end=" ", flush=True)
+        print(f"  Querying {key} ...", end=" ", flush=True)
         stats = _iceberg_table_stats(db, tbl, athena_output_s3)
 
         if "error" in stats:
@@ -3733,7 +3887,7 @@ def _resolve_table_args(table_args: List[str], athena_output_s3: str = "") -> Li
         files   = stats.get("file_cnt", 0)
         print(f"{size_gb:.3f} GB | {files:,} files | {records:,} records")
 
-        tables.append({
+        tbl_dict: Dict[str, Any] = {
             "database":      db,
             "table":         tbl,
             "is_iceberg":    True,
@@ -3741,7 +3895,23 @@ def _resolve_table_args(table_args: List[str], athena_output_s3: str = "") -> Li
             "record_count":  records,
             "file_count":    files,
             "iceberg_stats": stats,
-        })
+        }
+
+        # ── Data profiling (only when --primary-keys provided) ────────────────
+        pk_cols = pk_map.get(key) or pk_map.get(tbl) or []
+        if pk_cols:
+            print(f"  Profiling {key} (PK: {', '.join(pk_cols)}) ...", end=" ", flush=True)
+            prof = _profile_table(db, tbl, pk_cols, athena_output_s3)
+            if "error" in prof:
+                print(f"profile FAILED — {prof['error']}")
+            else:
+                rc   = prof.get("row_count", 0)
+                dups = prof.get("pk_duplicate_count", 0)
+                ncols = len(prof.get("columns", []))
+                print(f"{rc:,} rows | {dups:,} PK dups | {ncols} columns profiled")
+                tbl_dict["profile"] = prof
+
+        tables.append(tbl_dict)
 
     return tables
 
@@ -3931,6 +4101,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     job_name = args.job_name or default_job_name
 
+    # Parse --primary-keys  db.table=col1,col2 → {"db.table": ["col1", "col2"]}
+    pk_map: Dict[str, List[str]] = {}
+    for entry in (getattr(args, "primary_keys", None) or []):
+        if "=" not in entry:
+            print(f"  [WARN] --primary-keys: ignoring malformed entry '{entry}' (expected db.table=col1,col2)")
+            continue
+        tbl_part, cols_part = entry.split("=", 1)
+        pk_map[tbl_part.strip()] = [c.strip() for c in cols_part.split(",") if c.strip()]
+    if pk_map:
+        print(f"  Primary keys configured: {', '.join(f'{k}({v})' for k, v in pk_map.items())}")
+
     # Resolve input tables  (--tables takes priority over --config)
     config_tables: Optional[List[Dict]] = None
     if args.tables:
@@ -3938,6 +4119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         config_tables = _resolve_table_args(
             args.tables,
             athena_output_s3=getattr(args, "athena_output_s3", ""),
+            primary_keys_map=pk_map or None,
         )
         print(f"  → {len(config_tables)} table(s) ready\n")
     elif args.config:

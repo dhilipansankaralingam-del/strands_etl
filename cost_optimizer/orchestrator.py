@@ -18,6 +18,7 @@ from .agents.size_analyzer import SizeAnalyzerAgent
 from .agents.code_analyzer import CodeAnalyzerAgent
 from .agents.resource_allocator import ResourceAllocatorAgent
 from .agents.recommendations import RecommendationsAgent
+from .agents.data_quality_agent import DataQualityAgent
 
 
 class CostOptimizationOrchestrator:
@@ -38,10 +39,11 @@ class CostOptimizationOrchestrator:
 
         # Initialize agents
         self.agents = {
-            'size_analyzer': SizeAnalyzerAgent(use_llm, model_id),
-            'code_analyzer': CodeAnalyzerAgent(use_llm, model_id),
+            'size_analyzer':     SizeAnalyzerAgent(use_llm, model_id),
+            'code_analyzer':     CodeAnalyzerAgent(use_llm, model_id),
             'resource_allocator': ResourceAllocatorAgent(use_llm, model_id),
-            'recommendations': RecommendationsAgent(use_llm, model_id)
+            'recommendations':   RecommendationsAgent(use_llm, model_id),
+            'data_quality':      DataQualityAgent(use_llm, model_id),
         }
 
     def analyze_script(
@@ -96,7 +98,7 @@ class CostOptimizationOrchestrator:
         )
 
         # Determine which agents to run
-        ALL_AGENTS = ["size_analyzer", "code_analyzer", "resource_allocator", "recommendations"]
+        ALL_AGENTS = ["size_analyzer", "code_analyzer", "resource_allocator", "recommendations", "data_quality"]
         run_agents = set(agents) if agents else set(ALL_AGENTS)
         if agents:
             print(f"  [INFO] Running agents: {', '.join(sorted(run_agents))}")
@@ -159,8 +161,16 @@ class CostOptimizationOrchestrator:
         else:
             reco_result = _skipped
 
+        # Phase 4: Data Quality (runs independently — uses iceberg_stats + profile)
+        if 'data_quality' in run_agents:
+            dq_result = self.agents['data_quality'].analyze(input_data, context)
+        else:
+            dq_result = _skipped
+
         # Compile final results
         total_time = time.time() - start_time
+
+        all_recs = list(reco_result.recommendations) + list(dq_result.recommendations)
 
         return {
             'success': True,
@@ -171,10 +181,11 @@ class CostOptimizationOrchestrator:
             'total_analysis_time_seconds': round(total_time, 2),
 
             'agents': {
-                'size_analyzer': size_result.to_dict(),
-                'code_analyzer': code_result.to_dict(),
+                'size_analyzer':    size_result.to_dict(),
+                'code_analyzer':    code_result.to_dict(),
                 'resource_allocator': resource_result.to_dict(),
-                'recommendations': reco_result.to_dict()
+                'recommendations':  reco_result.to_dict(),
+                'data_quality':     dq_result.to_dict(),
             },
 
             'summary': {
@@ -185,13 +196,16 @@ class CostOptimizationOrchestrator:
                 'potential_annual_savings': reco_result.analysis.get('cost_analysis', {}).get('potential_annual_savings', 0),
                 'anti_patterns_found': code_result.analysis.get('anti_pattern_count', 0),
                 'critical_issues': code_result.analysis.get('critical_issues', 0),
-                'total_recommendations': len(reco_result.recommendations),
-                'quick_wins': sum(1 for r in reco_result.recommendations if r.get('quick_win', False))
+                'total_recommendations': len(all_recs),
+                'quick_wins': sum(1 for r in all_recs if r.get('quick_win', False)),
+                'dq_overall_health': dq_result.analysis.get('overall_health', 'N/A'),
+                'dq_critical_issues': dq_result.analysis.get('critical_issues', 0),
             },
 
             'executive_summary': reco_result.analysis.get('executive_summary', {}),
             'implementation_roadmap': reco_result.analysis.get('implementation_roadmap', {}),
-            'all_recommendations': reco_result.recommendations
+            'all_recommendations': all_recs,
+            'data_quality': dq_result.analysis,
         }
 
 

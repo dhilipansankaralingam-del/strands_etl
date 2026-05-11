@@ -504,9 +504,172 @@ def detect_metric_periodicity(
 
 
 # =============================================================================
+# DATA QUALITY AGENT TOOLS
+# Wraps scientific_tools DQ functions with @strands_tool decorator and
+# console print blocks so the LLM can call them during profiling.
+# =============================================================================
+
+@strands_tool
+def compute_pk_health(
+    total_rows:    int,
+    distinct_pk:   int,
+    null_pk:       int,
+    pk_columns:    List[str],
+) -> Dict:
+    """
+    Primary-key health score (A–F) using uniqueness ratio and null rate.
+
+    CALL WHEN: primary key columns are known for a table.
+    Use Athena result of:
+      SELECT COUNT(*) total, COUNT(DISTINCT <pk>) distinct_pk,
+             SUM(CASE WHEN <pk> IS NULL THEN 1 ELSE 0 END) null_pk
+      FROM <table>
+
+    total_rows:   total row count of the table.
+    distinct_pk:  count of distinct primary key values (composite or single).
+    null_pk:      rows where any PK column is NULL.
+    pk_columns:   list of column names forming the primary key.
+
+    Returns: health_score (0-100), health_grade (A-F), uniqueness_ratio,
+             duplicate_count, interpretation.
+    """
+    from .scientific_tools import pk_uniqueness_health
+    print(f"\n  ┌─ Tool: compute_pk_health  {pk_columns} ─────────────────────────")
+    print(f"  │  Algorithm : PK Health = uniqueness_ratio × completeness_factor × 100")
+    print(f"  │  Formula   : uniqueness_ratio = distinct_pk / total_rows")
+    print(f"  │  Grading   : A(≥95) B(≥85) C(≥70) D(≥50) F(<50)")
+    print(f"  │  Purpose   : Detect PK violations — duplicates and nulls break joins,")
+    print(f"  │              cause incorrect aggregations, and silently corrupt downstream")
+    print(f"  │  Inputs    : total={total_rows:,}  distinct_pk={distinct_pk:,}  null={null_pk:,}")
+    result = pk_uniqueness_health(total_rows, distinct_pk, null_pk, pk_columns)
+    print(f"  │  Result    : grade={result.get('health_grade')}  score={result.get('health_score')}  "
+          f"dups={result.get('duplicate_count', 0):,}  uniqueness={result.get('uniqueness_ratio', 0):.4%}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
+
+
+@strands_tool
+def compute_benford_score(
+    digit_counts: List[int],
+    column_name:  str = "column",
+) -> Dict:
+    """
+    Benford's Law first-digit test: chi-square goodness-of-fit.
+
+    CALL WHEN: a numeric column is available for profiling (IDs, amounts, counts).
+    Anomalous digits (p-value < 0.05) may indicate data entry errors, fraud,
+    rounding artefacts, or synthetic/generated data.
+
+    digit_counts: list of 9 integers — count of rows whose value starts with
+                  digit 1, 2, …, 9 respectively.
+    column_name:  display label for the column being tested.
+
+    Returns: conformity_score (0-1), chi_square, p_value, anomalous_digits,
+             interpretation (NORMAL / SUSPICIOUS / ANOMALOUS).
+    """
+    from .scientific_tools import benford_law_test
+    total = sum(digit_counts)
+    print(f"\n  ┌─ Tool: compute_benford_score  [{column_name}] ─────────────────────")
+    print(f"  │  Algorithm : Benford's Law  P(d) = log10(1 + 1/d)")
+    print(f"  │  What it means: Naturally-occurring numbers have digit 1 appearing")
+    print(f"  │              ~30.1% of the time, digit 2 ~17.6%, etc. Deviations can")
+    print(f"  │              signal: data quality issues, fraud, or synthetic data.")
+    print(f"  │  Test      : Chi-square goodness-of-fit  χ² = Σ(O-E)²/E")
+    print(f"  │  Inputs    : {total:,} values, digits={digit_counts}")
+    result = benford_law_test(digit_counts, column_name)
+    print(f"  │  Result    : conformity={result.get('conformity_score', 0):.3f}  "
+          f"chi²={result.get('chi_square', 0):.2f}  "
+          f"interpretation={result.get('interpretation', '?')}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
+
+
+@strands_tool
+def compute_distribution_drift(
+    baseline_counts: List[int],
+    current_counts:  List[int],
+    column_name:     str = "column",
+) -> Dict:
+    """
+    Jensen-Shannon Divergence: symmetric distribution drift score bounded [0, 1].
+
+    CALL WHEN: you have two snapshots of a column's value distribution
+    (e.g. last week vs this week, or historical vs latest batch).
+    JSD = 0 means identical distributions; JSD = 1 means completely different.
+    Levels: NONE(<0.02), LOW(<0.1), MEDIUM(<0.2), HIGH(<0.4), CRITICAL(≥0.4).
+
+    baseline_counts: list of counts per value-bucket for the reference period.
+    current_counts:  list of counts per value-bucket for the current period.
+                     Must have the same length as baseline_counts.
+    column_name:     display label for the column.
+
+    Returns: jsd_score, drift_level, dominant_drift_buckets, interpretation.
+    """
+    from .scientific_tools import jensen_shannon_drift
+    print(f"\n  ┌─ Tool: compute_distribution_drift  [{column_name}] ─────────────────")
+    print(f"  │  Algorithm : Jensen-Shannon Divergence  JSD(P‖Q) = ½KL(P‖M) + ½KL(Q‖M)")
+    print(f"  │  What it means: Symmetric, bounded [0,1] measure of distributional")
+    print(f"  │              change between two snapshots. Unlike KL-divergence,")
+    print(f"  │              JSD handles zero-count buckets and is always finite.")
+    print(f"  │  Thresholds: NONE<0.02  LOW<0.1  MEDIUM<0.2  HIGH<0.4  CRITICAL≥0.4")
+    print(f"  │  Inputs    : {len(baseline_counts)} buckets, baseline_sum={sum(baseline_counts):,}  "
+          f"current_sum={sum(current_counts):,}")
+    result = jensen_shannon_drift(baseline_counts, current_counts, column_name)
+    print(f"  │  Result    : JSD={result.get('jsd_score', 0):.4f}  "
+          f"drift_level={result.get('drift_level', '?')}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
+
+
+@strands_tool
+def compute_column_completeness(
+    column_null_rates: List[Dict[str, Any]],
+) -> Dict:
+    """
+    Weighted completeness score for a table's columns.
+
+    CALL WHEN: null rates per column are available from profiling.
+    Columns are weighted by their role: pk=3×, required=2×, optional=1×.
+    Prioritises ensuring PK and NOT-NULL columns are filled.
+
+    column_null_rates: list of dicts, each with:
+      {
+        "column":   "<column_name>",
+        "null_pct": <float 0-100>,
+        "role":     "pk" | "required" | "optional"   (default: "optional")
+      }
+
+    Returns: overall_score (0-100), grade (A-F), worst_columns, interpretation.
+    """
+    from .scientific_tools import completeness_weighted_score
+    n = len(column_null_rates)
+    high_null = [c for c in column_null_rates if c.get("null_pct", 0) > 10]
+    print(f"\n  ┌─ Tool: compute_column_completeness ─────────────────────────────")
+    print(f"  │  Algorithm : Weighted completeness = Σ(w_i × complete_i) / Σw_i")
+    print(f"  │  Weights   : pk=3×  required=2×  optional=1×")
+    print(f"  │  Why weight: A NULL primary key or required column is far more")
+    print(f"  │              damaging than an optional missing field. Weighting")
+    print(f"  │              ensures PK columns drive the overall score.")
+    print(f"  │  Grading   : A(≥99%) B(≥95%) C(≥85%) D(≥70%) F(<70%)")
+    print(f"  │  Inputs    : {n} columns, {len(high_null)} with null_pct>10%")
+    result = completeness_weighted_score(column_null_rates)
+    print(f"  │  Result    : overall={result.get('overall_score', 0):.1f}%  "
+          f"grade={result.get('grade', '?')}")
+    print(f"  └─────────────────────────────────────────────────────────────────\n")
+    return result
+
+
+# =============================================================================
 # TOOL SETS — one list per pipeline agent
 # These are imported by each agent class as AGENT_TOOLS.
 # =============================================================================
+
+DATA_QUALITY_AGENT_TOOLS: list = [
+    compute_pk_health,            # when pk_columns are known
+    compute_benford_score,        # for numeric profiled columns
+    compute_distribution_drift,   # when 2 snapshot distributions available
+    compute_column_completeness,  # when null rates are profiled
+]
 
 SIZE_AGENT_TOOLS: list = [
     compute_skew_model,           # when skew_ratio > 3
@@ -734,6 +897,96 @@ _BOTO3_TOOL_SCHEMAS: Dict[str, Dict] = {
             "required": ["metric_time_series"],
         },
     },
+    # ── Data Quality Agent tools ─────────────────────────────────────────────
+    "compute_pk_health": {
+        "name": "compute_pk_health",
+        "description": (
+            "Primary-key health score A–F: uniqueness_ratio = distinct_pk / total_rows. "
+            "Call when PK columns are known. Detects duplicates and null PK violations. "
+            "Returns health_score (0-100), health_grade, duplicate_count, uniqueness_ratio."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "total_rows":  {"type": "integer", "description": "Total row count of the table."},
+                "distinct_pk": {"type": "integer", "description": "Count of distinct PK values."},
+                "null_pk":     {"type": "integer", "description": "Rows with any NULL PK column."},
+                "pk_columns":  {"type": "array", "items": {"type": "string"}, "description": "PK column names."},
+            },
+            "required": ["total_rows", "distinct_pk", "null_pk", "pk_columns"],
+        },
+    },
+    "compute_benford_score": {
+        "name": "compute_benford_score",
+        "description": (
+            "Benford's Law chi-square test: P(d)=log10(1+1/d). "
+            "Call for numeric columns (amounts, IDs, counts). "
+            "Anomalous digits signal data-entry errors, fraud, or synthetic data. "
+            "Returns conformity_score (0-1), chi_square, interpretation (NORMAL/SUSPICIOUS/ANOMALOUS)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "digit_counts": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "9 integers: row count starting with digit 1, 2, …, 9.",
+                },
+                "column_name": {"type": "string", "description": "Column display label."},
+            },
+            "required": ["digit_counts"],
+        },
+    },
+    "compute_distribution_drift": {
+        "name": "compute_distribution_drift",
+        "description": (
+            "Jensen-Shannon Divergence: symmetric distribution drift score [0,1]. "
+            "Call when you have baseline vs current bucket counts for a column. "
+            "Levels: NONE<0.02, LOW<0.1, MEDIUM<0.2, HIGH<0.4, CRITICAL≥0.4. "
+            "Returns jsd_score, drift_level, dominant_drift_buckets, interpretation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "baseline_counts": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "Count per value-bucket in the reference period.",
+                },
+                "current_counts": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "Count per value-bucket in the current period (same length as baseline).",
+                },
+                "column_name": {"type": "string", "description": "Column display label."},
+            },
+            "required": ["baseline_counts", "current_counts"],
+        },
+    },
+    "compute_column_completeness": {
+        "name": "compute_column_completeness",
+        "description": (
+            "Weighted completeness score: Σ(w_i × complete_i) / Σw_i. "
+            "Weights: pk=3×, required=2×, optional=1×. "
+            "Call when null rates per column are available from profiling. "
+            "Returns overall_score (0-100), grade (A-F), worst_columns, interpretation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "column_null_rates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column":   {"type": "string"},
+                            "null_pct": {"type": "number", "description": "Null percentage 0-100."},
+                            "role":     {"type": "string", "description": "pk | required | optional"},
+                        },
+                    },
+                    "description": "List of column null-rate dicts.",
+                },
+            },
+            "required": ["column_null_rates"],
+        },
+    },
 }
 
 # Function name → callable mapping (works whether strands decorator applied or not)
@@ -747,6 +1000,11 @@ _TOOL_FN_MAP: Dict[str, Any] = {
     "rank_recommendations_by_impact": rank_recommendations_by_impact,
     "detect_cost_anomaly":            detect_cost_anomaly,
     "detect_metric_periodicity":      detect_metric_periodicity,
+    # Data Quality tools
+    "compute_pk_health":              compute_pk_health,
+    "compute_benford_score":          compute_benford_score,
+    "compute_distribution_drift":     compute_distribution_drift,
+    "compute_column_completeness":    compute_column_completeness,
 }
 
 
