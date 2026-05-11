@@ -686,7 +686,6 @@ Return a JSON object with this exact structure:
             return {}
         try:
             def _parse(ts: str):
-                # Normalize: strip trailing timezone label before trying formats
                 clean = ts.strip().rstrip("Z").replace(" UTC", "").replace(" utc", "")
                 for fmt in (
                     "%Y-%m-%d %H:%M:%S.%f",
@@ -699,44 +698,60 @@ Return a JSON object with this exact structure:
                     except Exception:
                         continue
                 return None
+
             t0 = _parse(oldest)
             t1 = _parse(newest)
             if not t0 or not t1:
                 return {}
             span_days = max((t1 - t0).days, 1)
 
-            # Derive compressed bytes-per-row from $files stats (already fetched).
-            # total_size_gb and total_records both come from the current-snapshot
-            # $files query, so their ratio is the real on-disk bytes per live record.
             live_records = iceberg_s.get("total_records", 0)
             if live_records > 0:
                 bytes_per_row_compressed = (total_gb * (1024 ** 3)) / live_records
             else:
-                # Fallback: use avg_file_size_mb and file_cnt if record count missing
                 avg_mb   = iceberg_s.get("avg_file_size_mb", 128.0)
                 file_cnt = iceberg_s.get("file_cnt", 1)
-                # Estimate ~1M rows per 128 MB parquet file as conservative floor
                 est_rows = max(file_cnt * 1_000_000, 1)
                 bytes_per_row_compressed = (avg_mb * 1024 * 1024 * file_cnt) / est_rows
 
-            # added_records from $snapshots counts every record written (including
-            # later-deleted ones), so growth is slightly over-estimated on CDC tables.
-            added_gb   = added_rec * bytes_per_row_compressed / (1024 ** 3)
-            gb_per_day = added_gb / span_days
+            # total_added_records from $snapshots is a CUMULATIVE LIFETIME sum —
+            # it includes the initial bulk load plus every compaction re-add.
+            # If it is more than 3× the live record count, the table was bulk-loaded
+            # or heavily compacted and the per-snapshot rate is not reliable.
+            # In that case fall back to size-over-time (conservative upper bound).
+            if live_records > 0 and added_rec > live_records * 3:
+                gb_per_day    = total_gb / span_days
+                growth_method = "size_over_time"
+                growth_note   = (
+                    "total_added_records >> live_records — likely bulk-loaded or "
+                    "heavily compacted. Growth rate is size/span upper bound; "
+                    "use CloudWatch IncomingRecords for precision."
+                )
+            else:
+                added_gb      = added_rec * bytes_per_row_compressed / (1024 ** 3)
+                gb_per_day    = added_gb / span_days
+                growth_method = "added_records_from_snapshots"
+                growth_note   = None
 
             days_to_2x       = int(total_gb / gb_per_day) if gb_per_day > 0 else None
             projected_90d    = round(total_gb + gb_per_day * 90, 2)
-            monthly_cost_now = round(total_gb    * _S3_PRICE_PER_GB_MONTH, 2)
+            monthly_cost_now = round(total_gb     * _S3_PRICE_PER_GB_MONTH, 2)
             monthly_cost_90d = round(projected_90d * _S3_PRICE_PER_GB_MONTH, 2)
-            return {
-                "span_days":              span_days,
-                "bytes_per_row_actual":   round(bytes_per_row_compressed, 2),
-                "gb_per_day":             round(gb_per_day, 3),
-                "days_to_2x":             days_to_2x,
-                "projected_90d_gb":       projected_90d,
-                "monthly_cost_now_usd":   monthly_cost_now,
-                "monthly_cost_90d_usd":   monthly_cost_90d,
+
+            result = {
+                "span_days":             span_days,
+                "bytes_per_row_actual":  round(bytes_per_row_compressed, 2),
+                "gb_per_day":            round(gb_per_day, 4),
+                "days_to_2x":            days_to_2x,
+                "projected_90d_gb":      projected_90d,
+                "monthly_cost_now_usd":  monthly_cost_now,
+                "monthly_cost_90d_usd":  monthly_cost_90d,
+                "growth_method":         growth_method,
             }
+            if growth_note:
+                result["growth_note"] = growth_note
+            return result
+
         except Exception as exc:
             print(f"  [WARN] _compute_growth_rate skipped: {type(exc).__name__}: {exc}")
             return {}
