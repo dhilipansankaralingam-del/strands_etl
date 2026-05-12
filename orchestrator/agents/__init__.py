@@ -20,6 +20,7 @@ from .learning_agent               import create_learning_agent
 from .scientific_agent             import create_scientific_agent
 from .memory_agent                 import create_memory_agent
 from .chatbot_agent                import create_chatbot_agent
+from .iceberg_telemetry_agent      import create_iceberg_telemetry_agent
 
 __all__ = [
     "create_sizing_agent",
@@ -40,4 +41,5 @@ __all__ = [
     "create_scientific_agent",
     "create_memory_agent",
     "create_chatbot_agent",
+    "create_iceberg_telemetry_agent",
 ]

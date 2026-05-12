@@ -67,6 +67,7 @@ from .agents import (
     create_scientific_agent,
     create_memory_agent,
     create_chatbot_agent,
+    create_iceberg_telemetry_agent,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -135,7 +136,10 @@ class MultiAgentOrchestrator:
         self.region      = region
         self.max_workers = max_workers
 
-        logger.info("Initialising 18 specialist agents …")
+        logger.info("Initialising 19 specialist agents …")
+
+        # ── Phase 0 ─ Iceberg telemetry (optional, runs before Phase 1) ──────────
+        self._iceberg_telemetry_agent  = create_iceberg_telemetry_agent(model_id, region)
 
         # ── Phase 1 ────────────────────────────────────────────────────────────
         self._sizing_agent             = create_sizing_agent(model_id, region)
@@ -205,6 +209,8 @@ class MultiAgentOrchestrator:
                           description="Semantic long-term memory (mem0 + DynamoDB): store/search insights, summarise agent knowledge, manage memory TTL"),
             agent_as_tool(self._chatbot_agent,            name="chatbot_agent",
                           description="ETL knowledge chatbot with local RAG: answer ETL questions, index pipeline runs, recommend from knowledge base"),
+            agent_as_tool(self._iceberg_telemetry_agent,  name="iceberg_telemetry_agent",
+                          description="Query Iceberg system tables ($files, $snapshots, $partitions, $manifests) via Athena for ground-truth table telemetry and health grading"),
         ]
 
         self._orchestrator = Agent(
@@ -275,22 +281,63 @@ class MultiAgentOrchestrator:
         runs_per_day  = config.get("runs_per_day", 1)
         join_count    = len([t for t in tables if t.get("join_key")]) or 1
 
-        tables_json    = _dumps(tables)
-        schemas_json   = _dumps(schemas)
+        tables_json     = _dumps(tables)
+        schemas_json    = _dumps(schemas)
         frameworks_json = _dumps(frameworks)
+        athena_output   = config.get("athena_output_s3", "")
 
         logger.info("=" * 70)
         logger.info("Pipeline %s  |  job: %s  |  mode: %s", pipeline_id, job_name, mode)
         logger.info("=" * 70)
 
+        # ── Phase 0: Iceberg telemetry (optional — requires athena_output_s3) ──
+        iceberg_telemetry: Dict[str, Any] = {}
+        if athena_output and tables:
+            logger.info("[Phase 0] Querying Iceberg system tables via Athena …")
+            tbl_db_list = [
+                {"database": t.get("database", "default"), "table": t.get("table", t.get("name", ""))}
+                for t in tables if t.get("table") or t.get("name")
+            ]
+            try:
+                iceberg_telemetry = self._call_agent(
+                    self._iceberg_telemetry_agent,
+                    f"Query Iceberg stats for tables: {_dumps(tbl_db_list)}. "
+                    f"Athena output location: {athena_output}. "
+                    f"Return full iceberg_stats with health grades and issues."
+                )
+                logger.info(
+                    "[Phase 0] Done — %d tables, worst health: %s",
+                    iceberg_telemetry.get("tables_analyzed", 0),
+                    iceberg_telemetry.get("worst_health_table", "?"),
+                )
+            except Exception as exc:
+                logger.warning("[Phase 0] Iceberg telemetry failed (non-fatal): %s", exc)
+                iceberg_telemetry = {"error": str(exc)}
+        else:
+            logger.info("[Phase 0] Skipped — set athena_output_s3 in config to enable Iceberg telemetry")
+
+        # Enrich tables_json with iceberg_stats if available
+        if iceberg_telemetry.get("tables"):
+            stats_by_table = {
+                t["table"]: t.get("iceberg_stats", {})
+                for t in iceberg_telemetry["tables"]
+            }
+            for tbl in tables:
+                key = tbl.get("table", tbl.get("name", ""))
+                if key in stats_by_table:
+                    tbl["iceberg_stats"] = stats_by_table[key]
+            tables_json = _dumps(tables)  # re-serialise with enriched data
+
         # ── Phase 1: Parallel analysis (7 agents) ──────────────────────────────
         logger.info("[Phase 1] Running 7 analysis agents in parallel …")
 
         def _run_sizing():
+            iceberg_ctx = (f" Iceberg telemetry available: {_dumps(iceberg_telemetry)[:1000]}."
+                           if iceberg_telemetry and not iceberg_telemetry.get("error") else "")
             return self._call_agent(
                 self._sizing_agent,
                 f"Analyse data sizing for job '{job_name}' with tables: {tables_json}. "
-                f"Processing mode: {mode}. Join count: {join_count}."
+                f"Processing mode: {mode}. Join count: {join_count}.{iceberg_ctx}"
             )
 
         def _run_dq():
@@ -309,9 +356,12 @@ class MultiAgentOrchestrator:
         def _run_code_analysis():
             if not script:
                 return {"skipped": True, "reason": "No script_content provided"}
+            iceberg_ctx = _dumps(iceberg_telemetry) if iceberg_telemetry and not iceberg_telemetry.get("error") else "{}"
             return self._call_agent(
                 self._code_analyzer_agent,
-                f"Analyse this PySpark script for anti-patterns and optimization opportunities:\n{script[:3000]}"
+                f"Analyse this PySpark script for anti-patterns and optimization opportunities. "
+                f"Use iceberg_stats_json for size-aware analysis: {iceberg_ctx[:800]}.\n"
+                f"Script:\n{script[:3000]}"
             )
 
         def _run_lineage():
@@ -499,6 +549,7 @@ class MultiAgentOrchestrator:
             "processing_mode": mode,
 
             # Phase results
+            "phase0_iceberg_telemetry": iceberg_telemetry,
             "phase1_analysis": {
                 "sizing":        phase1.get("sizing", {}),
                 "data_quality":  phase1.get("data_quality", {}),
@@ -523,8 +574,9 @@ class MultiAgentOrchestrator:
 
             # Summary stats
             "summary": {
-                "agents_used":        15,
-                "tools_available":    43,
+                "agents_used":        19,
+                "tools_available":    55,
+                "iceberg_telemetry_enabled": bool(athena_output),
                 "phases_completed":   5,
                 "effective_size_gb":  effective_gb,
                 "skew_risk_score":    skew_score,
@@ -538,7 +590,7 @@ class MultiAgentOrchestrator:
         }
 
         logger.info("Pipeline %s complete  |  %d agents  |  effective_gb=%.1f",
-                    pipeline_id, 15, effective_gb)
+                    pipeline_id, 19, effective_gb)
         return report
 
     def chat(self, message: str) -> str:

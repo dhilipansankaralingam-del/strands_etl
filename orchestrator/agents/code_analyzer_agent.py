@@ -680,6 +680,184 @@ def detect_skew_patterns(
         return json.dumps({"error": str(exc)})
 
 
+@tool
+def analyse_code_with_iceberg_context(
+    script_content: str,
+    iceberg_stats_json: str = "{}",
+    glue_metrics_json: str = "{}",
+) -> str:
+    """
+    Size-aware code analysis that cross-references Iceberg telemetry with code
+    anti-patterns. Surfaces compound findings like "UDF on 500GB table" or
+    "tiny-file table read without coalesce". Returns the single most expensive line.
+
+    This mirrors the KEYJa CodeAnalyzerAgent._build_llm_prompt pattern: it builds
+    a rich telemetry block and merges it with line-by-line code findings.
+
+    Args:
+        script_content:    Full PySpark script source code.
+        iceberg_stats_json: JSON dict (or list of dicts) from analyse_data_sizing_with_athena
+                            or query_iceberg_table_stats — provides ground-truth telemetry.
+        glue_metrics_json:  JSON dict with Glue CloudWatch metrics (optional).
+
+    Returns:
+        JSON analysis report combining base code findings with Iceberg-specific insights,
+        top_expensive_line, iceberg_hotspots, and a merged recommendations list.
+    """
+    try:
+        # Support single dict or list of table stats
+        raw = json.loads(iceberg_stats_json) if iceberg_stats_json else {}
+        if isinstance(raw, list):
+            all_stats = raw
+        elif "tables" in raw:
+            all_stats = [t.get("iceberg_stats", t) for t in raw.get("tables", [])]
+        else:
+            all_stats = [raw] if raw else []
+
+        glue = json.loads(glue_metrics_json) if glue_metrics_json else {}
+
+        # Run base code analysis
+        base = json.loads(analyse_pyspark_code.__wrapped__(script_content))
+        lines = script_content.split("\n")
+        anti_pats = base.get("anti_patterns", [])
+        complexity = base.get("complexity", {})
+
+        # Build Iceberg-aware context block (mirrors KEYJa _build_llm_prompt)
+        table_telemetry = []
+        iceberg_hotspots = []
+
+        for stats in all_stats:
+            tbl_name  = stats.get("table", "unknown")
+            size_gb   = stats.get("total_size_gb", 0)
+            tiny_cnt  = stats.get("tiny_file_cnt", 0)
+            file_cnt  = stats.get("file_cnt", 1)
+            w_amp     = stats.get("write_amplification", 0)
+            skew_r    = stats.get("skew_ratio", 1)
+            snap_cnt  = stats.get("snapshot_count", 0)
+            health    = stats.get("health_grade", "C")
+            avg_mb    = stats.get("avg_file_size_mb", 128)
+
+            telemetry_entry = {
+                "table": tbl_name, "size_gb": size_gb, "health_grade": health,
+                "tiny_file_cnt": tiny_cnt, "file_cnt": file_cnt,
+                "write_amplification": w_amp, "skew_ratio": skew_r,
+                "snapshot_count": snap_cnt, "avg_file_size_mb": avg_mb,
+            }
+            table_telemetry.append(telemetry_entry)
+
+            # Script-to-telemetry hotspot mapping (KEYJa pattern)
+            for i, line in enumerate(lines, 1):
+                tbl_ref = tbl_name.lower() in line.lower()
+                if not tbl_ref:
+                    continue
+
+                if tiny_cnt > 10000 and re.search(r"spark\.read|\.parquet\(|\.orc\(", line, re.I):
+                    iceberg_hotspots.append({
+                        "line": i, "table": tbl_name,
+                        "issue": f"Reading table with {tiny_cnt:,} tiny files (<10MB) — {int(tiny_cnt/max(file_cnt,1)*100)}% of files are tiny",
+                        "severity": "critical",
+                        "fix": f"REWRITE_DATA_FILES on {tbl_name} before read; or add .coalesce(n) after read",
+                        "size_context": f"{size_gb:.1f} GB table",
+                    })
+                if w_amp > 5 and re.search(r"spark\.read|readStream", line, re.I):
+                    iceberg_hotspots.append({
+                        "line": i, "table": tbl_name,
+                        "issue": f"Table has write amplification {w_amp}× — incremental read will scan excess deleted files",
+                        "severity": "high",
+                        "fix": "Enable Iceberg incremental read (startSnapshotId/endSnapshotId) to avoid full scan",
+                        "size_context": f"{snap_cnt} snapshots",
+                    })
+                if skew_r > 10 and re.search(r"\.join\(", line, re.I):
+                    iceberg_hotspots.append({
+                        "line": i, "table": tbl_name,
+                        "issue": f"Joining heavily skewed table (skew_ratio={skew_r}×)",
+                        "severity": "critical",
+                        "fix": "Salt join key before join; enable spark.sql.adaptive.skewJoin.enabled=true",
+                        "size_context": f"{size_gb:.1f} GB",
+                    })
+                if size_gb > 100 and re.search(r"\.collect\(\)|\.toPandas\(\)", line, re.I):
+                    iceberg_hotspots.append({
+                        "line": i, "table": tbl_name,
+                        "issue": f"collect()/toPandas() on {size_gb:.0f} GB table — driver OOM risk",
+                        "severity": "critical",
+                        "fix": "Write to storage instead of collecting; use .take(n) for sampling",
+                        "size_context": f"{stats.get('total_records',0):,} records",
+                    })
+
+        # Determine top_expensive_line: highest severity hotspot or highest-severity anti-pattern
+        top_expensive_line = None
+        if iceberg_hotspots:
+            crit = [h for h in iceberg_hotspots if h["severity"] == "critical"]
+            top  = (crit or iceberg_hotspots)[0]
+            top_expensive_line = {
+                "line": top["line"],
+                "content": lines[top["line"]-1].strip()[:120] if top["line"] <= len(lines) else "",
+                "issue": top["issue"],
+                "size_context": top.get("size_context", ""),
+                "fix": top["fix"],
+            }
+        elif anti_pats:
+            crit = [p for p in anti_pats if p["severity"] == "critical"]
+            p    = (crit or anti_pats)[0]
+            ln   = p["line_numbers"][0] if p.get("line_numbers") else 0
+            top_expensive_line = {
+                "line": ln,
+                "content": lines[ln-1].strip()[:120] if 0 < ln <= len(lines) else "",
+                "issue": p["description"],
+                "size_context": "",
+                "fix": p["fix"],
+            }
+
+        # Serial fraction estimate for Amdahl's Law (from KEYJa _run_scientific_analysis)
+        serial_patterns = [
+            len(re.findall(r"\.collect\(\)", script_content)),
+            len(re.findall(r"for\s+\w+\s+in\s+\w+\.collect\(\)", script_content)),
+            len(re.findall(r"\.toPandas\(\)", script_content)),
+        ]
+        serial_pct = min(65, sum(cnt * 8 for cnt in serial_patterns))
+
+        total_size_gb = sum(s.get("total_size_gb", 0) for s in all_stats)
+
+        # Merge recommendations: base + iceberg-specific
+        all_recs = base.get("recommendations", [])
+        for hs in iceberg_hotspots:
+            if hs["severity"] in ("critical", "high"):
+                all_recs.insert(0, {
+                    "priority": "P0" if hs["severity"] == "critical" else "P1",
+                    "category": "iceberg_hotspot",
+                    "title": hs["issue"],
+                    "implementation": hs["fix"],
+                    "line": hs["line"],
+                    "table": hs["table"],
+                    "size_context": hs.get("size_context", ""),
+                    "savings_pct": 30,
+                })
+
+        return json.dumps({
+            "source": "iceberg_context_code_analysis",
+            "total_data_size_gb": round(total_size_gb, 2),
+            "table_telemetry": table_telemetry,
+            "iceberg_hotspots": iceberg_hotspots,
+            "iceberg_hotspot_count": len(iceberg_hotspots),
+            "top_expensive_line": top_expensive_line,
+            "anti_patterns": anti_pats,
+            "anti_pattern_count": base.get("anti_pattern_count", 0),
+            "complexity": complexity,
+            "optimizations": base.get("optimizations", []),
+            "spark_configs": base.get("spark_configs", []),
+            "skew_mitigations": base.get("skew_mitigations", []),
+            "optimization_score": base.get("optimization_score", 0),
+            "estimated_cost_reduction_percent": base.get("estimated_cost_reduction_percent", 0),
+            "serial_fraction_pct": serial_pct,
+            "amdahls_max_speedup": round(1 / (serial_pct/100 + (1 - serial_pct/100)/8), 2),
+            "recommendations": all_recs,
+            "glue_metrics_context": glue,
+        })
+    except Exception as exc:
+        logger.error("Iceberg-context code analysis failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 def create_code_analyzer_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                                 region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for PySpark code analysis."""
@@ -691,6 +869,7 @@ def create_code_analyzer_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-2
             analyse_pyspark_code,
             analyse_pyspark_file,
             analyse_pyspark_code_compound,
+            analyse_code_with_iceberg_context,
             detect_skew_patterns,
         ],
     )
