@@ -279,6 +279,7 @@ class MultiAgentOrchestrator:
         frameworks    = config.get("compliance_frameworks", ["GDPR", "HIPAA", "PCI-DSS"])
         event_log     = config.get("event_log_path", "")
         runs_per_day  = config.get("runs_per_day", 1)
+        glue_metrics  = config.get("glue_metrics", {})   # pre-collected CloudWatch JSON
         join_count    = len([t for t in tables if t.get("join_key")]) or 1
 
         tables_json     = _dumps(tables)
@@ -356,11 +357,13 @@ class MultiAgentOrchestrator:
         def _run_code_analysis():
             if not script:
                 return {"skipped": True, "reason": "No script_content provided"}
-            iceberg_ctx = _dumps(iceberg_telemetry) if iceberg_telemetry and not iceberg_telemetry.get("error") else "{}"
+            iceberg_ctx  = _dumps(iceberg_telemetry) if iceberg_telemetry and not iceberg_telemetry.get("error") else "{}"
+            metrics_ctx  = _dumps(glue_metrics) if glue_metrics else "{}"
             return self._call_agent(
                 self._code_analyzer_agent,
                 f"Analyse this PySpark script for anti-patterns and optimization opportunities. "
-                f"Use iceberg_stats_json for size-aware analysis: {iceberg_ctx[:800]}.\n"
+                f"Use iceberg_stats_json for size-aware analysis: {iceberg_ctx[:800]}. "
+                f"Glue CloudWatch metrics context: {metrics_ctx[:400]}.\n"
                 f"Script:\n{script[:3000]}"
             )
 
@@ -485,8 +488,15 @@ class MultiAgentOrchestrator:
         }
 
         def _run_glue_metrics():
+            # Use pre-collected metrics if provided; otherwise fetch from CloudWatch
+            if glue_metrics:
+                return self._call_agent(
+                    self._glue_metrics_agent,
+                    f"Analyse these pre-collected Glue CloudWatch metrics for job '{job_name}': "
+                    f"{_dumps(glue_metrics)}. Derive Spark config overrides and flag anomalies."
+                )
             if not job_run_id:
-                return {"skipped": True, "reason": "No job_run_id from execution phase"}
+                return {"skipped": True, "reason": "No job_run_id and no pre-collected glue_metrics"}
             return self._call_agent(
                 self._glue_metrics_agent,
                 f"Fetch and analyse CloudWatch metrics for Glue job '{job_name}' "
@@ -495,7 +505,7 @@ class MultiAgentOrchestrator:
 
         def _run_spark_event_log():
             if not event_log:
-                return {"skipped": True, "reason": "No event_log_path in config"}
+                return {"skipped": True, "reason": "No event_log_path / spark_event_log in config"}
             return self._call_agent(
                 self._spark_event_log_agent,
                 f"Parse Spark event log at '{event_log}' and identify bottlenecks."
