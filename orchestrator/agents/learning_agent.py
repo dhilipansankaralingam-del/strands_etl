@@ -15,6 +15,7 @@ Creative enhancements:
 import json
 import logging
 import math
+import os
 import statistics
 import uuid
 from datetime import datetime
@@ -33,7 +34,7 @@ You are a **Machine Learning Specialist** focused on continuous ETL pipeline imp
 
 Your task:
 1. Extract key patterns from the current pipeline execution.
-2. Store a structured learning vector to S3 for future retrieval.
+2. Store a structured learning vector to local file storage (primary) for future retrieval.
 3. Compare against historical vectors to identify trends.
 4. Return insights and improvement trajectory.
 
@@ -45,13 +46,48 @@ Return structured JSON:
   "key_insights": [],
   "recommendations_for_future": [],
   "stored": true/false,
-  "s3_location": "..."
+  "local_path": "..."
 }
 
 Return ONLY valid JSON.
 """
 
 _LEARNING_BUCKET = "strands-etl-learning"
+_LEARNING_DB_DIR = "learning_db"
+_LEARNING_VECTORS_FILE = os.path.join(_LEARNING_DB_DIR, "learning_vectors.jsonl")
+
+
+def _ensure_learning_db() -> None:
+    """Create learning_db/ directory if it doesn't exist."""
+    os.makedirs(_LEARNING_DB_DIR, exist_ok=True)
+
+
+def _local_store_vector(vector: Dict) -> str:
+    """Append vector to local JSONL file. Returns the file path."""
+    _ensure_learning_db()
+    with open(_LEARNING_VECTORS_FILE, "a") as fh:
+        fh.write(json.dumps(vector) + "\n")
+    return _LEARNING_VECTORS_FILE
+
+
+def _local_load_vectors(limit: int = 100) -> List[Dict]:
+    """Read learning vectors from local JSONL file (most recent last)."""
+    _ensure_learning_db()
+    if not os.path.exists(_LEARNING_VECTORS_FILE):
+        return []
+    vectors = []
+    try:
+        with open(_LEARNING_VECTORS_FILE) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        vectors.append(json.loads(line))
+                    except Exception:
+                        pass
+    except Exception as exc:
+        logger.warning("Could not read local learning vectors: %s", exc)
+    return vectors[-limit:]
 
 
 class _DateEncoder(json.JSONEncoder):
@@ -143,11 +179,20 @@ def capture_learning_vector(
             },
         }
 
-        # ── Persist to S3 ────────────────────────────────────────────────────
-        s3     = boto3.client("s3")
-        s3_key = f"learning/vectors/{timestamp[:10]}/{vec_id}.json"
-        stored = _safe_s3_put(s3, _LEARNING_BUCKET, s3_key, vector)
-        s3_loc = f"s3://{_LEARNING_BUCKET}/{s3_key}" if stored else None
+        # ── Persist to local file (primary storage) ──────────────────────────
+        local_path = _local_store_vector(vector)
+        stored     = True
+        logger.info("Learning stored locally → %s", local_path)
+
+        # ── Optional: also persist to S3 if reachable ────────────────────────
+        s3_loc = None
+        try:
+            s3     = boto3.client("s3")
+            s3_key = f"learning/vectors/{timestamp[:10]}/{vec_id}.json"
+            if _safe_s3_put(s3, _LEARNING_BUCKET, s3_key, vector):
+                s3_loc = f"s3://{_LEARNING_BUCKET}/{s3_key}"
+        except Exception:
+            pass  # S3 is optional; local file is primary
 
         # ── Derive patterns and insights ─────────────────────────────────────
         patterns = []
@@ -185,6 +230,7 @@ def capture_learning_vector(
             "key_insights":             insights,
             "recommendations_for_future": future_recs,
             "stored":                   stored,
+            "local_path":               local_path,
             "s3_location":              s3_loc,
         })
 
@@ -196,7 +242,7 @@ def capture_learning_vector(
 @tool
 def retrieve_learning_vectors(limit: int = 10) -> str:
     """
-    Retrieve recent learning vectors from S3.
+    Retrieve recent learning vectors from local file storage (primary).
 
     Args:
         limit: Maximum number of vectors to retrieve (default 10).
@@ -204,21 +250,27 @@ def retrieve_learning_vectors(limit: int = 10) -> str:
     Returns:
         JSON list of recent learning vectors.
     """
+    # Primary: local file
+    vectors = _local_load_vectors(limit)
+    if vectors:
+        return json.dumps(vectors)
+
+    # Fallback: S3
     try:
         s3   = boto3.client("s3")
         resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=limit * 3)
-        vectors = []
+        s3_vectors = []
         if "Contents" in resp:
             objects = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
             for obj in objects[:limit]:
                 try:
                     data = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
-                    vectors.append(json.loads(data["Body"].read().decode("utf-8")))
+                    s3_vectors.append(json.loads(data["Body"].read().decode("utf-8")))
                 except Exception:
                     pass
-        return json.dumps(vectors)
+        return json.dumps(s3_vectors)
     except Exception as exc:
-        logger.warning("Could not retrieve learning vectors: %s", exc)
+        logger.warning("Could not retrieve learning vectors from S3: %s", exc)
         return json.dumps([])
 
 
@@ -446,19 +498,30 @@ def retrieve_similar_workloads(
         query_v = fp.get("normalised_vector", {})
         query_cls = fp.get("workload_class", "")
 
-        s3   = boto3.client("s3")
-        resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=300)
-        if "Contents" not in resp:
+        # Primary: local file
+        all_vecs = _local_load_vectors(150)
+        if not all_vecs:
+            # Fallback: S3
+            try:
+                s3   = boto3.client("s3")
+                resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=300)
+                if "Contents" in resp:
+                    keys = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
+                    for obj in keys[:150]:
+                        try:
+                            body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
+                            all_vecs.append(json.loads(body["Body"].read().decode("utf-8")))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if not all_vecs:
             return json.dumps({"similar_runs": [], "message": "No historical vectors found"})
 
         scored = []
-        keys   = list(resp["Contents"])
-        keys.sort(key=lambda o: o["LastModified"], reverse=True)
-
-        for obj in keys[:150]:
+        for vec in all_vecs:
             try:
-                body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
-                vec  = json.loads(body["Body"].read().decode("utf-8"))
                 wp   = vec.get("workload_profile", {})
 
                 # Reconstruct comparable feature dict
@@ -519,17 +582,22 @@ def generate_adaptive_thresholds(job_name: str = "", limit: int = 30) -> str:
         JSON with adaptive_thresholds dict, calibration_runs, and alert_rules.
     """
     try:
-        s3   = boto3.client("s3")
-        resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=limit * 3)
-        vectors = []
-        if "Contents" in resp:
-            objs = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
-            for obj in objs[:limit]:
-                try:
-                    body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
-                    vectors.append(json.loads(body["Body"].read().decode("utf-8")))
-                except Exception:
-                    pass
+        # Primary: local file
+        vectors = _local_load_vectors(limit)
+        if not vectors:
+            try:
+                s3   = boto3.client("s3")
+                resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=limit * 3)
+                if "Contents" in resp:
+                    objs = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
+                    for obj in objs[:limit]:
+                        try:
+                            body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
+                            vectors.append(json.loads(body["Body"].read().decode("utf-8")))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         def _extract(vecs, path):
             vals = []
@@ -618,18 +686,22 @@ def inject_learning_context(pipeline_results_json: str, limit: int = 5) -> str:
         anti_count  = int(code.get("anti_pattern_count", 0))
         joins       = int((code.get("complexity") or {}).get("join_count", 0))
 
-        # Pull recent history
-        s3   = boto3.client("s3")
-        resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=limit * 4)
-        vectors = []
-        if "Contents" in resp:
-            objs = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
-            for obj in objs[:limit]:
-                try:
-                    body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
-                    vectors.append(json.loads(body["Body"].read().decode("utf-8")))
-                except Exception:
-                    pass
+        # Primary: local file
+        vectors = _local_load_vectors(limit)
+        if not vectors:
+            try:
+                s3   = boto3.client("s3")
+                resp = s3.list_objects_v2(Bucket=_LEARNING_BUCKET, Prefix="learning/vectors/", MaxKeys=limit * 4)
+                if "Contents" in resp:
+                    objs = sorted(resp["Contents"], key=lambda o: o["LastModified"], reverse=True)
+                    for obj in objs[:limit]:
+                        try:
+                            body = s3.get_object(Bucket=_LEARNING_BUCKET, Key=obj["Key"])
+                            vectors.append(json.loads(body["Body"].read().decode("utf-8")))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         key_lessons = []
         for v in vectors:

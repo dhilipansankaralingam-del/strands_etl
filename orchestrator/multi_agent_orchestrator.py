@@ -89,6 +89,48 @@ Return structured JSON when asked for a final report.
 """
 
 
+def _archive_pipeline_result(report: dict, config: dict) -> None:
+    """Write full pipeline result to audit_logs/ directory (never raises)."""
+    try:
+        os.makedirs("audit_logs", exist_ok=True)
+        job_name    = report.get("job_name", "unknown")
+        pipeline_id = report.get("pipeline_id", "unknown")
+        ts          = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filepath    = os.path.join("audit_logs", f"{job_name}_{pipeline_id}_{ts}.json")
+
+        class _Enc(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                if isinstance(obj, Decimal):
+                    return float(obj)
+                return super().default(obj)
+        with open(filepath, "w") as fh:
+            json.dump(report, fh, indent=2, cls=_Enc)
+        logger.info("Archived pipeline result → %s", filepath)
+
+        summary = report.get("summary", {})
+        trail_record = {
+            "pipeline_id":              pipeline_id,
+            "job_name":                 job_name,
+            "started_at":               report.get("started_at"),
+            "finished_at":              report.get("finished_at"),
+            "processing_mode":          report.get("processing_mode"),
+            "agents_used":              summary.get("agents_used"),
+            "effective_size_gb":        summary.get("effective_size_gb"),
+            "anti_patterns_found":      summary.get("anti_patterns_found"),
+            "pii_columns_found":        summary.get("pii_columns_found"),
+            "execution_status":         summary.get("execution_status"),
+            "phases_completed":         summary.get("phases_completed"),
+            "iceberg_telemetry_enabled": summary.get("iceberg_telemetry_enabled"),
+        }
+        trail_path = os.path.join("audit_logs", "audit_trail.jsonl")
+        with open(trail_path, "a") as fh:
+            fh.write(json.dumps(trail_record) + "\n")
+    except Exception as exc:
+        logger.warning("Archive failed (non-fatal): %s", exc)
+
+
 class _DateEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
@@ -652,6 +694,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_script_tester():
+            if not _agent_enabled("script_tests"):
+                return {"skipped": True, "reason": "disabled in config"}
             tgt_script = (phase3.get("recommendation_applier", {}).get("modified_script")
                           or phase3.get("job_generator", {}).get("generated_script")
                           or script)
@@ -665,6 +709,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_recommendations():
+            if not _agent_enabled("recommendations"):
+                return {"skipped": True, "reason": "disabled in config"}
             return self._call_agent(
                 self._recommendation_agent,
                 f"Synthesise all pipeline findings into a prioritised recommendation report. "
@@ -673,6 +719,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_learning():
+            if not _agent_enabled("learning"):
+                return {"skipped": True, "reason": "disabled in config"}
             return self._call_agent(
                 self._learning_agent,
                 f"Capture a learning vector for pipeline '{pipeline_id}' job '{job_name}'. "
@@ -741,6 +789,10 @@ class MultiAgentOrchestrator:
 
         logger.info("Pipeline %s complete  |  %d agents  |  effective_gb=%.1f",
                     pipeline_id, 19, effective_gb)
+
+        # ── Archive + Audit ──────────────────────────────────────────────────────
+        _archive_pipeline_result(report, config)
+
         return report
 
     def chat(self, message: str) -> str:

@@ -117,6 +117,24 @@
   "compliance_frameworks": ["GDPR", "PCI-DSS"],
   "_comment_compliance": "GDPR | HIPAA | PCI-DSS | SOX | CCPA — overridden by --compliance on CLI",
 
+  "agents": {
+    "_comment": "Set any agent to false to skip it. Omit a key (or set to true) to enable. All agents are enabled by default.",
+    "sizing":                  true,
+    "data_quality":            true,
+    "compliance":              true,
+    "code_analysis":           true,
+    "lineage":                 true,
+    "delta_iceberg":           true,
+    "scientific":              true,
+    "recommendation_applier":  true,
+    "job_generator":           true,
+    "glue_metrics":            true,
+    "event_log":               true,
+    "script_tests":            true,
+    "recommendations":         true,
+    "learning":                true
+  },
+
   "glue_version": "4.0",
   "temp_dir":     "s3://my-bucket/glue-temp/",
 

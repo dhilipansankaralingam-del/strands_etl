@@ -8,6 +8,7 @@ and audit-trail generation. Mirrors ComplianceAgent from PR-6 (HTv7q).
 import json
 import logging
 import re
+import time
 from enum import Enum
 from typing import Any, Dict, List, Tuple
 
@@ -65,6 +66,45 @@ _FRAMEWORK_PII_MAP: Dict[str, List[str]] = {
     "ccpa":    ["email", "name", "address", "phone"],
 }
 
+_APPLICABLE_FRAMEWORKS: Dict[str, List[str]] = {
+    "email":         ["gdpr", "ccpa"],
+    "phone":         ["gdpr", "ccpa"],
+    "ssn":           ["hipaa", "pci_dss"],
+    "credit_card":   ["pci_dss"],
+    "address":       ["gdpr", "ccpa"],
+    "name":          ["gdpr", "hipaa", "ccpa"],
+    "date_of_birth": ["gdpr", "hipaa"],
+    "ip_address":    ["gdpr", "ccpa"],
+    "bank_account":  ["pci_dss", "sox"],
+    "medical_record":["hipaa"],
+}
+
+_SPARK_FIX_CODE: Dict[str, str] = {
+    "email":        'df = df.withColumn("{col}", expr("concat(sha2(split({col},\'@\')[0],256),\'@\',split({col},\'@\')[1])"))',
+    "phone":        'df = df.withColumn("{col}", expr("concat(left({col},3),\'****\',right({col},2))"))',
+    "ssn":          'df = df.withColumn("{col}", expr("concat(\'***-**-\',right({col},4))"))',
+    "credit_card":  'df = df.withColumn("{col}", expr("concat(\'****-****-****-\',right({col},4))"))',
+    "name":         'df = df.withColumn("{col}", expr("sha2({col},256)"))',
+    "address":      'df = df.withColumn("{col}", expr("{col}"))',  # generalise upstream
+    "date_of_birth":'df = df.withColumn("{col}", expr("date_format(date_trunc(\'year\',{col}),\'yyyy-01-01\')"))',
+    "ip_address":   'df = df.withColumn("{col}", expr("regexp_replace({col},r\'\\\\d+$\',\'0\')"))',
+    "bank_account": 'df = df.withColumn("{col}", expr("sha2({col},256)"))',
+    "medical_record":'df = df.withColumn("{col}", expr("sha2({col},256)"))',
+}
+
+_SQL_FIX_CODE: Dict[str, str] = {
+    "email":        "CONCAT(SHA2(SPLIT({col},'@')[0],256),'@',SPLIT({col},'@')[1]) AS {col}",
+    "phone":        "CONCAT(LEFT({col},3),'****',RIGHT({col},2)) AS {col}",
+    "ssn":          "CONCAT('***-**-',RIGHT({col},4)) AS {col}",
+    "credit_card":  "CONCAT('****-****-****-',RIGHT({col},4)) AS {col}",
+    "name":         "SHA2({col},256) AS {col}",
+    "address":      "CASE WHEN {col} IS NOT NULL THEN LEFT({col},3)||'***' ELSE NULL END AS {col}",
+    "date_of_birth":"DATE_FORMAT(DATE_TRUNC('year',{col}),'yyyy-01-01') AS {col}",
+    "ip_address":   "REGEXP_REPLACE({col},r'\\d+$','0') AS {col}",
+    "bank_account": "SHA2({col},256) AS {col}",
+    "medical_record":"SHA2({col},256) AS {col}",
+}
+
 _MASKING_STRATEGIES: Dict[str, str] = {
     "email":         "Hash domain-part: CONCAT(SHA2(local_part,256), '@', domain)",
     "phone":         "Mask last 7 digits: CONCAT(LEFT(phone,3), '****', RIGHT(phone,2))",
@@ -80,18 +120,30 @@ _MASKING_STRATEGIES: Dict[str, str] = {
 
 
 def _detect_pii_columns(schema: Dict) -> List[Dict]:
-    """Detect PII columns from schema metadata."""
+    """Detect PII columns from schema metadata with verbose annotations."""
     pii_found = []
     for col in schema.get("columns", []):
         col_name  = col.get("name", "").lower()
         for pii_type, patterns in _PII_COLUMN_PATTERNS.items():
-            if any(p in col_name for p in patterns):
+            matched_kw = next((p for p in patterns if p in col_name), None)
+            if matched_kw:
+                # exact match = high confidence, substring = medium
+                confidence = "high" if col_name == matched_kw else "medium"
+                col_entry = col.get("name", col_name)
+                spark_fix = _SPARK_FIX_CODE.get(pii_type, 'df = df.withColumn("{col}", expr("sha2({col},256)"))').replace("{col}", col_entry)
+                sql_fix   = _SQL_FIX_CODE.get(pii_type, "SHA2({col},256) AS {col}").replace("{col}", col_entry)
                 pii_found.append({
-                    "table":          schema.get("name", "unknown"),
-                    "column":         col.get("name"),
-                    "pii_type":       pii_type,
-                    "data_type":      col.get("type", "string"),
-                    "masking_strategy": _MASKING_STRATEGIES.get(pii_type, "Tokenise or hash"),
+                    "table":                schema.get("name", "unknown"),
+                    "column":               col_entry,
+                    "pii_type":             pii_type,
+                    "data_type":            col.get("type", "string"),
+                    "masking_strategy":     _MASKING_STRATEGIES.get(pii_type, "Tokenise or hash"),
+                    "scan_method":          "column_name_pattern_match",
+                    "pattern_matched":      matched_kw,
+                    "confidence":           confidence,
+                    "applicable_frameworks": _APPLICABLE_FRAMEWORKS.get(pii_type, []),
+                    "spark_fix_code":       spark_fix,
+                    "sql_fix_code":         sql_fix,
                 })
                 break
     return pii_found
@@ -229,6 +281,120 @@ def generate_masking_code(pii_columns_json: str) -> str:
         return json.dumps({"error": str(exc)})
 
 
+_VALUE_PII_PATTERNS = {
+    "email":       re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'),
+    "phone":       re.compile(r'\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+    "ssn":         re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
+    "credit_card": re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b'),
+}
+
+
+def _run_athena_query_compliance(sql: str, database: str, output_s3: str, region: str = "us-west-2") -> List[Dict]:
+    """Execute Athena query and return rows as list of dicts."""
+    import boto3
+    client = boto3.client("athena", region_name=region)
+    resp = client.start_query_execution(
+        QueryString=sql,
+        QueryExecutionContext={"Database": database},
+        ResultConfiguration={"OutputLocation": output_s3},
+    )
+    qid = resp["QueryExecutionId"]
+    for _ in range(60):
+        status = client.get_query_execution(QueryExecutionId=qid)
+        state = status["QueryExecution"]["Status"]["State"]
+        if state == "SUCCEEDED":
+            break
+        if state in ("FAILED", "CANCELLED"):
+            reason = status["QueryExecution"]["Status"].get("StateChangeReason", state)
+            raise RuntimeError(f"Athena query {state}: {reason}")
+        time.sleep(2)
+    else:
+        client.stop_query_execution(QueryExecutionId=qid)
+        raise TimeoutError(f"Athena query timed out: {qid}")
+
+    pages = client.get_paginator("get_query_results").paginate(QueryExecutionId=qid)
+    rows, headers = [], None
+    for page in pages:
+        for row in page["ResultSet"]["Rows"]:
+            values = [c.get("VarCharValue", "") for c in row["Data"]]
+            if headers is None:
+                headers = values
+            else:
+                rows.append(dict(zip(headers, values)))
+    return rows
+
+
+@tool
+def scan_table_sample_for_pii(
+    database: str,
+    table: str,
+    athena_output_s3: str,
+    column_names_json: str = "[]",
+    region: str = "us-west-2",
+) -> str:
+    """
+    Sample 100 rows from the table via Athena and scan VALUES for PII patterns
+    (email regex, phone regex, SSN regex, credit card regex).
+    This catches PII in columns with non-obvious names (e.g. 'field1', 'attr_x').
+
+    Args:
+        database: Glue catalog database name (or DB.table format in database field).
+        table: table name.
+        athena_output_s3: S3 URI for Athena query results.
+        column_names_json: JSON list of column names to scan (empty = all).
+        region: AWS region.
+
+    Returns:
+        JSON with value_pii_findings (column, sample_value_masked, pii_type, confidence),
+        and combined_report merging schema + value findings.
+    """
+    try:
+        # Support DB.table dot-notation
+        if "." in database and not table:
+            database, table = database.split(".", 1)
+        elif "." in table:
+            database, table = table.split(".", 1)
+
+        column_names = json.loads(column_names_json) if column_names_json else []
+        sql = f'SELECT * FROM "{database}"."{table}" LIMIT 100'
+        rows = _run_athena_query_compliance(sql, database, athena_output_s3, region)
+
+        value_findings: List[Dict] = []
+        scanned_cols = column_names if column_names else (list(rows[0].keys()) if rows else [])
+
+        for col in scanned_cols:
+            for row in rows:
+                cell_val = str(row.get(col, ""))
+                if not cell_val:
+                    continue
+                for pii_type, pattern in _VALUE_PII_PATTERNS.items():
+                    if pattern.search(cell_val):
+                        masked = cell_val[:3] + "***" if len(cell_val) > 3 else "***"
+                        value_findings.append({
+                            "column":              col,
+                            "sample_value_masked": masked,
+                            "pii_type":            pii_type,
+                            "confidence":          "high",
+                            "scan_method":         "value_regex_scan",
+                        })
+                        break  # one finding per cell is enough
+                else:
+                    continue
+                break  # one finding per column is enough
+
+        return json.dumps({
+            "database":           database,
+            "table":              table,
+            "rows_sampled":       len(rows),
+            "columns_scanned":    len(scanned_cols),
+            "value_pii_findings": value_findings,
+            "value_pii_count":    len(value_findings),
+        })
+    except Exception as exc:
+        logger.error("scan_table_sample_for_pii failed for %s.%s: %s", database, table, exc)
+        return json.dumps({"error": str(exc), "database": database, "table": table})
+
+
 def create_compliance_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                              region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for compliance checking."""
@@ -236,5 +402,5 @@ def create_compliance_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-2025
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[scan_schema_for_pii, generate_masking_code],
+        tools=[scan_schema_for_pii, generate_masking_code, scan_table_sample_for_pii],
     )
