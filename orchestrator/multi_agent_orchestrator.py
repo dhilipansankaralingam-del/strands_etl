@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional
 
 from strands import Agent
 from strands.models import BedrockModel
-from strands.tools import agent_as_tool
+from strands.tools import tool
 
 from .agents import (
     create_sizing_agent,
@@ -171,46 +171,131 @@ class MultiAgentOrchestrator:
         self._memory_agent             = create_memory_agent(model_id, region)
         self._chatbot_agent            = create_chatbot_agent(model_id, region)
 
-        # ── Wrap every specialist as a tool for the OrchestratorAgent ──────────
+        # ── Wrap every specialist as a @tool for the OrchestratorAgent ─────────
+        # agent_as_tool is not available in strands-agents v1.x — we use plain
+        # @tool-decorated closures that call each specialist agent directly.
+        _sizing             = self._sizing_agent
+        _dq                 = self._dq_agent
+        _compliance         = self._compliance_agent
+        _code               = self._code_analyzer_agent
+        _lineage            = self._column_lineage_agent
+        _delta              = self._delta_iceberg_agent
+        _resource           = self._resource_allocator_agent
+        _applier            = self._rec_applier_agent
+        _generator          = self._job_generator_agent
+        _execution          = self._execution_agent
+        _glue_m             = self._glue_metrics_agent
+        _spark_log          = self._spark_event_log_agent
+        _tester             = self._script_tester_agent
+        _recs               = self._recommendation_agent
+        _learning           = self._learning_agent
+        _scientific         = self._scientific_agent
+        _memory             = self._memory_agent
+        _chatbot            = self._chatbot_agent
+        _iceberg            = self._iceberg_telemetry_agent
+
+        @tool
+        def sizing_agent(prompt: str) -> str:
+            """Analyse data volumes, skew risk, partition efficiency, Iceberg snapshot health."""
+            return str(_sizing(prompt))
+
+        @tool
+        def data_quality_agent(prompt: str) -> str:
+            """Run data quality checks, generate DQ rules, auto-heal issues, profile columns."""
+            return str(_dq(prompt))
+
+        @tool
+        def compliance_agent(prompt: str) -> str:
+            """Detect PII columns and generate masking code for GDPR/HIPAA/PCI-DSS/SOX/CCPA."""
+            return str(_compliance(prompt))
+
+        @tool
+        def code_analyzer_agent(prompt: str) -> str:
+            """Line-by-line PySpark anti-pattern analysis, compound cross-agent issues, Zipf skew."""
+            return str(_code(prompt))
+
+        @tool
+        def column_lineage_agent(prompt: str) -> str:
+            """Trace column-level data lineage and render Mermaid/DOT diagrams."""
+            return str(_lineage(prompt))
+
+        @tool
+        def delta_iceberg_agent(prompt: str) -> str:
+            """Detect Delta/Iceberg format and emit maintenance SQL (OPTIMIZE, VACUUM, etc.)."""
+            return str(_delta(prompt))
+
+        @tool
+        def resource_allocator_agent(prompt: str) -> str:
+            """Right-size Glue workers, compare cloud costs, Amdahl + Little's Law allocation."""
+            return str(_resource(prompt))
+
+        @tool
+        def recommendation_applier_agent(prompt: str) -> str:
+            """Apply Spark configs and fix anti-patterns in PySpark scripts."""
+            return str(_applier(prompt))
+
+        @tool
+        def job_generator_agent(prompt: str) -> str:
+            """Generate production-ready PySpark/Glue ETL scripts from a job spec."""
+            return str(_generator(prompt))
+
+        @tool
+        def execution_agent(prompt: str) -> str:
+            """Submit and monitor AWS Glue or EMR jobs."""
+            return str(_execution(prompt))
+
+        @tool
+        def glue_metrics_agent(prompt: str) -> str:
+            """Fetch and analyse Glue CloudWatch metrics, derive Spark config overrides."""
+            return str(_glue_m(prompt))
+
+        @tool
+        def spark_event_log_agent(prompt: str) -> str:
+            """Parse Spark event logs for stage bottlenecks, skewed tasks, and spill."""
+            return str(_spark_log(prompt))
+
+        @tool
+        def script_tester_agent(prompt: str) -> str:
+            """Generate and run pytest test suites for PySpark scripts."""
+            return str(_tester(prompt))
+
+        @tool
+        def recommendation_agent(prompt: str) -> str:
+            """Synthesise ROI-driven recommendations and implementation roadmap."""
+            return str(_recs(prompt))
+
+        @tool
+        def learning_agent(prompt: str) -> str:
+            """Capture learning vectors, anomaly detection, adaptive thresholds, self-improving context."""
+            return str(_learning(prompt))
+
+        @tool
+        def scientific_agent(prompt: str) -> str:
+            """14 scientific algorithms: Amdahl, Euler, Zipf, Planck, Monte Carlo, Bloom filter, Pareto."""
+            return str(_scientific(prompt))
+
+        @tool
+        def memory_agent(prompt: str) -> str:
+            """Semantic long-term memory (mem0 + DynamoDB): store/search/summarise pipeline insights."""
+            return str(_memory(prompt))
+
+        @tool
+        def chatbot_agent(prompt: str) -> str:
+            """ETL knowledge chatbot with local RAG: answer ETL questions, recommend from knowledge base."""
+            return str(_chatbot(prompt))
+
+        @tool
+        def iceberg_telemetry_agent(prompt: str) -> str:
+            """Query Iceberg system tables ($files, $snapshots, $partitions, $manifests) via Athena."""
+            return str(_iceberg(prompt))
+
         self._tools = [
-            agent_as_tool(self._sizing_agent,             name="sizing_agent",
-                          description="Analyse data volumes, skew risk, partition efficiency, Iceberg snapshot health, file distribution"),
-            agent_as_tool(self._dq_agent,                 name="data_quality_agent",
-                          description="Run data quality checks, generate DQ rules, auto-heal issues, profile column statistics"),
-            agent_as_tool(self._compliance_agent,         name="compliance_agent",
-                          description="Detect PII columns and generate masking code"),
-            agent_as_tool(self._code_analyzer_agent,      name="code_analyzer_agent",
-                          description="Line-by-line PySpark anti-pattern analysis, compound cross-agent issues, Zipf skew patterns"),
-            agent_as_tool(self._column_lineage_agent,     name="column_lineage_agent",
-                          description="Trace column-level data lineage and render diagrams"),
-            agent_as_tool(self._delta_iceberg_agent,      name="delta_iceberg_agent",
-                          description="Detect Delta/Iceberg format and emit maintenance SQL"),
-            agent_as_tool(self._resource_allocator_agent, name="resource_allocator_agent",
-                          description="Right-size Glue workers, compare cloud costs, scientific allocation (Amdahl + Little's Law)"),
-            agent_as_tool(self._rec_applier_agent,        name="recommendation_applier_agent",
-                          description="Apply Spark configs and fix anti-patterns in scripts"),
-            agent_as_tool(self._job_generator_agent,      name="job_generator_agent",
-                          description="Generate production-ready PySpark/Glue ETL scripts"),
-            agent_as_tool(self._execution_agent,          name="execution_agent",
-                          description="Submit and monitor AWS Glue or EMR jobs"),
-            agent_as_tool(self._glue_metrics_agent,       name="glue_metrics_agent",
-                          description="Fetch and analyse Glue CloudWatch metrics, derive Spark config overrides"),
-            agent_as_tool(self._spark_event_log_agent,    name="spark_event_log_agent",
-                          description="Parse Spark event logs for bottlenecks and skew"),
-            agent_as_tool(self._script_tester_agent,      name="script_tester_agent",
-                          description="Generate and run pytest test suites for PySpark scripts"),
-            agent_as_tool(self._recommendation_agent,     name="recommendation_agent",
-                          description="Synthesise ROI-driven recommendations and implementation plan"),
-            agent_as_tool(self._learning_agent,           name="learning_agent",
-                          description="Capture learning vectors, anomaly detection, trend forecasting, workload fingerprinting, adaptive thresholds, self-improving context"),
-            agent_as_tool(self._scientific_agent,         name="scientific_agent",
-                          description="14 scientific algorithms: Amdahl, Euler, Zipf, Planck, Newton, Monte Carlo, Little's Law, Shannon, Bloom filter, Shewhart, Fourier, Pareto"),
-            agent_as_tool(self._memory_agent,             name="memory_agent",
-                          description="Semantic long-term memory (mem0 + DynamoDB): store/search insights, summarise agent knowledge, manage memory TTL"),
-            agent_as_tool(self._chatbot_agent,            name="chatbot_agent",
-                          description="ETL knowledge chatbot with local RAG: answer ETL questions, index pipeline runs, recommend from knowledge base"),
-            agent_as_tool(self._iceberg_telemetry_agent,  name="iceberg_telemetry_agent",
-                          description="Query Iceberg system tables ($files, $snapshots, $partitions, $manifests) via Athena for ground-truth table telemetry and health grading"),
+            sizing_agent, data_quality_agent, compliance_agent,
+            code_analyzer_agent, column_lineage_agent, delta_iceberg_agent,
+            resource_allocator_agent, recommendation_applier_agent, job_generator_agent,
+            execution_agent, glue_metrics_agent, spark_event_log_agent,
+            script_tester_agent, recommendation_agent, learning_agent,
+            scientific_agent, memory_agent, chatbot_agent, iceberg_telemetry_agent,
         ]
 
         self._orchestrator = Agent(
