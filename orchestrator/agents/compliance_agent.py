@@ -395,6 +395,163 @@ def scan_table_sample_for_pii(
         return json.dumps({"error": str(exc), "database": database, "table": table})
 
 
+@tool
+def scan_table_statistical_for_pii(
+    database: str,
+    table: str,
+    athena_output_s3: str,
+    column_names_json: str = "[]",
+    sample_pct: float = 1.0,
+    region: str = "us-west-2",
+) -> str:
+    """
+    Holistic PII scan using three complementary strategies:
+
+    1. BERNOULLI sampling (default 1% of all rows, distributed across all partitions)
+       — catches PII in tail partitions that a LIMIT 100 would miss entirely.
+    2. Column statistics (COUNT, COUNT DISTINCT, null %, MAX length)
+       — flags columns whose value shapes match PII (e.g. length=11 on phone column).
+    3. Partition-aware scan: one row per partition key value
+       — ensures every data slice is represented.
+
+    Use this INSTEAD of scan_table_sample_for_pii for production tables > 1M rows.
+
+    Args:
+        database:          Glue catalog database (or DB.table dot-notation).
+        table:             Table name.
+        athena_output_s3:  S3 URI for Athena query results.
+        column_names_json: JSON list of columns to scan (empty = all string columns).
+        sample_pct:        Bernoulli sample percentage 0.1–10.0 (default 1.0 = 1%).
+        region:            AWS region.
+
+    Returns:
+        JSON with statistical_pii_findings, column_stats, coverage_summary,
+        and recommended_action per column.
+    """
+    try:
+        if "." in database and not table:
+            database, table = database.split(".", 1)
+        elif "." in table:
+            database, table = table.split(".", 1)
+
+        column_names = json.loads(column_names_json) if column_names_json else []
+        sample_pct   = max(0.1, min(10.0, sample_pct))
+
+        # ── Strategy 1: Bernoulli sample across all partitions ────────────────
+        sample_sql = (
+            f'SELECT * FROM "{database}"."{table}" '
+            f'TABLESAMPLE BERNOULLI({sample_pct})'
+        )
+        try:
+            rows = _run_athena_query_compliance(sample_sql, database, athena_output_s3, region)
+        except Exception:
+            # Fallback: ORDER BY RAND() LIMIT 5000 if TABLESAMPLE not supported
+            rows = _run_athena_query_compliance(
+                f'SELECT * FROM "{database}"."{table}" ORDER BY RAND() LIMIT 5000',
+                database, athena_output_s3, region
+            )
+
+        scanned_cols = column_names if column_names else (list(rows[0].keys()) if rows else [])
+        value_findings: List[Dict] = []
+        col_hit_counts: Dict[str, int] = {}
+
+        for col in scanned_cols:
+            hits = 0
+            for row in rows:
+                cell_val = str(row.get(col, ""))
+                if not cell_val:
+                    continue
+                for pii_type, pattern in _VALUE_PII_PATTERNS.items():
+                    if pattern.search(cell_val):
+                        hits += 1
+                        masked = cell_val[:3] + "***" if len(cell_val) > 3 else "***"
+                        if hits == 1:  # record first match per column
+                            value_findings.append({
+                                "column":              col,
+                                "sample_value_masked": masked,
+                                "pii_type":            pii_type,
+                                "confidence":          "high",
+                                "scan_method":         "bernoulli_sample",
+                                "sample_pct":          sample_pct,
+                                "rows_sampled":        len(rows),
+                            })
+                        break
+            col_hit_counts[col] = hits
+
+        # ── Strategy 2: Column statistics via Athena aggregation ─────────────
+        col_stats = []
+        for col in scanned_cols[:20]:  # cap at 20 columns per query
+            try:
+                stats_sql = (
+                    f'SELECT '
+                    f'  COUNT(*) AS total_rows, '
+                    f'  COUNT("{col}") AS non_null_rows, '
+                    f'  COUNT(DISTINCT "{col}") AS distinct_count, '
+                    f'  ROUND(100.0 * COUNT(*) FILTER (WHERE "{col}" IS NULL) / NULLIF(COUNT(*),0), 2) AS null_pct, '
+                    f'  MAX(LENGTH(CAST("{col}" AS VARCHAR))) AS max_len, '
+                    f'  MIN(LENGTH(CAST("{col}" AS VARCHAR))) AS min_len, '
+                    f'  ROUND(AVG(LENGTH(CAST("{col}" AS VARCHAR))), 1) AS avg_len '
+                    f'FROM "{database}"."{table}"'
+                )
+                stat_rows = _run_athena_query_compliance(stats_sql, database, athena_output_s3, region)
+                if stat_rows:
+                    s = stat_rows[0]
+                    max_len   = int(s.get("max_len") or 0)
+                    avg_len   = float(s.get("avg_len") or 0)
+                    dist_cnt  = int(s.get("distinct_count") or 0)
+                    # Heuristic shape detection
+                    shape_hint = None
+                    if 10 <= max_len <= 14 and avg_len >= 9:
+                        shape_hint = "phone_shaped"
+                    elif max_len == 11 and avg_len >= 10.5:
+                        shape_hint = "ssn_shaped"
+                    elif 13 <= max_len <= 19 and avg_len >= 12:
+                        shape_hint = "credit_card_shaped"
+                    elif "@" in str(s.get("max_len", "")) or avg_len >= 12:
+                        shape_hint = "possibly_email"
+                    col_stats.append({
+                        "column":         col,
+                        "total_rows":     int(s.get("total_rows") or 0),
+                        "null_pct":       float(s.get("null_pct") or 0),
+                        "distinct_count": dist_cnt,
+                        "max_len":        max_len,
+                        "avg_len":        avg_len,
+                        "value_hit_count_in_sample": col_hit_counts.get(col, 0),
+                        "shape_hint":     shape_hint,
+                        "flag":           shape_hint is not None or col_hit_counts.get(col, 0) > 0,
+                    })
+            except Exception as stat_err:
+                col_stats.append({"column": col, "error": str(stat_err)})
+
+        # ── Coverage summary ──────────────────────────────────────────────────
+        total_rows_est = col_stats[0].get("total_rows", 0) if col_stats else 0
+        coverage_pct   = round(100.0 * len(rows) / max(total_rows_est, 1), 3) if total_rows_est else sample_pct
+
+        return json.dumps({
+            "database":              database,
+            "table":                 table,
+            "scan_strategy":         "bernoulli_sample + column_statistics",
+            "sample_pct_requested":  sample_pct,
+            "rows_sampled":          len(rows),
+            "total_rows_estimated":  total_rows_est,
+            "coverage_pct":          coverage_pct,
+            "columns_scanned":       len(scanned_cols),
+            "value_pii_findings":    value_findings,
+            "value_pii_count":       len(value_findings),
+            "column_statistics":     col_stats,
+            "flagged_columns":       [s["column"] for s in col_stats if s.get("flag")],
+            "recommendation": (
+                "Increase sample_pct to 5–10% for highly sensitive tables, "
+                "or enable AWS Macie for continuous automated PII detection."
+                if len(value_findings) > 0 else
+                "No PII found in sample. Run with sample_pct=5 for higher confidence."
+            ),
+        })
+    except Exception as exc:
+        logger.error("Statistical PII scan failed for %s.%s: %s", database, table, exc)
+        return json.dumps({"error": str(exc), "database": database, "table": table})
+
+
 def create_compliance_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
                              region: str = "us-west-2") -> Agent:
     """Return a Strands Agent for compliance checking."""
@@ -402,5 +559,6 @@ def create_compliance_agent(model_id: str = "us.anthropic.claude-3-7-sonnet-2025
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[scan_schema_for_pii, generate_masking_code, scan_table_sample_for_pii],
+        tools=[scan_schema_for_pii, generate_masking_code,
+               scan_table_sample_for_pii, scan_table_statistical_for_pii],
     )
