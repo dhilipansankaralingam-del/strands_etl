@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from strands import Agent
@@ -57,6 +57,21 @@ comprehensive telemetry report covering:
 Always call query_iceberg_table_stats first. For tables with skew_ratio > 3,
 additionally call query_iceberg_partition_details. Return structured JSON only.
 """
+
+# ---------------------------------------------------------------------------
+# Table reference parsing helper
+# ---------------------------------------------------------------------------
+
+def _parse_table_ref(ref: str) -> Tuple[str, str]:
+    """
+    Parse a table reference that may be 'DB_prd.tablename' or just 'tablename'.
+    Returns (database, table) tuple.
+    """
+    if "." in ref:
+        parts = ref.split(".", 1)
+        return parts[0].strip(), parts[1].strip()
+    return "default", ref.strip()
+
 
 # ---------------------------------------------------------------------------
 # Athena execution helpers
@@ -168,7 +183,7 @@ SELECT
         NULLIF(AVG(CAST(file_size_in_bytes AS DOUBLE)), 0),
         3
     )                                                                    AS file_size_cv
-FROM "{database}"."{table}"."$files"
+FROM "{database}"."{table}$files"
 """.strip()
 
     try:
@@ -229,7 +244,7 @@ SELECT
     SUM(deleted_files_count)          AS total_deleted_files,
     SUM(added_records_count)          AS total_added_records,
     SUM(deleted_records_count)        AS total_deleted_records
-FROM "{database}"."{table}"."$snapshots"
+FROM "{database}"."{table}$snapshots"
 """.strip()
 
     try:
@@ -289,7 +304,7 @@ SELECT
         2
     )                                                                    AS skew_ratio,
     MAX(file_count)                                                      AS max_files_in_partition
-FROM "{database}"."{table}"."$partitions"
+FROM "{database}"."{table}$partitions"
 """.strip()
 
     try:
@@ -341,7 +356,7 @@ SELECT
     SUM(
         CASE WHEN added_files_count + existing_files_count = 0 THEN 1 ELSE 0 END
     )                                                                    AS empty_manifests
-FROM "{database}"."{table}"."$manifests"
+FROM "{database}"."{table}$manifests"
 """.strip()
 
     try:
@@ -360,6 +375,15 @@ FROM "{database}"."{table}"."$manifests"
         return json.dumps({"error": str(exc), "database": database, "table": table})
 
 
+_FATAL_ERROR_KEYWORDS = ("catalog", "not found", "does not exist", "table_not_found")
+
+
+def _is_fatal_iceberg_error(error_msg: str) -> bool:
+    """Return True if the error indicates the table/catalog does not exist."""
+    lower = error_msg.lower()
+    return any(kw in lower for kw in _FATAL_ERROR_KEYWORDS)
+
+
 @tool
 def query_iceberg_table_stats(
     database: str,
@@ -374,8 +398,10 @@ def query_iceberg_table_stats(
     Runs $files, $snapshots, $partitions, and $manifests queries in sequence
     and merges results into a single flat dict with a health assessment.
 
+    Supports 'DB_prd.tablename' dot-notation in the database or table argument.
+
     Args:
-        database:          Glue catalog database name.
+        database:          Glue catalog database name, or 'DB_prd.tablename' combined.
         table:             Table name (e.g. "sales_events").
         athena_output_s3:  S3 URI for Athena query results (e.g. s3://bucket/athena/).
         region:            AWS region (default us-west-2).
@@ -386,7 +412,18 @@ def query_iceberg_table_stats(
         - health_grade:           A / B / C / D / F
         - health_issues:          list of {severity, description, recommendation} dicts
         - growth_gb_per_day:      estimated daily growth from snapshot timestamps
+
+    Raises:
+        RuntimeError: if a fatal catalog/table-not-found error is encountered.
     """
+    # Support DB_prd.tablename notation
+    if not table and "." in database:
+        database, table = _parse_table_ref(database)
+    elif "." in table:
+        database, table = _parse_table_ref(table)
+    elif "." in database:
+        database, table = _parse_table_ref(database)
+
     stats: Dict[str, Any] = {
         "database": database,
         "table":    table,
@@ -397,33 +434,97 @@ def query_iceberg_table_stats(
     # ── $files ────────────────────────────────────────────────────────────────
     try:
         files_raw = json.loads(query_iceberg_files.__wrapped__(database, table, athena_output_s3, region))
-        if "error" not in files_raw:
+        if "error" in files_raw:
+            err_msg = files_raw["error"]
+            if _is_fatal_iceberg_error(err_msg):
+                raise RuntimeError(
+                    f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                    f"Check database/table name and Glue catalog."
+                )
+            errors.append(f"$files: {err_msg}")
+        else:
             stats.update({k: v for k, v in files_raw.items() if k != "source"})
+    except RuntimeError:
+        raise
     except Exception as e:
+        err_msg = str(e)
+        if _is_fatal_iceberg_error(err_msg):
+            raise RuntimeError(
+                f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                f"Check database/table name and Glue catalog."
+            )
         errors.append(f"$files: {e}")
 
     # ── $snapshots ────────────────────────────────────────────────────────────
     try:
         snap_raw = json.loads(query_iceberg_snapshots.__wrapped__(database, table, athena_output_s3, region))
-        if "error" not in snap_raw:
+        if "error" in snap_raw:
+            err_msg = snap_raw["error"]
+            if _is_fatal_iceberg_error(err_msg):
+                raise RuntimeError(
+                    f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                    f"Check database/table name and Glue catalog."
+                )
+            errors.append(f"$snapshots: {err_msg}")
+        else:
             stats.update({k: v for k, v in snap_raw.items() if k != "source"})
+    except RuntimeError:
+        raise
     except Exception as e:
+        err_msg = str(e)
+        if _is_fatal_iceberg_error(err_msg):
+            raise RuntimeError(
+                f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                f"Check database/table name and Glue catalog."
+            )
         errors.append(f"$snapshots: {e}")
 
     # ── $partitions ───────────────────────────────────────────────────────────
     try:
         part_raw = json.loads(query_iceberg_partitions.__wrapped__(database, table, athena_output_s3, region))
-        if "error" not in part_raw:
+        if "error" in part_raw:
+            err_msg = part_raw["error"]
+            if _is_fatal_iceberg_error(err_msg):
+                raise RuntimeError(
+                    f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                    f"Check database/table name and Glue catalog."
+                )
+            errors.append(f"$partitions: {err_msg}")
+        else:
             stats.update({k: v for k, v in part_raw.items() if k != "source"})
+    except RuntimeError:
+        raise
     except Exception as e:
+        err_msg = str(e)
+        if _is_fatal_iceberg_error(err_msg):
+            raise RuntimeError(
+                f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                f"Check database/table name and Glue catalog."
+            )
         errors.append(f"$partitions: {e}")
 
     # ── $manifests ────────────────────────────────────────────────────────────
     try:
         mani_raw = json.loads(query_iceberg_manifests.__wrapped__(database, table, athena_output_s3, region))
-        if "error" not in mani_raw:
+        if "error" in mani_raw:
+            err_msg = mani_raw["error"]
+            if _is_fatal_iceberg_error(err_msg):
+                raise RuntimeError(
+                    f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                    f"Check database/table name and Glue catalog."
+                )
+            errors.append(f"$manifests: {err_msg}")
+        else:
             stats.update({k: v for k, v in mani_raw.items() if k != "source"})
+    except RuntimeError:
+        raise
     except Exception as e:
+        err_msg = str(e)
+        if _is_fatal_iceberg_error(err_msg):
+            raise RuntimeError(
+                f"Iceberg telemetry FATAL: {database}.{table} — {err_msg}. "
+                f"Check database/table name and Glue catalog."
+            )
         errors.append(f"$manifests: {e}")
 
     # ── Derived metrics ────────────────────────────────────────────────────────
@@ -533,7 +634,7 @@ SELECT
     file_count,
     ROUND(CAST(record_count AS DOUBLE) /
           NULLIF(AVG(CAST(record_count AS DOUBLE)) OVER (), 0), 2)  AS relative_size
-FROM "{database}"."{table}"."$partitions"
+FROM "{database}"."{table}$partitions"
 ORDER BY record_count DESC
 LIMIT {top_n}
 """.strip()

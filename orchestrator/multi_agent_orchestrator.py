@@ -38,6 +38,7 @@ Architecture  (16 specialist agents, 50+ tools):
 
 import json
 import logging
+import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -356,6 +357,12 @@ class MultiAgentOrchestrator:
         pipeline_id   = str(uuid.uuid4())[:8]
         started_at    = datetime.utcnow().isoformat()
         job_name      = config.get("job_name", "etl_job")
+
+        # ── Agent selection flags ────────────────────────────────────────────────
+        agent_flags = config.get("agents", {})
+        def _agent_enabled(name: str) -> bool:
+            # default True if not specified
+            return agent_flags.get(name, True)
         tables        = config.get("source_tables", [])
         schemas       = config.get("table_schemas", tables)
         script        = config.get("script_content", "")
@@ -380,10 +387,17 @@ class MultiAgentOrchestrator:
         iceberg_telemetry: Dict[str, Any] = {}
         if athena_output and tables:
             logger.info("[Phase 0] Querying Iceberg system tables via Athena …")
-            tbl_db_list = [
-                {"database": t.get("database", "default"), "table": t.get("table", t.get("name", ""))}
-                for t in tables if t.get("table") or t.get("name")
-            ]
+            tbl_db_list = []
+            for t in tables:
+                raw = t.get("table", t.get("name", ""))
+                db = t.get("database", "default")
+                # Support DB_prd.tablename dot-notation in source_tables entries
+                if raw and "." in raw:
+                    db, raw = raw.split(".", 1)
+                elif db and "." in db:
+                    db, raw = db.split(".", 1)
+                if raw:
+                    tbl_db_list.append({"database": db, "table": raw})
             try:
                 iceberg_telemetry = self._call_agent(
                     self._iceberg_telemetry_agent,
@@ -399,6 +413,25 @@ class MultiAgentOrchestrator:
             except Exception as exc:
                 logger.warning("[Phase 0] Iceberg telemetry failed (non-fatal): %s", exc)
                 iceberg_telemetry = {"error": str(exc)}
+
+            # ── Fail-fast: stop the pipeline if Phase 0 returned a fatal error ──
+            if iceberg_telemetry.get("error") or iceberg_telemetry.get("tables_analyzed", -1) == 0:
+                error_msg = iceberg_telemetry.get("error", "tables_analyzed=0 — no tables processed")
+                logger.error(
+                    "[Phase 0] FATAL — Iceberg telemetry failed. Stopping pipeline. Error: %s",
+                    error_msg,
+                )
+                return {
+                    "pipeline_id": pipeline_id,
+                    "job_name": job_name,
+                    "status": "FAILED",
+                    "phase": "phase0_iceberg_telemetry",
+                    "error": error_msg,
+                    "resolution": (
+                        "Check database/table names in source_tables config. "
+                        "Format: DB_prd.tablename or {database: 'DB_prd', table: 'tablename'}"
+                    ),
+                }
         else:
             logger.info("[Phase 0] Skipped — set athena_output_s3 in config to enable Iceberg telemetry")
 
@@ -418,6 +451,8 @@ class MultiAgentOrchestrator:
         logger.info("[Phase 1] Running 7 analysis agents in parallel …")
 
         def _run_sizing():
+            if not _agent_enabled("sizing"):
+                return {"skipped": True, "reason": "disabled in config"}
             iceberg_ctx = (f" Iceberg telemetry available: {_dumps(iceberg_telemetry)[:1000]}."
                            if iceberg_telemetry and not iceberg_telemetry.get("error") else "")
             return self._call_agent(
@@ -427,12 +462,16 @@ class MultiAgentOrchestrator:
             )
 
         def _run_dq():
+            if not _agent_enabled("data_quality"):
+                return {"skipped": True, "reason": "disabled in config"}
             return self._call_agent(
                 self._dq_agent,
                 f"Run data quality checks for schemas: {schemas_json}"
             )
 
         def _run_compliance():
+            if not _agent_enabled("compliance"):
+                return {"skipped": True, "reason": "disabled in config"}
             return self._call_agent(
                 self._compliance_agent,
                 f"Scan schemas for PII columns. Active frameworks: {frameworks_json}. "
@@ -440,6 +479,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_code_analysis():
+            if not _agent_enabled("code_analysis"):
+                return {"skipped": True, "reason": "disabled in config"}
             if not script:
                 return {"skipped": True, "reason": "No script_content provided"}
             iceberg_ctx  = _dumps(iceberg_telemetry) if iceberg_telemetry and not iceberg_telemetry.get("error") else "{}"
@@ -453,6 +494,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_lineage():
+            if not _agent_enabled("lineage"):
+                return {"skipped": True, "reason": "disabled in config"}
             if not script:
                 return {"skipped": True, "reason": "No script_content provided"}
             return self._call_agent(
@@ -461,6 +504,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_delta_iceberg():
+            if not _agent_enabled("delta_iceberg"):
+                return {"skipped": True, "reason": "disabled in config"}
             if not script:
                 return {"skipped": True, "reason": "No script_content provided"}
             return self._call_agent(
@@ -469,6 +514,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_scientific():
+            if not _agent_enabled("scientific"):
+                return {"skipped": True, "reason": "disabled in config"}
             return self._call_agent(
                 self._scientific_agent,
                 f"Run scientific analysis for job '{job_name}': "
@@ -512,6 +559,8 @@ class MultiAgentOrchestrator:
         logger.info("[Phase 3] Generating optimised script artefacts in parallel …")
 
         def _run_rec_applier():
+            if not _agent_enabled("recommendation_applier"):
+                return {"skipped": True, "reason": "disabled in config"}
             if not script:
                 return {"skipped": True}
             return self._call_agent(
@@ -522,6 +571,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_job_generator():
+            if not _agent_enabled("job_generator"):
+                return {"skipped": True, "reason": "disabled in config"}
             job_spec = {
                 "job_name":        job_name,
                 "platform":        config.get("platform", "glue"),
@@ -573,6 +624,8 @@ class MultiAgentOrchestrator:
         }
 
         def _run_glue_metrics():
+            if not _agent_enabled("glue_metrics"):
+                return {"skipped": True, "reason": "disabled in config"}
             # Use pre-collected metrics if provided; otherwise fetch from CloudWatch
             if glue_metrics:
                 return self._call_agent(
@@ -589,6 +642,8 @@ class MultiAgentOrchestrator:
             )
 
         def _run_spark_event_log():
+            if not _agent_enabled("event_log"):
+                return {"skipped": True, "reason": "disabled in config"}
             if not event_log:
                 return {"skipped": True, "reason": "No event_log_path / spark_event_log in config"}
             return self._call_agent(
