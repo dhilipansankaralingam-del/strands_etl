@@ -145,6 +145,160 @@ class AnalysisResult:
         return "LOW"
 
 
+# ---------------------------------------------------------------------------
+# Data Profiling Models
+# ---------------------------------------------------------------------------
+
+class AnomalyType(str, Enum):
+    """Types of data anomalies the profiler can detect."""
+    NULL_FLOOD         = "NULL_FLOOD"           # sudden spike in nulls
+    CARDINALITY_EXPLOSION = "CARDINALITY_EXPLOSION"  # FK/dim column new values
+    TEMPORAL_ANOMALY   = "TEMPORAL_ANOMALY"     # timestamps jump backwards
+    DISTRIBUTION_SKEW  = "DISTRIBUTION_SKEW"    # one value dominates
+    SCHEMA_DRIFT       = "SCHEMA_DRIFT"         # column added/removed/retyped
+    STALE_PARTITION    = "STALE_PARTITION"       # data older than freshness SLA
+    DUPLICATE_KEY_STORM = "DUPLICATE_KEY_STORM" # PK uniqueness collapse
+    BOUNDARY_EXPLOSION = "BOUNDARY_EXPLOSION"   # values far beyond historical max
+    ZERO_INFLATION     = "ZERO_INFLATION"       # metric column returns zeros
+    ENCODING_ROT       = "ENCODING_ROT"         # garbled UTF-8 / control chars
+
+
+class AnomalySeverity(str, Enum):
+    LOW      = "LOW"
+    MEDIUM   = "MEDIUM"
+    HIGH     = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass
+class ColumnProfile:
+    """Statistical profile for a single column."""
+    column_name: str
+    data_type: str
+    row_count: int
+    null_count: int
+    null_pct: float
+    distinct_count: int
+    distinct_pct: float
+    min_value: Optional[Any] = None
+    max_value: Optional[Any] = None
+    mean_value: Optional[float] = None
+    stddev_value: Optional[float] = None
+    top_values: List[Dict[str, Any]] = field(default_factory=list)   # [{value, freq_pct}]
+    sample_values: List[Any] = field(default_factory=list)
+    is_primary_key_candidate: bool = False
+    historical_null_pct: Optional[float] = None       # baseline from previous run
+    historical_distinct_count: Optional[int] = None
+    historical_max_value: Optional[Any] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class KPISnapshot:
+    """A point-in-time KPI measurement for a table."""
+    table_name: str
+    database_name: str
+    run_id: str
+    captured_at: str
+    row_count: int
+    partition_count: int
+    latest_partition_value: Optional[str]
+    freshness_hours: Optional[float]       # hours since latest record
+    row_count_delta_pct: Optional[float]   # % change vs previous snapshot
+    duplicate_key_pct: Optional[float]     # % of PK rows that are duplicates
+    kpi_metrics: Dict[str, Any] = field(default_factory=dict)  # domain KPIs
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AnomalyReport:
+    """A single detected anomaly within a table or column."""
+    anomaly_id: str
+    table_name: str
+    database_name: str
+    column_name: Optional[str]
+    anomaly_type: AnomalyType
+    severity: AnomalySeverity
+    description: str
+    observed_value: Any
+    expected_range: Optional[str]
+    z_score: Optional[float]
+    detection_sql: Optional[str]
+    run_id: str
+    detected_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    ai_explanation: str = ""
+    recommended_action: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["anomaly_type"] = self.anomaly_type.value
+        d["severity"] = self.severity.value
+        return d
+
+
+@dataclass
+class DataProfileResult:
+    """
+    Full profiling report for one table, produced by DataProfilerAgent.
+
+    Includes column-level statistics, table-level KPIs, and a list of
+    detected anomalies ranked by severity.
+    """
+    profile_id: str
+    table_name: str
+    database_name: str
+    run_id: str
+    profiled_at: str
+    column_profiles: List[ColumnProfile]
+    kpi_snapshot: KPISnapshot
+    anomalies: List[AnomalyReport]
+    schema_columns: List[str]
+    schema_drift_detected: bool
+    ai_summary: str = ""
+    data_health_score: int = 100          # 0 (broken) → 100 (perfect)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "profile_id": self.profile_id,
+            "table_name": self.table_name,
+            "database_name": self.database_name,
+            "run_id": self.run_id,
+            "profiled_at": self.profiled_at,
+            "column_profiles": [c.to_dict() for c in self.column_profiles],
+            "kpi_snapshot": self.kpi_snapshot.to_dict(),
+            "anomalies": [a.to_dict() for a in self.anomalies],
+            "schema_columns": self.schema_columns,
+            "schema_drift_detected": self.schema_drift_detected,
+            "ai_summary": self.ai_summary,
+            "data_health_score": self.data_health_score,
+        }
+
+    def critical_anomalies(self) -> List[AnomalyReport]:
+        return [a for a in self.anomalies if a.severity == AnomalySeverity.CRITICAL]
+
+
+@dataclass
+class ActionDispatchResult:
+    """Records what action was taken on a ValidationRecord after AI recommendation."""
+    dispatch_id: str
+    record_id: str
+    rule_name: str
+    table_name: str
+    recommended_action: str
+    action_taken: str
+    action_payload: Dict[str, Any]
+    success: bool
+    error_message: str = ""
+    dispatched_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class AthenaQueryResult:
     """Wraps the result of an Athena query execution."""
