@@ -3,28 +3,21 @@ validation/audit_action_agent.py
 =================================
 Strands SDK Agentic Audit Failure Analyzer + Action Dispatcher.
 
-This module reads FAIL rows from the validation audit table (via Athena),
-feeds each record through the ValidationAnalysisAgent for classification,
-enriches the result with data profiling signals, then autonomously acts on
-the AI recommendation using Strands @tool-decorated actions.
+Reads FAIL rows from a validation audit table via a simple Athena query,
+classifies each failure with AI, enriches with data profiling signals,
+and autonomously dispatches corrective actions.
 
-Architecture
-------------
-AuditActionAgent (Strands Agent)
-  │
-  ├── @tool fetch_audit_failures()      — read FAIL rows from Athena audit table
-  ├── @tool classify_failure()          — run decision_agent on one record
-  ├── @tool profile_failed_table()      — trigger DataProfilerAgent for context
-  ├── @tool decide_final_action()       — LLM picks action using profile signals
-  │
-  ├── @tool action_rerun_glue_job()     — re-trigger the pipeline
-  ├── @tool action_generate_fix_sql()   — produce DATA_CORRECTION SQL
-  ├── @tool action_suggest_rule_fix()   — propose FIX_LOGIC rule change
-  ├── @tool action_escalate()           — send SNS alert
-  ├── @tool action_schedule_monitor()   — mark for follow-up
-  ├── @tool action_ignore()             — log false-positive with rationale
-  │
-  └── @tool write_action_log()         — persist ActionDispatchResult to S3
+Usage
+-----
+    from validation.audit_action_agent import AuditActionAgent, build_audit_agent
+
+    # Direct Python API — just supply database, table, and date
+    agent = AuditActionAgent(database="insurance_dw", table="audit_validation")
+    report = agent.run_for_date("2024-07-01")
+
+    # Autonomous Strands Agent
+    agent = build_audit_agent(database="insurance_dw", table="audit_validation")
+    response = agent("Analyse all failures for 2024-07-01 and take action.")
 
 Edge Cases Handled
 ------------------
@@ -33,32 +26,11 @@ Edge Cases Handled
 - Temporal anomaly (timestamp rollback)        → ESCALATE immediately
 - Distribution skew masks business KPI failure → MONITOR + alert threshold
 - Schema drift on a CRITICAL table             → ESCALATE + halt downstream
-- Stale partition breaches SLA                 → RERUN Glue job
+- Stale partition breaches SLA                 → flag for re-ingest
 - Duplicate key storm in a PK column           → ESCALATE + dedup SQL
 - Boundary explosion (unit conversion bug)     → DATA_CORRECTION + fix SQL
 - Zero inflation in revenue metrics            → ESCALATE (financial risk)
 - Encoding rot in customer name fields         → FIX_LOGIC + re-ingest hint
-
-Usage
------
-    from validation.audit_action_agent import AuditActionAgent, build_audit_agent
-
-    # Option A — direct Python API
-    agent = AuditActionAgent(
-        audit_database="dq_db",
-        audit_table="audit_validation",
-        glue_job_name="etl_policy_master",
-        sns_topic_arn="arn:aws:sns:us-east-1:123:dq-alerts",
-    )
-    report = agent.run(run_id="run-2024-07-01", severity_filter="HIGH")
-
-    # Option B — Strands agentic loop (autonomous)
-    strands_agent = build_audit_agent(audit_database="dq_db", audit_table="audit_validation")
-    response = strands_agent(
-        "Analyse all CRITICAL and HIGH failures from run-2024-07-01. "
-        "Profile the affected tables, classify each failure, and take action. "
-        "Escalate anything touching the policy_master table."
-    )
 """
 
 from __future__ import annotations
@@ -109,10 +81,9 @@ class AuditActionAgent:
       6. Persist ActionDispatchResult to S3
     """
 
-    MODEL_ID         = "anthropic.claude-3-sonnet-20240229-v1:0"
+    MODEL_ID          = "anthropic.claude-3-sonnet-20240229-v1:0"
     ACTION_LOG_PREFIX = "validation/audit/action_logs/"
 
-    # Edge-case → escalation overrides (anomaly type forces ESCALATE regardless of AI)
     FORCE_ESCALATE_ANOMALIES = {
         AnomalyType.TEMPORAL_ANOMALY,
         AnomalyType.SCHEMA_DRIFT,
@@ -121,19 +92,25 @@ class AuditActionAgent:
 
     def __init__(
         self,
-        audit_database: str = "default",
-        audit_table: str = "audit_validation",
-        glue_job_name: str = "",
-        sns_topic_arn: str = "",
-        learning_bucket: str = "strands-etl-learning",
+        database: str,
+        table: str,
         athena_output: str = "s3://strands-etl-athena-results/audit/",
+        learning_bucket: str = "strands-etl-learning",
         aws_region: str = "us-east-1",
         model_id: str = MODEL_ID,
     ):
-        self.audit_database  = audit_database
-        self.audit_table     = audit_table
-        self.glue_job_name   = glue_job_name
-        self.sns_topic_arn   = sns_topic_arn
+        """
+        Parameters
+        ----------
+        database : str
+            Athena / Glue database that contains the audit table.
+        table : str
+            Audit validation table name (e.g. "audit_validation").
+        athena_output : str
+            S3 path for Athena query result output.
+        """
+        self.audit_database  = database
+        self.audit_table     = table
         self.learning_bucket = learning_bucket
         self.athena_output   = athena_output
         self.model_id        = model_id
@@ -151,6 +128,7 @@ class AuditActionAgent:
             model_id=model_id,
         )
         self.profiler = DataProfilerAgent(
+            database=database,
             learning_bucket=learning_bucket,
             aws_region=aws_region,
             model_id=model_id,
@@ -160,19 +138,47 @@ class AuditActionAgent:
     # Public API
     # ------------------------------------------------------------------
 
+    def run_for_date(self, date: str, severity_filter: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+        """
+        Fetch all FAIL records for a given date and process them.
+
+        Parameters
+        ----------
+        date : str
+            Date in YYYY-MM-DD format. Matches on failure_timestamp date part.
+        severity_filter : str, optional
+            Minimum severity to include: LOW | MEDIUM | HIGH | CRITICAL.
+            Defaults to all severities.
+        limit : int
+            Max records to process per run.
+
+        Example
+        -------
+            agent = AuditActionAgent(database="insurance_dw", table="audit_validation")
+            report = agent.run_for_date("2024-07-01")
+            report = agent.run_for_date("2024-07-01", severity_filter="HIGH")
+        """
+        return self.run(date=date, severity_filter=severity_filter, limit=limit)
+
     def run(
         self,
-        run_id: Optional[str] = None,
-        severity_filter: Optional[str] = None,   # e.g. "HIGH" → HIGH + CRITICAL
+        date: Optional[str] = None,
+        severity_filter: Optional[str] = None,
         limit: int = 100,
     ) -> Dict[str, Any]:
         """
-        Load audit failures, analyze each, dispatch actions, and return a summary.
-        """
-        logger.info(f"[AuditActionAgent] Starting audit run: run_id={run_id}, severity={severity_filter}")
+        Core pipeline: fetch → classify → profile → dispatch → summarise.
 
-        # ── Step 1: Load failures from audit table
-        records = self._fetch_audit_failures(run_id=run_id, severity_filter=severity_filter, limit=limit)
+        Parameters
+        ----------
+        date : str, optional
+            YYYY-MM-DD date to filter failures on. Omit to fetch latest failures.
+        severity_filter : str, optional
+            Minimum severity level: LOW | MEDIUM | HIGH | CRITICAL.
+        """
+        logger.info(f"[AuditActionAgent] Starting audit: date={date}, severity={severity_filter}")
+
+        records = self._fetch_audit_failures(date=date, severity_filter=severity_filter, limit=limit)
         if not records:
             return {"message": "No FAIL records found matching the criteria.", "total": 0}
 
@@ -191,10 +197,10 @@ class AuditActionAgent:
 
         # ── Step 3: Executive summary
         summary = self._build_summary(records, dispatch_results)
-        self._persist_summary(run_id or "unknown", summary)
+        self._persist_summary(date or "latest", summary)
 
         return {
-            "run_id": run_id,
+            "date": date,
             "total_failures": len(records),
             "actions_taken": [r.to_dict() for r in dispatch_results],
             "summary": summary,
@@ -433,16 +439,16 @@ class AuditActionAgent:
 
     def _dispatch_rerun(self, record: ValidationRecord, payload: Dict[str, Any]) -> tuple[bool, str]:
         """Re-trigger the Glue ETL job for the affected pipeline."""
-        job_name = payload.get("rerun_job") or self.glue_job_name
+        job_name = payload.get("rerun_job") or record.additional_context.get("glue_job_name", "")
         if not job_name:
-            logger.warning("RERUN requested but no Glue job name configured")
-            return False, "No Glue job name configured"
+            logger.warning("RERUN requested but no Glue job name available in record context")
+            return False, "No Glue job name available — set additional_context.glue_job_name on the record"
         try:
             resp = self.glue.start_job_run(
                 JobName=job_name,
                 Arguments={
-                    "--run_id":     record.run_id,
-                    "--table_name": record.table_name,
+                    "--run_id":       record.run_id,
+                    "--table_name":   record.table_name,
                     "--triggered_by": "audit_action_agent",
                 },
             )
@@ -502,14 +508,16 @@ class AuditActionAgent:
         self, record: ValidationRecord, payload: Dict[str, Any]
     ) -> tuple[bool, str]:
         """Send an SNS alert for critical failures requiring human intervention."""
-        if not self.sns_topic_arn:
-            logger.warning("ESCALATE action but no SNS topic ARN configured; logging only")
-            return True, ""
+        sns_topic_arn = record.additional_context.get("sns_topic_arn", "")
         message = payload.get("alert_message", f"DQ failure requires attention: {record.rule_name}")
         subject = f"[DQ ESCALATION] {record.severity}: {record.rule_name} on {record.table_name}"
+        if not sns_topic_arn:
+            logger.warning("ESCALATE action but no sns_topic_arn in record.additional_context; logging only")
+            logger.warning(f"ESCALATION MESSAGE: {subject} — {message}")
+            return True, ""
         try:
             self.sns.publish(
-                TopicArn=self.sns_topic_arn,
+                TopicArn=sns_topic_arn,
                 Subject=subject[:100],
                 Message=json.dumps({
                     "alert": message,
@@ -562,7 +570,8 @@ class AuditActionAgent:
             "rationale": payload.get("rationale", "Confirmed false-positive by AI agent"),
             "ignored_at": datetime.utcnow().isoformat(),
         }
-        key = f"validation/audit/ignored/{record.run_id}/{record.record_id}.json"
+        date_str = record.failure_timestamp[:10] if record.failure_timestamp else "unknown"
+        key = f"validation/audit/ignored/{date_str}/{record.record_id}.json"
         try:
             self.s3.put_object(
                 Bucket=self.learning_bucket,
@@ -579,31 +588,44 @@ class AuditActionAgent:
 
     def _fetch_audit_failures(
         self,
-        run_id: Optional[str],
+        date: Optional[str],
         severity_filter: Optional[str],
         limit: int,
     ) -> List[ValidationRecord]:
-        """Query the Athena audit_validation table for FAIL records."""
+        """
+        Simple Athena query — fetch FAIL rows for a given date from the audit table.
+
+        date format : YYYY-MM-DD  (matched against DATE(failure_timestamp))
+        """
         severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-        min_rank = severity_rank.get(severity_filter, 1) if severity_filter else 1
 
         where_clauses = ["status = 'FAIL'"]
-        if run_id:
-            where_clauses.append(f"run_id = '{run_id}'")
 
-        # Filter by minimum severity (Athena doesn't support CASE in WHERE without CTE)
-        if min_rank > 1:
-            sev_values = [s for s, r in severity_rank.items() if r >= min_rank]
-            sev_list = ", ".join(f"'{s}'" for s in sev_values)
+        if date:
+            where_clauses.append(f"DATE(failure_timestamp) = DATE '{date}'")
+
+        if severity_filter and severity_filter in severity_rank:
+            min_rank  = severity_rank[severity_filter]
+            sev_in    = [s for s, r in severity_rank.items() if r >= min_rank]
+            sev_list  = ", ".join(f"'{s}'" for s in sev_in)
             where_clauses.append(f"severity IN ({sev_list})")
 
         sql = f"""
 SELECT
-    record_id, rule_name, table_name, column_name,
-    failed_value, expected_constraint, failure_timestamp,
-    run_id, pipeline_name, database_name,
-    severity, rule_type,
-    row_count_failed, total_row_count
+    record_id,
+    rule_name,
+    table_name,
+    column_name,
+    failed_value,
+    expected_constraint,
+    failure_timestamp,
+    run_id,
+    pipeline_name,
+    database_name,
+    severity,
+    rule_type,
+    row_count_failed,
+    total_row_count
 FROM {self.audit_database}.{self.audit_table}
 WHERE {' AND '.join(where_clauses)}
 ORDER BY
@@ -748,14 +770,14 @@ def make_audit_tools(agent: AuditActionAgent):
     """
 
     @tool
-    def fetch_audit_failures(run_id: str = "", severity_filter: str = "MEDIUM", limit: int = 50) -> str:
+    def fetch_audit_failures(date: str, severity_filter: str = "MEDIUM", limit: int = 50) -> str:
         """
-        Fetch FAIL records from the validation audit table.
-        severity_filter: minimum severity level (LOW/MEDIUM/HIGH/CRITICAL).
-        Returns JSON list of failure records.
+        Fetch FAIL records from the audit table for a given date (YYYY-MM-DD).
+        severity_filter: minimum severity (LOW/MEDIUM/HIGH/CRITICAL).
+        Returns a JSON list of failure records.
         """
         records = agent._fetch_audit_failures(
-            run_id=run_id or None,
+            date=date or None,
             severity_filter=severity_filter or None,
             limit=limit,
         )
@@ -765,8 +787,8 @@ def make_audit_tools(agent: AuditActionAgent):
     def classify_and_act(record_json: str) -> str:
         """
         Classify a single validation failure record and dispatch the recommended action.
-        record_json: JSON string of a ValidationRecord dict (from fetch_audit_failures output).
-        Returns the ActionDispatchResult.
+        record_json: JSON string of a ValidationRecord dict (from fetch_audit_failures).
+        Returns the ActionDispatchResult as JSON.
         """
         record_dict = json.loads(record_json)
         record = ValidationRecord.from_athena_row(record_dict)
@@ -774,25 +796,24 @@ def make_audit_tools(agent: AuditActionAgent):
         return json.dumps(result.to_dict(), indent=2, default=str)
 
     @tool
-    def run_full_audit(run_id: str, severity_filter: str = "HIGH") -> str:
+    def run_full_audit(date: str, severity_filter: str = "HIGH") -> str:
         """
-        Run the complete audit analysis pipeline for a given ETL run.
-        Fetches failures, classifies each, profiles affected tables, dispatches actions.
-        Returns an executive summary.
+        Run the full audit pipeline for a given date (YYYY-MM-DD).
+        Fetches failures, classifies each, profiles tables, dispatches actions.
+        Returns an executive summary as JSON.
         """
-        report = agent.run(run_id=run_id, severity_filter=severity_filter)
+        report = agent.run(date=date, severity_filter=severity_filter)
         return json.dumps(report, indent=2, default=str)
 
     @tool
-    def profile_table_for_failure(table_name: str, run_id: str, column_name: str = "") -> str:
+    def profile_table_for_failure(table_name: str, column_name: str = "") -> str:
         """
-        Profile a specific table to gather data health signals for a failure context.
-        Returns DataProfileResult summary with anomalies and health score.
+        Profile a table to gather data health signals.
+        Returns health score, anomalies, and AI summary as JSON.
         """
-        agent.profiler.database = agent.audit_database
         result = agent.profiler.profile(
             table_name=table_name,
-            run_id=run_id,
+            run_id=datetime.utcnow().strftime("%Y-%m-%d"),
             key_columns=[column_name] if column_name else None,
         )
         return json.dumps({
@@ -806,9 +827,8 @@ def make_audit_tools(agent: AuditActionAgent):
     @tool
     def generate_fix_sql(record_json: str) -> str:
         """
-        Generate a DATA_CORRECTION SQL statement for a failed validation record.
+        Generate a DATA_CORRECTION SQL for a failed validation record.
         record_json: JSON string of the ValidationRecord.
-        Returns the fix SQL or an explanation of why no SQL was generated.
         """
         record_dict = json.loads(record_json)
         record = ValidationRecord.from_athena_row(record_dict)
@@ -818,27 +838,32 @@ def make_audit_tools(agent: AuditActionAgent):
     @tool
     def escalate_failure(record_json: str, reason: str) -> str:
         """
-        Immediately escalate a failure via SNS. Use when the situation is critical.
+        Immediately escalate a failure. Logs the alert; sends via SNS if configured.
         record_json: JSON string of the ValidationRecord.
-        reason: why this is being escalated.
+        reason: explanation of why this is being escalated.
         """
         record_dict = json.loads(record_json)
         record = ValidationRecord.from_athena_row(record_dict)
-        payload = {"alert_message": f"[AGENT ESCALATION] {reason} — Record: {record.rule_name} on {record.table_name}"}
+        payload = {
+            "alert_message": (
+                f"[AGENT ESCALATION] {reason} — "
+                f"Rule: {record.rule_name} on {record.table_name}.{record.column_name}"
+            )
+        }
         success, err = agent._dispatch_escalate(record, payload)
         return json.dumps({"escalated": success, "error": err})
 
     @tool
-    def get_action_summary(run_id: str) -> str:
+    def get_action_summary(date: str) -> str:
         """
-        Return a summary of all actions taken for a specific ETL run from S3 logs.
+        Return the action summary for a given date (YYYY-MM-DD) from S3 logs.
         """
         try:
-            key = f"{agent.ACTION_LOG_PREFIX}_summaries/{run_id}.json"
+            key = f"{agent.ACTION_LOG_PREFIX}_summaries/{date}.json"
             body = agent.s3.get_object(Bucket=agent.learning_bucket, Key=key)["Body"].read()
             return body.decode("utf-8")
         except Exception as e:
-            return json.dumps({"error": f"No summary found for run_id={run_id}: {e}"})
+            return json.dumps({"error": f"No summary found for date={date}: {e}"})
 
     return [
         fetch_audit_failures,
@@ -855,62 +880,50 @@ AUDIT_AGENT_SYSTEM_PROMPT = """
 You are the **Strands Audit Action Agent**, an autonomous data quality enforcer.
 
 ## Your Mission
-You analyse failed validation records from the audit_validation table, profile the
-affected tables for data health signals, classify each failure (TRUE_FAILURE /
-FALSE_POSITIVE / NEEDS_INVESTIGATION), and take the appropriate corrective action.
+You analyse failed validation records from an audit table, profile the affected
+tables for data health signals, classify each failure (TRUE_FAILURE / FALSE_POSITIVE /
+NEEDS_INVESTIGATION), and take the appropriate corrective action.
 
 ## Decision Framework
-1. Always fetch failures first, then profile the affected table.
-2. Use profile anomalies to inform severity upgrades:
+1. Call fetch_audit_failures(date, severity_filter) first to get the failure list.
+2. For each failure, call profile_table_for_failure to get data health context.
+3. Use profile anomalies to determine action:
    - TEMPORAL_ANOMALY / SCHEMA_DRIFT / ZERO_INFLATION → always ESCALATE
    - Health score < 40 + HIGH severity → always ESCALATE
-   - STALE_PARTITION → RERUN the Glue job
-   - DUPLICATE_KEY_STORM → DATA_CORRECTION + generate fix SQL
-   - BOUNDARY_EXPLOSION → DATA_CORRECTION or ESCALATE if financial metric
-   - NULL_FLOOD > 30% → DATA_CORRECTION
+   - STALE_PARTITION → note for re-ingest
+   - DUPLICATE_KEY_STORM → DATA_CORRECTION + generate_fix_sql
+   - BOUNDARY_EXPLOSION → DATA_CORRECTION or ESCALATE for financial metrics
+   - NULL_FLOOD > 30% → DATA_CORRECTION + generate_fix_sql
    - FALSE_POSITIVE (confidence > 0.85) → IGNORE and log rationale
-3. Prioritise by: CRITICAL → HIGH → MEDIUM.
-4. Always explain your reasoning before calling a dispatch tool.
-5. After acting on all failures, call run_full_audit to produce a summary.
+4. Prioritise: CRITICAL → HIGH → MEDIUM.
+5. Explain reasoning before each action tool call.
+6. Finish with run_full_audit to produce the executive summary.
 """
 
 
 def build_audit_agent(
-    audit_database: str = "default",
-    audit_table: str = "audit_validation",
-    glue_job_name: str = "",
-    sns_topic_arn: str = "",
+    database: str,
+    table: str,
+    athena_output: str = "s3://strands-etl-athena-results/audit/",
     learning_bucket: str = "strands-etl-learning",
     aws_region: str = "us-east-1",
     model_id: str = AuditActionAgent.MODEL_ID,
 ) -> Agent:
     """
-    Build and return a fully autonomous Strands Agent for audit failure processing.
+    Build a fully autonomous Strands Agent for audit failure processing.
 
-    The agent uses the Strands agentic loop — it can call multiple tools in
-    sequence, reason over results, and decide what to do next without any
-    hardcoded orchestration.
+    Just supply the Athena database and table — the agent handles the rest.
 
     Example
     -------
-        agent = build_audit_agent(
-            audit_database="insurance_dw",
-            audit_table="audit_validation",
-            glue_job_name="etl_policy_master",
-            sns_topic_arn="arn:aws:sns:us-east-1:123:dq-alerts",
-        )
-        response = agent(
-            "Analyse all HIGH and CRITICAL failures from run-2024-07-01. "
-            "Profile the affected tables. Escalate anything on policy_master or "
-            "claims_summary. Generate fix SQL for any DATA_CORRECTION actions."
-        )
+        agent = build_audit_agent(database="insurance_dw", table="audit_validation")
+        response = agent("Analyse all HIGH failures for 2024-07-01 and take action.")
         print(response)
     """
     audit_agent = AuditActionAgent(
-        audit_database=audit_database,
-        audit_table=audit_table,
-        glue_job_name=glue_job_name,
-        sns_topic_arn=sns_topic_arn,
+        database=database,
+        table=table,
+        athena_output=athena_output,
         learning_bucket=learning_bucket,
         aws_region=aws_region,
         model_id=model_id,
