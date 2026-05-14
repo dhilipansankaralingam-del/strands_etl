@@ -1,0 +1,57 @@
+{
+  "_comment": "Configuration for the Strands Audit AI Analysis + Data Profiling pipeline",
+
+  "athena": {
+    "database": "audit_db",
+    "table":    "etl_orchestrator_audit",
+    "output_location": "s3://strands-etl-athena-results/audit-analysis/",
+    "region": "us-east-1"
+  },
+
+  "ai": {
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "learning_bucket": "strands-etl-learning",
+    "severity_filter": "MEDIUM",
+    "max_records_per_run": 100
+  },
+
+  "profiling": {
+    "freshness_sla_hours": 26,
+    "null_flood_delta_pct": 20,
+    "cardinality_explosion_multiplier": 3,
+    "distribution_skew_threshold_pct": 80,
+    "boundary_explosion_multiplier": 10,
+    "zero_inflation_threshold_pct": 1,
+    "duplicate_key_threshold_pct": 0.5
+  },
+
+  "tables": [
+    {
+      "name": "etl_orchestrator_audit",
+      "database": "audit_db",
+      "key_columns": ["run_id", "event_type", "source_label", "status", "validation_name"],
+      "primary_key_column": "run_id",
+      "timestamp_column": "event_timestamp",
+      "partition_column": "run_date",
+      "metric_columns": [],
+      "freshness_sla_hours": 26
+    }
+  ],
+
+  "actions": {
+    "rerun": {
+      "glue_job_name": "etl_orchestrator_job"
+    },
+    "escalate": {
+      "sns_topic_arn": "arn:aws:sns:us-east-1:123456789012:dq-alerts"
+    }
+  },
+
+  "output": {
+    "print_summary": true,
+    "print_anomalies": true,
+    "print_actions": true,
+    "save_report_to_s3": true,
+    "report_prefix": "validation/audit/reports/"
+  }
+}
