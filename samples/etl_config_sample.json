@@ -135,7 +135,10 @@
     "learning":                true
   },
 
-  "glue_version": "4.0",
+  "glue_version": "5.0",
+  "_comment_glue_version": "4.0 | 5.0 | 5.2. Glue 5.0: Spark 3.5.2 + Iceberg 1.6.1 + Python 3.11. Glue 5.2: Spark 3.5.4 + Iceberg 1.7.1.",
+  "use_graviton": false,
+  "_comment_graviton": "true = Graviton3 workers (16% cheaper per DPU-hour). Requires glue_version 5.0+. Worker type becomes G.2X.GRAVITON etc.",
   "temp_dir":     "s3://my-bucket/glue-temp/",
 
   "athena_output_s3": "s3://my-bucket/athena-results/",

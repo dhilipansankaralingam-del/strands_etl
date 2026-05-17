@@ -28,7 +28,8 @@ Given a job specification, generate a complete PySpark script that:
 2. Implements the described business logic step-by-step
 3. Embeds validation assertions (row count checks, null checks, anomaly guards)
 4. Applies the optimization requirements (broadcast hints, caching, partition strategy)
-5. Uses the appropriate platform boilerplate (Glue 4.0 vs standalone Spark)
+5. Uses the appropriate platform boilerplate (Glue 4.0 / 5.0 / 5.2 vs standalone Spark).
+   For Glue 5.x: enable auto-scaling, use Graviton3 if requested, apply Spark 3.5 AQE configs.
 6. Includes proper error handling and logging
 
 Return structured JSON:
@@ -52,6 +53,20 @@ _DEFAULT_SPARK_CONFIGS = {
     "spark.sql.shuffle.partitions":                  "auto",
     "spark.sql.files.maxPartitionBytes":             "134217728",
     "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+}
+
+# Glue version metadata
+_GLUE_VERSION_META = {
+    "4.0": {"spark": "3.3",   "python": "3.10", "iceberg": "1.2.1", "delta": "2.3"},
+    "5.0": {"spark": "3.5.2", "python": "3.11", "iceberg": "1.6.1", "delta": "3.2"},
+    "5.2": {"spark": "3.5.4", "python": "3.11", "iceberg": "1.7.1", "delta": "3.3"},
+}
+
+# Additional Spark configs recommended for Glue 5.x
+_GLUE5_EXTRA_CONFIGS = {
+    "spark.sql.adaptive.localShuffleReader.enabled":              "true",
+    "spark.sql.adaptive.rebalancePartitionsSmallPartitionFactor": "0.2",
+    "spark.sql.iceberg.handle-timestamp-without-timezone":        "true",
 }
 
 _GLUE_HEADER = """\
@@ -347,6 +362,9 @@ def generate_glue_job_definition(
     worker_type: str = "G.2X",
     num_workers: int = 10,
     additional_python_modules: str = "",
+    glue_version: str = "5.0",
+    use_graviton: bool = False,
+    temp_dir: str = "",
 ) -> str:
     """
     Generate an AWS Glue job definition (boto3 create_job parameters).
@@ -358,38 +376,92 @@ def generate_glue_job_definition(
         worker_type:               G.1X / G.2X / G.4X / G.8X (default G.2X).
         num_workers:               Number of workers (default 10).
         additional_python_modules: Comma-separated list of pip packages.
+        glue_version:              Glue version: "4.0", "5.0", "5.2" (default "5.0").
+        use_graviton:              If True and glue_version >= 5.0, append .GRAVITON suffix
+                                   to worker_type for 16% cost saving (ARM-based workers).
+        temp_dir:                  S3 temp dir for Glue spill/shuffle (optional).
 
     Returns:
-        JSON Glue create_job parameter dict, ready to pass to boto3.
+        JSON Glue create_job parameter dict ready to pass to boto3, with runtime metadata.
     """
     try:
+        valid_versions = ("4.0", "5.0", "5.2")
+        if glue_version not in valid_versions:
+            return json.dumps({"error": f"Invalid glue_version '{glue_version}'. Must be one of {valid_versions}"})
+
+        meta = _GLUE_VERSION_META[glue_version]
+        is_glue5 = glue_version in ("5.0", "5.2")
+
+        # Graviton worker type (Glue 5.0+ only)
+        effective_worker_type = worker_type
+        if use_graviton and is_glue5:
+            effective_worker_type = worker_type + ".GRAVITON"
+
+        # Pricing table (per DPU-hour)
+        _pricing = {
+            "G.1X": 0.44, "G.2X": 0.88, "G.4X": 1.76, "G.8X": 3.52,
+            "G.1X.GRAVITON": 0.37, "G.2X.GRAVITON": 0.74, "G.4X.GRAVITON": 1.48,
+        }
+
+        # Build Spark conf string — AQE on by default; extra configs for Glue 5.x
+        spark_conf_parts = ["spark.sql.adaptive.enabled=true"]
+        if is_glue5:
+            spark_conf_parts += [
+                "spark.sql.adaptive.coalescePartitions.enabled=true",
+                "spark.sql.adaptive.skewJoin.enabled=true",
+                "spark.sql.adaptive.localShuffleReader.enabled=true",
+            ]
+        spark_conf_str = " --conf ".join(spark_conf_parts)
+
+        default_args: Dict[str, str] = {
+            "--JOB_NAME":                         job_name,
+            "--enable-metrics":                   "true",
+            "--enable-continuous-cloudwatch-log":  "true",
+            "--enable-spark-ui":                  "true",
+            "--conf":                             spark_conf_str,
+        }
+        if is_glue5:
+            default_args["--enable-auto-scaling"] = "true"
+        if temp_dir:
+            default_args["--TempDir"] = temp_dir
+        if additional_python_modules:
+            default_args["--additional-python-modules"] = additional_python_modules
+
         definition: Dict[str, Any] = {
-            "Name":        job_name,
-            "Role":        iam_role,
+            "Name":             job_name,
+            "Role":             iam_role,
             "Command": {
                 "Name":           "glueetl",
                 "ScriptLocation": script_s3_path,
-                "PythonVersion":  "3",
+                "PythonVersion":  meta["python"].split(".")[0],
             },
-            "GlueVersion":    "4.0",
-            "WorkerType":     worker_type,
-            "NumberOfWorkers": num_workers,
-            "DefaultArguments": {
-                "--JOB_NAME":                       job_name,
-                "--enable-metrics":                 "true",
-                "--enable-continuous-cloudwatch-log": "true",
-                "--enable-spark-ui":                "true",
-                "--conf":                           "spark.sql.adaptive.enabled=true",
-            },
+            "GlueVersion":      glue_version,
+            "WorkerType":       effective_worker_type,
+            "NumberOfWorkers":  num_workers,
+            "DefaultArguments": default_args,
         }
-        if additional_python_modules:
-            definition["DefaultArguments"]["--additional-python-modules"] = additional_python_modules
+
+        cost_per_hour = round(num_workers * _pricing.get(effective_worker_type, 0.88), 2)
+
+        migration_notes: List[str] = []
+        if glue_version in ("5.0", "5.2"):
+            migration_notes = [
+                f"Glue {glue_version} uses Spark {meta['spark']} — test for Spark 3.5 breaking changes first",
+                f"Bundled Iceberg {meta['iceberg']}: rename table property 'write.target-file-size-bytes' → 'write.target.file-size-bytes'",
+                f"Iceberg snapshot expiry default changed to 2 days (was 5 days in Glue 4.0)",
+                "PandasUDFType enum removed — update any @pandas_udf decorators",
+                "date_add() now returns DateType (was StringType in Glue 4.0) — check downstream casts",
+            ]
 
         return json.dumps({
-            "glue_job_definition": definition,
-            "boto3_call":          f"glue.create_job(**{job_name}_definition)",
-            "estimated_cost_per_hour": round(num_workers * {"G.1X": 0.44, "G.2X": 0.88,
-                                                             "G.4X": 1.76, "G.8X": 3.52}.get(worker_type, 0.88), 2),
+            "glue_job_definition":      definition,
+            "boto3_call":               f"glue_client.create_job(**definition)",
+            "glue_version":             glue_version,
+            "runtime_metadata":         meta,
+            "worker_type":              effective_worker_type,
+            "use_graviton":             use_graviton and is_glue5,
+            "estimated_cost_per_hour":  cost_per_hour,
+            "migration_notes":          migration_notes,
         })
     except Exception as exc:
         return json.dumps({"error": str(exc)})

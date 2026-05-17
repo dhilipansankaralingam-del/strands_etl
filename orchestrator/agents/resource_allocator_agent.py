@@ -44,10 +44,33 @@ Return ONLY valid JSON.
 # Pricing tables (mirrors PR-11 ResourceAllocatorAgent)
 # ---------------------------------------------------------------------------
 _GLUE_PRICING = {
-    "G.1X": {"cost": 0.44, "memory_gb": 16,  "vcpu": 4},
-    "G.2X": {"cost": 0.88, "memory_gb": 32,  "vcpu": 8},
-    "G.4X": {"cost": 1.76, "memory_gb": 64,  "vcpu": 16},
-    "G.8X": {"cost": 3.52, "memory_gb": 128, "vcpu": 32},
+    # Standard x86 workers (all Glue versions)
+    "G.1X":         {"cost": 0.44,  "memory_gb": 16,  "vcpu": 4,  "arch": "x86"},
+    "G.2X":         {"cost": 0.88,  "memory_gb": 32,  "vcpu": 8,  "arch": "x86"},
+    "G.4X":         {"cost": 1.76,  "memory_gb": 64,  "vcpu": 16, "arch": "x86"},
+    "G.8X":         {"cost": 3.52,  "memory_gb": 128, "vcpu": 32, "arch": "x86"},
+    # Graviton3 workers — Glue 5.0+ only (~16% cheaper per DPU-hour)
+    "G.1X.GRAVITON": {"cost": 0.37, "memory_gb": 16,  "vcpu": 4,  "arch": "graviton3", "min_glue": "5.0"},
+    "G.2X.GRAVITON": {"cost": 0.74, "memory_gb": 32,  "vcpu": 8,  "arch": "graviton3", "min_glue": "5.0"},
+    "G.4X.GRAVITON": {"cost": 1.48, "memory_gb": 64,  "vcpu": 16, "arch": "graviton3", "min_glue": "5.0"},
+}
+
+_GLUE5_SPARK_CONFIGS = {
+    "5.0": {
+        "spark.sql.adaptive.enabled":                    "true",
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.adaptive.skewJoin.enabled":           "true",
+        "spark.sql.adaptive.localShuffleReader.enabled": "true",
+        "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+    },
+    "5.2": {
+        "spark.sql.adaptive.enabled":                    "true",
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.adaptive.skewJoin.enabled":           "true",
+        "spark.sql.adaptive.localShuffleReader.enabled": "true",
+        "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+        "spark.sql.adaptive.rebalancePartitionsSmallPartitionFactor": "0.2",
+    },
 }
 _EMR_PRICING = {
     "m5.xlarge":  {"cost": 0.230, "memory_gb": 16,  "vcpu": 4},
@@ -166,6 +189,7 @@ def allocate_resources(
     code_analysis_json: str = "{}",
     current_config_json: str = '{"number_of_workers": 10, "worker_type": "G.2X", "platform": "glue"}',
     runs_per_day: int = 1,
+    glue_version: str = "5.0",
 ) -> str:
     """
     Calculate optimal resource allocation and multi-platform cost comparison.
@@ -175,9 +199,12 @@ def allocate_resources(
         code_analysis_json:  JSON from Code Analyzer Agent (complexity.complexity_score, …).
         current_config_json: Current job configuration (number_of_workers, worker_type, …).
         runs_per_day:        How many times the pipeline runs per day (for monthly cost calc).
+        glue_version:        Target Glue version: "4.0", "5.0", "5.2" (default "5.0").
+                             Glue 5.0+ enables Graviton3 workers (16% cheaper).
 
     Returns:
-        JSON with optimal_config, cost_comparison, savings, resource_efficiency, recommendations.
+        JSON with optimal_config, cost_comparison, savings, resource_efficiency,
+        graviton_recommendation, glue5_spark_configs, and recommendations.
     """
     try:
         sizing   = json.loads(sizing_result_json)
@@ -236,6 +263,33 @@ def allocate_resources(
                 "effort":   "low",
             })
 
+        # Graviton recommendation (Glue 5.0+)
+        graviton_rec = None
+        glue5_configs = {}
+        if glue_version in ("5.0", "5.2"):
+            grav_type = optimal["worker_type"] + ".GRAVITON"
+            if grav_type in _GLUE_PRICING:
+                grav_price   = _GLUE_PRICING[grav_type]["cost"]
+                x86_price    = _GLUE_PRICING.get(optimal["worker_type"], {"cost": 0.88})["cost"]
+                grav_savings = round((1 - grav_price / x86_price) * 100, 1)
+                grav_cost    = _glue_cost(optimal["workers"], grav_type, hours)
+                graviton_rec = {
+                    "worker_type":         grav_type,
+                    "cost_per_dpu_hour":   grav_price,
+                    "savings_vs_x86_pct":  grav_savings,
+                    "cost_per_run":        round(grav_cost, 2),
+                    "monthly_savings_usd": round((opt_cost - grav_cost) * runs_per_day * 30, 2),
+                    "recommendation":      f"Switch to {grav_type} on Glue {glue_version} to save {grav_savings}% vs x86",
+                    "note":                "Graviton3 workers require Glue 5.0+ and ARM-compatible libraries",
+                }
+                recs.append({
+                    "priority":    "P1",
+                    "title":       f"Use Graviton3 workers ({grav_type}) on Glue {glue_version} — {grav_savings}% cheaper than x86",
+                    "savings_pct": grav_savings,
+                    "effort":      "low",
+                })
+            glue5_configs = _GLUE5_SPARK_CONFIGS.get(glue_version, {})
+
         return json.dumps({
             "optimal_config": optimal,
             "current_config": {
@@ -251,11 +305,14 @@ def allocate_resources(
                 "annual_usd":  round((cur_cost - opt_cost) * runs_per_day * 365, 2),
             },
             "resource_efficiency": {
-                "over_provisioned":         over_provisioned,
+                "over_provisioned":           over_provisioned,
                 "memory_utilization_estimate": f"{util_pct}%",
-                "current_total_memory_gb":  cur_mem_total,
-                "required_memory_gb":       round(memory_gb_needed, 1),
+                "current_total_memory_gb":    cur_mem_total,
+                "required_memory_gb":         round(memory_gb_needed, 1),
             },
+            "graviton_recommendation":  graviton_rec,
+            "glue_version":             glue_version,
+            "glue5_recommended_spark_configs": glue5_configs,
             "recommendations": recs,
         })
 

@@ -183,7 +183,8 @@ def _translate_config(raw: dict, args: argparse.Namespace) -> dict:
         "job_config": {
             "worker_type":     worker_type,
             "num_workers":     num_workers,
-            "glue_version":    raw.get("glue_version", "4.0"),
+            "glue_version":    getattr(args, "glue_version", None) or raw.get("glue_version", "5.0"),
+            "use_graviton":    getattr(args, "graviton", False) or raw.get("use_graviton", False),
             "timeout_minutes": _parse_timeout(res.get("timeout", 120)),
             "script_location": scripts.get("pyspark", ""),
             "temp_dir":        raw.get("temp_dir", ""),
@@ -306,10 +307,20 @@ Examples:
       --athena-output   s3://my-bucket/athena-results/ \\
       --glue-metrics    metrics/glue_cloudwatch.json \\
       --spark-event-log s3://my-bucket/spark-event-logs/orders_etl/ \\
+      --glue-version    5.0 \\
+      --graviton \\
       --runs-per-day    4 \\
-      --workers         6 --worker-type G.1X \\
+      --workers         6 --worker-type G.2X \\
       --compliance      GDPR,PCI-DSS \\
       --output-file     results/pipeline_out.json
+
+  # Glue 5.2 with Graviton3 workers (16% cost saving)
+  python3.11 scripts/strands_etl_agents.py \\
+      --config       etl_config.json \\
+      --glue-version 5.2 \\
+      --graviton \\
+      --worker-type  G.2X \\
+      --workers      10
 
   # Pass Glue metrics inline (no file needed)
   python3.11 scripts/strands_etl_agents.py \\
@@ -374,8 +385,16 @@ Examples:
     p.add_argument("--workers",      type=int, default=None,
                    help="Number of Glue/EMR workers (overrides config)")
     p.add_argument("--worker-type",  default=None, dest="worker_type",
-                   choices=["G.1X", "G.2X", "G.4X", "G.8X", "Z.2X"],
-                   help="Glue worker type (overrides config)")
+                   choices=["G.1X", "G.2X", "G.4X", "G.8X", "Z.2X",
+                            "G.1X.GRAVITON", "G.2X.GRAVITON", "G.4X.GRAVITON"],
+                   help="Glue worker type (overrides config). .GRAVITON variants require Glue 5.0+")
+    p.add_argument("--glue-version", default=None, dest="glue_version",
+                   choices=["4.0", "5.0", "5.2"],
+                   help="Target Glue version: 4.0 | 5.0 | 5.2 (default: from config or 5.0). "
+                        "Glue 5.0 = Spark 3.5.2 + Iceberg 1.6.1. Glue 5.2 = Spark 3.5.4 + Iceberg 1.7.1.")
+    p.add_argument("--graviton",     action="store_true", default=False,
+                   help="Recommend Graviton3 workers (16%% cheaper, requires Glue 5.0+). "
+                        "Sets use_graviton=true in job definition.")
     p.add_argument("--runs-per-day", type=int, default=1, dest="runs_per_day",
                    help="How many times per day this job runs (for cost calc, default: 1)")
 

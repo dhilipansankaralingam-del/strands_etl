@@ -135,6 +135,96 @@ _ANTI_PATTERNS = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Glue 5.x breaking-change patterns (Spark 3.3 → 3.5 migration)
+# ---------------------------------------------------------------------------
+_GLUE5_BREAKING_PATTERNS = [
+    {
+        "pattern":     r"PandasUDFType\.",
+        "severity":    "critical",
+        "glue_version": "5.0",
+        "description": "PandasUDFType enum removed in Spark 3.4+ (Glue 5.0 uses Spark 3.5). "
+                       "PandasUDFType.SCALAR / GROUPED_MAP no longer exist.",
+        "fix":         "Replace @pandas_udf(returnType, PandasUDFType.SCALAR) with "
+                       "@pandas_udf(returnType). Remove PandasUDFType import entirely.",
+    },
+    {
+        "pattern":     r"legacy\.timeParserPolicy|timeParserPolicy\s*=\s*LEGACY",
+        "severity":    "high",
+        "glue_version": "5.0",
+        "description": "LEGACY timeParserPolicy is deprecated in Spark 3.5 / Glue 5.0. "
+                       "Date parsing is stricter — malformed dates that silently returned "
+                       "null in Glue 4.0 will now throw exceptions.",
+        "fix":         "Remove the LEGACY policy. Fix date formats in source data or use "
+                       "to_date(col, 'yyyy-MM-dd') with explicit format strings.",
+    },
+    {
+        "pattern":     r"write\.target-file-size-bytes|target-file-size-bytes",
+        "severity":    "high",
+        "glue_version": "5.0",
+        "description": "Iceberg table property key changed in Iceberg 1.6+ (bundled with "
+                       "Glue 5.0): 'write.target-file-size-bytes' → 'write.target.file-size-bytes'.",
+        "fix":         "ALTER TABLE SET TBLPROPERTIES ('write.target.file-size-bytes'='134217728')",
+    },
+    {
+        "pattern":     r"snapshot-expire-days|max-snapshot-age-ms",
+        "severity":    "medium",
+        "glue_version": "5.0",
+        "description": "Iceberg 1.6+ (Glue 5.0) changed snapshot expiry default from 5 days "
+                       "to 2 days. Compliance/audit snapshots may be lost sooner than expected.",
+        "fix":         "Explicitly set 'history.expire.max-snapshot-age-ms'='432000000' (5 days) "
+                       "if audit retention requires it.",
+    },
+    {
+        "pattern":     r"date_add\s*\([^,]+,\s*\d+\s*\)",
+        "severity":    "medium",
+        "glue_version": "5.0",
+        "description": "date_add() return type changed in Spark 3.5 / Glue 5.0: "
+                       "previously returned StringType, now returns DateType. "
+                       "Downstream string casts or comparisons may break silently.",
+        "fix":         "Cast explicitly: date_add(col, n).cast('string') if string is needed, "
+                       "or remove redundant cast if DateType is correct.",
+    },
+    {
+        "pattern":     r"spark\.sql\.legacy\.",
+        "severity":    "medium",
+        "glue_version": "5.0",
+        "description": "Many spark.sql.legacy.* configs are ignored or removed in Spark 3.5 "
+                       "(Glue 5.0). Relying on legacy fallbacks hides real data quality issues.",
+        "fix":         "Audit each legacy config used; fix the underlying data or code pattern "
+                       "instead of relying on the legacy flag.",
+    },
+    {
+        "pattern":     r"from\s+awsglue\b",
+        "severity":    "low",
+        "glue_version": "5.0",
+        "description": "awsglue library API changes in Glue 5.0: DynamicFrame field-level "
+                       "resolve methods have updated signatures. Verify compatibility.",
+        "fix":         "Test DynamicFrame.resolveChoice() and apply_mapping() calls against "
+                       "Glue 5.0 in a dev environment before production migration.",
+    },
+]
+
+
+def _detect_glue5_issues(code: str, lines: List[str], target_glue_version: str = "5.0") -> List[Dict]:
+    """Detect Glue 5.x / Spark 3.5 breaking-change patterns in script."""
+    if target_glue_version not in ("5.0", "5.2"):
+        return []
+    findings = []
+    for check in _GLUE5_BREAKING_PATTERNS:
+        for i, line in enumerate(lines, 1):
+            if re.search(check["pattern"], line, re.IGNORECASE):
+                findings.append({
+                    "line":              i,
+                    "content":           line.strip()[:120],
+                    "severity":          check["severity"],
+                    "glue_version":      check["glue_version"],
+                    "description":       check["description"],
+                    "fix":               check["fix"],
+                })
+                break  # one finding per pattern
+    return findings
+
 _SPARK_CONFIGS = [
     {
         "config":            "spark.sql.adaptive.enabled",
@@ -331,21 +421,26 @@ def _estimate_savings(anti_patterns: List[Dict], optimizations: List[Dict]) -> i
 # Tools
 # ---------------------------------------------------------------------------
 @tool
-def analyse_pyspark_code(script_content: str, effective_size_gb: float = 100.0) -> str:
+def analyse_pyspark_code(script_content: str, effective_size_gb: float = 100.0,
+                         target_glue_version: str = "5.0") -> str:
     """
     Perform line-by-line analysis of a PySpark script.
 
     Args:
-        script_content:    Full PySpark script source code.
-        effective_size_gb: Effective data size (from Sizing Agent) for config tuning.
+        script_content:       Full PySpark script source code.
+        effective_size_gb:    Effective data size (from Sizing Agent) for config tuning.
+        target_glue_version:  Target Glue version for migration checks: "4.0", "5.0", "5.2".
+                              When set to 5.0 or 5.2, detects Spark 3.5 breaking changes.
 
     Returns:
-        JSON analysis report with anti_patterns, complexity, optimizations, spark_configs,
-        skew_mitigations, optimization_score, and estimated_cost_reduction_percent.
+        JSON analysis report with anti_patterns, glue5_breaking_changes, complexity,
+        optimizations, spark_configs, skew_mitigations, optimization_score, and
+        estimated_cost_reduction_percent.
     """
     try:
         lines       = script_content.split("\n")
         anti_pats   = _detect_anti_patterns(script_content, lines)
+        glue5_issues = _detect_glue5_issues(script_content, lines, target_glue_version)
         complexity  = _analyse_complexity(script_content)
         opts        = _detect_optimizations(script_content, complexity)
         skew_mits   = _detect_skew_mitigations(script_content, complexity)
@@ -392,10 +487,24 @@ def analyse_pyspark_code(script_content: str, effective_size_gb: float = 100.0) 
                 "savings_pct":    20,
             })
 
+        glue5_critical = sum(1 for g in glue5_issues if g["severity"] == "critical")
+        if glue5_issues:
+            recs.insert(0, {
+                "priority":       "P0",
+                "category":       f"glue{target_glue_version}_migration",
+                "title":          f"Fix {len(glue5_issues)} Glue {target_glue_version} breaking change(s) before upgrading",
+                "description":    f"{glue5_critical} critical, {len(glue5_issues) - glue5_critical} other issues detected",
+                "implementation": "See glue5_breaking_changes array for per-issue fixes",
+                "savings_pct":    0,
+            })
+
         return json.dumps({
             "anti_patterns":                     anti_pats,
             "anti_pattern_count":                len(anti_pats),
             "critical_issues":                   sum(1 for p in anti_pats if p["severity"] == "critical"),
+            "glue5_breaking_changes":            glue5_issues,
+            "glue5_migration_ready":             len(glue5_issues) == 0,
+            "target_glue_version":               target_glue_version,
             "complexity":                        complexity,
             "optimizations":                     opts,
             "spark_configs":                     configs,
