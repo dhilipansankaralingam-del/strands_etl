@@ -1,0 +1,96 @@
+{
+  "workload": {
+    "name": "customer_order_summary_etl",
+    "description": "Multi-table join ETL: customers + orders + products → customer_order_summary",
+    "data_sources": [
+      {
+        "table": "customers",
+        "database": "ecommerce_db",
+        "record_count": 5000000,
+        "column_count": 18,
+        "format": "parquet",
+        "join_key": "customer_id",
+        "partition_column": "signup_date"
+      },
+      {
+        "table": "orders",
+        "database": "ecommerce_db",
+        "record_count": 50000000,
+        "column_count": 12,
+        "format": "parquet",
+        "join_key": "customer_id",
+        "partition_column": "order_date"
+      },
+      {
+        "table": "products",
+        "database": "ecommerce_db",
+        "record_count": 200000,
+        "column_count": 10,
+        "format": "parquet",
+        "join_key": "product_id"
+      }
+    ]
+  },
+  "table_schemas": [
+    {
+      "name": "customers",
+      "columns": [
+        {"name": "customer_id",  "type": "string",  "nullable": false},
+        {"name": "full_name",    "type": "string",  "nullable": true},
+        {"name": "email",        "type": "string",  "nullable": true},
+        {"name": "phone",        "type": "string",  "nullable": true},
+        {"name": "date_of_birth","type": "date",    "nullable": true},
+        {"name": "address",      "type": "string",  "nullable": true},
+        {"name": "region",       "type": "string",  "nullable": false},
+        {"name": "signup_date",  "type": "date",    "nullable": false},
+        {"name": "active",       "type": "boolean", "nullable": false}
+      ]
+    },
+    {
+      "name": "orders",
+      "columns": [
+        {"name": "order_id",      "type": "string",          "nullable": false},
+        {"name": "customer_id",   "type": "string",          "nullable": false},
+        {"name": "product_id",    "type": "string",          "nullable": false},
+        {"name": "order_date",    "type": "date",            "nullable": false},
+        {"name": "quantity",      "type": "integer",         "nullable": false},
+        {"name": "total_amount",  "type": "decimal(18,2)",   "nullable": false},
+        {"name": "status",        "type": "string",          "nullable": false}
+      ]
+    },
+    {
+      "name": "products",
+      "columns": [
+        {"name": "product_id",   "type": "string",         "nullable": false},
+        {"name": "product_name", "type": "string",         "nullable": false},
+        {"name": "category",     "type": "string",         "nullable": false},
+        {"name": "price",        "type": "decimal(18,2)",  "nullable": false},
+        {"name": "cost",         "type": "decimal(18,2)",  "nullable": false}
+      ]
+    }
+  ],
+  "scripts": {
+    "pyspark": "s3://strands-etl-scripts/customer_order_summary_glue.py"
+  },
+  "script_content": "from pyspark.sql import SparkSession\nfrom pyspark.sql.functions import *\n\nspark = SparkSession.builder.appName('CustomerOrderSummary').getOrCreate()\n\ncustomers = spark.read.parquet('s3://data/customers/').filter(col('active') == True)\norders = spark.read.parquet('s3://data/orders/').filter(col('status') == 'completed')\nproducts = spark.read.parquet('s3://data/products/')\n\n# Multiple joins\nresult = orders.join(customers, 'customer_id').join(products, 'product_id')\n\n# Aggregation\nsummary = result.groupBy('customer_id', 'full_name', 'region').agg(\n    count('order_id').alias('total_orders'),\n    sum('total_amount').alias('total_spend'),\n    avg('total_amount').alias('avg_order_value')\n)\n\n# Write\nsummary.collect()  # anti-pattern: should use write instead\nsummary.show()\nsummary.write.mode('overwrite').parquet('s3://analytics/customer_order_summary/')\n",
+  "processing_mode": "delta",
+  "join_count": 3,
+  "platform": {
+    "preferred": "glue",
+    "iam_role": "arn:aws:iam::123456789:role/StrandsETLDemoRole",
+    "resource_allocation": {
+      "number_of_workers": 20,
+      "worker_type": "G.2X",
+      "platform": "glue"
+    }
+  },
+  "compliance": {
+    "enabled": true,
+    "frameworks": ["gdpr", "ccpa", "pci_dss"]
+  },
+  "data_quality": {
+    "enabled": true,
+    "rules": []
+  },
+  "config_s3_path": "s3://strands-etl-config/customer_order_config.json"
+}

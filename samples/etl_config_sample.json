@@ -1,0 +1,200 @@
+{
+  "_comment": "strands_etl_agents.py config — every key the pipeline reads. Remove _comment lines before use.",
+
+  "workload": {
+    "name": "orders_daily_etl",
+    "_comment_name": "Job name used in logs, Glue submission, and the final report",
+
+    "data_sources": [
+      {
+        "_comment": "--- PRIMARY LARGE TABLE ---",
+        "database":         "ecommerce_db",
+        "table":            "orders",
+        "format":           "parquet",
+        "record_count":     500000000,
+        "column_count":     18,
+        "size_gb":          820.0,
+        "join_key":         "customer_id",
+        "partition_column": "order_date",
+        "description":      "All customer orders — partitioned by order_date"
+      },
+      {
+        "_comment": "--- DIMENSION TABLE (small — will be broadcast) ---",
+        "database":         "ecommerce_db",
+        "table":            "customers",
+        "format":           "parquet",
+        "record_count":     10000000,
+        "column_count":     12,
+        "size_gb":          2.4,
+        "join_key":         "customer_id",
+        "partition_column": "",
+        "description":      "Customer master — typically broadcast in joins"
+      },
+      {
+        "_comment": "--- ANOTHER DIMENSION ---",
+        "database":         "ecommerce_db",
+        "table":            "products",
+        "format":           "parquet",
+        "record_count":     500000,
+        "column_count":     10,
+        "size_gb":          0.8,
+        "join_key":         "product_id",
+        "partition_column": "category",
+        "description":      "Product catalog"
+      }
+    ],
+
+    "target": {
+      "database": "analytics_db",
+      "table":    "orders_daily_summary",
+      "format":   "parquet",
+      "mode":     "insert_overwrite"
+    }
+  },
+
+  "table_schemas": [
+    {
+      "_comment": "Used by DataQualityAgent (DQ rules, schema checks) and ComplianceAgent (PII scan)",
+      "name": "orders",
+      "columns": [
+        { "name": "order_id",    "type": "string",          "nullable": false },
+        { "name": "customer_id", "type": "string",          "nullable": true  },
+        { "name": "product_id",  "type": "string",          "nullable": true  },
+        { "name": "amount",      "type": "string",          "nullable": true  },
+        { "name": "status",      "type": "string",          "nullable": true  },
+        { "name": "order_date",  "type": "date",            "nullable": false },
+        { "name": "email",       "type": "string",          "nullable": true  },
+        { "name": "region",      "type": "string",          "nullable": true  },
+        { "name": "card_number", "type": "string",          "nullable": true  }
+      ]
+    },
+    {
+      "name": "customers",
+      "columns": [
+        { "name": "customer_id", "type": "string",  "nullable": false },
+        { "name": "name",        "type": "string",  "nullable": true  },
+        { "name": "email",       "type": "string",  "nullable": true  },
+        { "name": "region",      "type": "string",  "nullable": true  },
+        { "name": "signup_date", "type": "date",    "nullable": true  }
+      ]
+    },
+    {
+      "name": "products",
+      "columns": [
+        { "name": "product_id",   "type": "string",           "nullable": false },
+        { "name": "product_name", "type": "string",           "nullable": true  },
+        { "name": "category",     "type": "string",           "nullable": true  },
+        { "name": "price",        "type": "decimal(10,2)",    "nullable": true  },
+        { "name": "cost",         "type": "decimal(10,2)",    "nullable": true  }
+      ]
+    }
+  ],
+
+  "platform": {
+    "preferred": "glue",
+    "_comment_preferred": "glue | emr",
+    "resource_allocation": {
+      "worker_type": "G.2X",
+      "_comment_worker_type": "G.1X | G.2X | G.4X | G.8X | Z.2X",
+      "workers":     10,
+      "timeout":     "2h",
+      "_comment_timeout": "accepts '2h' or integer minutes e.g. 120"
+    }
+  },
+
+  "scripts": {
+    "_comment": "local_pyspark is read by --script if you don't pass it on CLI",
+    "local_pyspark": "jobs/orders_etl.py",
+    "pyspark":       "s3://my-bucket/scripts/orders_etl.py"
+  },
+
+  "processing_mode": "delta",
+  "_comment_processing_mode": "delta = incremental (5% of table); full = entire table every run",
+
+  "runs_per_day": 4,
+  "_comment_runs_per_day": "Used by ResourceAllocatorAgent for monthly cost calculation",
+
+  "compliance_frameworks": ["GDPR", "PCI-DSS"],
+  "_comment_compliance": "GDPR | HIPAA | PCI-DSS | SOX | CCPA — overridden by --compliance on CLI",
+
+  "agents": {
+    "_comment": "Set any agent to false to skip it. Omit a key (or set to true) to enable. All agents are enabled by default.",
+    "sizing":                  true,
+    "data_quality":            true,
+    "compliance":              true,
+    "code_analysis":           true,
+    "lineage":                 true,
+    "delta_iceberg":           true,
+    "scientific":              true,
+    "recommendation_applier":  true,
+    "job_generator":           true,
+    "glue_metrics":            true,
+    "event_log":               true,
+    "script_tests":            true,
+    "recommendations":         true,
+    "learning":                true
+  },
+
+  "glue_version": "5.0",
+  "_comment_glue_version": "4.0 | 5.0 | 5.2. Glue 5.0: Spark 3.5.2 + Iceberg 1.6.1 + Python 3.11. Glue 5.2: Spark 3.5.4 + Iceberg 1.7.1.",
+  "use_graviton": false,
+  "_comment_graviton": "true = Graviton3 workers (16% cheaper per DPU-hour). Requires glue_version 5.0+. Worker type becomes G.2X.GRAVITON etc.",
+  "temp_dir":     "s3://my-bucket/glue-temp/",
+
+  "athena_output_s3": "s3://my-bucket/athena-results/",
+  "_comment_athena": "Enables Phase 0 — Iceberg telemetry from $files/$snapshots/$partitions/$manifests. Remove if not using Iceberg.",
+
+  "event_log_path": "s3://my-bucket/spark-event-logs/orders_etl/",
+  "_comment_event_log": "S3 URI or local path to Spark UI event log. SparkEventLogAgent reads this in Phase 5.",
+
+  "glue_metrics": {
+    "_comment": "Pre-collected Glue CloudWatch metrics from a previous run. OR set this to a file path string: 'metrics/glue_cw.json'",
+    "heap_peak_pct":     87,
+    "driver_memory_pct": 91,
+    "worker_count":      10,
+    "num_executors":     10,
+    "avg_task_time_ms":  4200,
+    "shuffle_read_gb":   42.5,
+    "spill_gb":          8.3,
+    "gc_time_pct":       22,
+    "job_duration_min":  87
+  },
+
+  "checks": {
+    "_comment": "DQ rules translated into DataQualityAgent validation rules",
+    "data_quality": [
+      {
+        "name":        "orders_customer_id_not_null",
+        "description": "customer_id must not be null",
+        "table":       "orders",
+        "column":      "customer_id",
+        "rule":        "completeness",
+        "severity":    "critical"
+      },
+      {
+        "name":        "orders_amount_positive",
+        "description": "order amount must be positive",
+        "table":       "orders",
+        "column":      "amount",
+        "rule":        "validity",
+        "severity":    "error"
+      },
+      {
+        "name":        "orders_row_count",
+        "description": "orders table must have at least 1M rows",
+        "table":       "orders",
+        "column":      "order_id",
+        "rule":        "row_count",
+        "severity":    "error"
+      },
+      {
+        "name":        "products_price_positive",
+        "description": "price must be greater than zero",
+        "table":       "products",
+        "column":      "price",
+        "rule":        "validity",
+        "severity":    "error"
+      }
+    ]
+  }
+}
