@@ -98,6 +98,7 @@ class AuditActionAgent:
         learning_bucket: str = "strands-etl-learning",
         aws_region: str = "us-east-1",
         model_id: str = MODEL_ID,
+        configured_rules: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ):
         """
         Parameters
@@ -106,8 +107,9 @@ class AuditActionAgent:
             Athena / Glue database that contains the audit table.
         table : str
             Audit validation table name (e.g. "audit_validation").
-        athena_output : str
-            S3 path for Athena query result output.
+        configured_rules : dict, optional
+            Dict keyed by "database.tablename" → list of rule dicts from config.
+            Injected into every AI decision prompt.
         """
         self.audit_database  = database
         self.audit_table     = table
@@ -115,6 +117,7 @@ class AuditActionAgent:
         self.athena_output   = athena_output
         self.model_id        = model_id
         self.aws_region      = aws_region
+        self.configured_rules: Dict[str, List[Dict[str, Any]]] = configured_rules or {}
 
         self.athena  = boto3.client("athena",          region_name=aws_region)
         self.s3      = boto3.client("s3",              region_name=aws_region)
@@ -219,25 +222,42 @@ class AuditActionAgent:
         self,
         record: ValidationRecord,
         profile_cache: Dict[str, DataProfileResult],
+        table_cfg: Optional[Dict[str, Any]] = None,
     ) -> ActionDispatchResult:
-        logger.info(f"[AuditActionAgent] Processing record {record.record_id} ({record.rule_name})")
+        table_key = f"{record.database_name or self.audit_database}.{record.table_name}"
+        logger.info(f"[AuditActionAgent] Processing {table_key}  rule={record.rule_name}  id={record.record_id}")
 
-        # Step A: AI classification
-        analysis: AnalysisResult = self.validation_agent.analyze(record)
+        # Pull configured rules for this table
+        rules = self.configured_rules.get(table_key, [])
+        if rules:
+            logger.info(f"[AuditActionAgent] Injecting {len(rules)} configured rules into AI prompt")
+
+        # Load historical health scores for trend analysis
+        health_history = self._load_health_score_history(table_key)
+
+        # Step A: AI classification (with rules + health trend)
+        history = self.validation_agent._get_similar_outcomes(record, limit=20)
+        analysis: AnalysisResult = self.validation_agent.decision_agent(
+            record,
+            history,
+            configured_rules=rules if rules else None,
+            health_score_history=health_history if health_history else None,
+        )
 
         # Step B: Data profile for the affected table (cached per table)
-        table_key = f"{record.database_name}.{record.table_name}"
         if table_key not in profile_cache:
             self.profiler.database = record.database_name or self.audit_database
+            tc = table_cfg or {}
             try:
                 profile = self.profiler.profile(
                     table_name=record.table_name,
                     run_id=record.run_id,
-                    key_columns=[record.column_name] if record.column_name else None,
-                    primary_key_column=record.additional_context.get("primary_key_column"),
-                    metric_columns=record.additional_context.get("metric_columns"),
-                    timestamp_column=record.additional_context.get("timestamp_column"),
-                    freshness_sla_hours=record.additional_context.get("freshness_sla_hours", 26.0),
+                    key_columns=tc.get("key_columns") or ([record.column_name] if record.column_name else None),
+                    primary_key_column=tc.get("primary_key_column") or record.additional_context.get("primary_key_column"),
+                    metric_columns=tc.get("metric_columns") or record.additional_context.get("metric_columns"),
+                    timestamp_column=tc.get("timestamp_column") or record.additional_context.get("timestamp_column"),
+                    partition_column=tc.get("partition_column"),
+                    freshness_sla_hours=tc.get("freshness_sla_hours", 26.0),
                 )
                 profile_cache[table_key] = profile
             except Exception as e:
@@ -581,6 +601,39 @@ class AuditActionAgent:
             return True, ""
         except Exception as e:
             return False, str(e)
+
+    # ------------------------------------------------------------------
+    # Health score history (for trend-based confidence calibration)
+    # ------------------------------------------------------------------
+
+    def _load_health_score_history(self, table_key: str) -> List[Dict[str, Any]]:
+        """Load last 10 profiling results from S3 to compute health trend."""
+        try:
+            prefix = f"validation/profiling/results/{table_key.replace('.', '/')}/"
+            resp = self.s3.list_objects_v2(
+                Bucket=self.learning_bucket, Prefix=prefix, MaxKeys=50
+            )
+            objects = sorted(
+                resp.get("Contents", []),
+                key=lambda x: x["LastModified"],
+                reverse=True,
+            )[:10]
+            history = []
+            for obj in objects:
+                try:
+                    body = self.s3.get_object(Bucket=self.learning_bucket, Key=obj["Key"])["Body"].read()
+                    data = json.loads(body)
+                    history.append({
+                        "profiled_at":       data.get("profiled_at", ""),
+                        "data_health_score": data.get("data_health_score", 100),
+                        "anomaly_count":     len(data.get("anomalies", [])),
+                        "schema_drift":      data.get("schema_drift_detected", False),
+                    })
+                except Exception:
+                    pass
+            return history
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # Audit table helpers

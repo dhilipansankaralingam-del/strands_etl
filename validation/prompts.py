@@ -27,26 +27,58 @@ You analyse failed data-validation records to determine:
 - The best corrective action to take
 - Patterns across many failures that suggest systemic issues
 
+## Confidence Scoring Guide
+Your confidence score (0.0 – 1.0) must reflect actual certainty:
+
+| Score range | Label  | When to use                                                         |
+|-------------|--------|---------------------------------------------------------------------|
+| 0.85 – 1.0  | HIGH   | Multiple corroborating signals (historical pattern + data profile + rule type all agree) |
+| 0.60 – 0.84 | MEDIUM | Two signals agree but one is ambiguous or missing                   |
+| 0.00 – 0.59 | LOW    | Conflicting signals, first occurrence, or insufficient data         |
+
+**Factors that RAISE confidence:**
+- Same rule+table combination has failed before with same root cause (historical match)
+- Data profile confirms the anomaly (e.g. null flood corroborates a NOT_NULL failure)
+- Failure rate > 10% (statistically significant)
+- Configured business rule explicitly describes this scenario
+
+**Factors that LOWER confidence:**
+- First occurrence (no historical data)
+- Low failure rate (< 0.1%) — could be sampling noise
+- Rule type is BUSINESS or UNKNOWN (semantics are ambiguous)
+- Historical outcomes for this rule are split (mix of TRUE_FAILURE and FALSE_POSITIVE)
+- Data profile is healthy — anomaly may be in the rule, not the data
+
+## How to Use Configured Rules
+When `configured_rules` are provided, treat them as authoritative ground truth
+for this table. A failure that matches a configured rule's condition is almost
+certainly TRUE_FAILURE unless the data profile contradicts it.
+
 ## Your Reasoning Approach
-1. **Context-first**: Before classifying, examine the rule type, column semantics,
-   historical outcomes for the same rule, and current data distribution.
-2. **Confidence-calibrated**: Only output HIGH confidence (≥ 0.85) when the evidence
-   strongly supports one classification. Default to NEEDS_INVESTIGATION when uncertain.
-3. **Actionable**: Every classification must come with a concrete recommended action
-   and at least one verification SQL query against Athena.
-4. **Learning-oriented**: Reference similar historical failures when they exist,
-   and explain how the current case differs or resembles them.
+1. **Read configured rules first** — do they explicitly describe this failure?
+2. **Check historical outcomes** — same rule, same table. What happened before?
+   - Mostly TRUE_FAILURE → lean TRUE_FAILURE, raise confidence
+   - Mostly FALSE_POSITIVE → lean FALSE_POSITIVE, raise confidence
+   - Mixed → lean NEEDS_INVESTIGATION, lower confidence
+3. **Check the data profile trend** — is the table health score worsening?
+   - Degrading trend → more likely TRUE_FAILURE
+   - Stable/improving trend → consider FALSE_POSITIVE
+4. **Check failure rate** — < 0.1% may be noise; > 10% is significant
+5. **Synthesise** — combine all signals into a final classification + confidence
 
 ## Output Format
-Always respond with a valid JSON object matching this schema:
+Always respond with a valid JSON object:
 {
   "classification": "TRUE_FAILURE | FALSE_POSITIVE | NEEDS_INVESTIGATION",
   "confidence": <float 0.0-1.0>,
-  "explanation": "<clear, non-technical explanation>",
-  "root_causes": ["<cause 1>", "<cause 2>"],
+  "confidence_reasoning": "<which signals raised/lowered your confidence and why>",
+  "explanation": "<clear 2-3 sentence explanation a non-engineer can understand>",
+  "root_causes": ["<specific cause 1>", "<specific cause 2>"],
   "recommended_action": "IGNORE | RERUN | FIX_LOGIC | DATA_CORRECTION | ESCALATE | MONITOR",
-  "suggested_next_steps": ["<step 1>", "<step 2>"],
-  "validation_sql": "<optional Athena SQL to verify>"
+  "suggested_next_steps": ["<concrete step 1>", "<concrete step 2>"],
+  "validation_sql": "<Athena SQL to verify this finding>",
+  "historical_pattern_used": true | false,
+  "configured_rule_matched": "<rule_name or null>"
 }
 
 If you cannot produce valid JSON, wrap your answer in <json>...</json> tags.
@@ -56,60 +88,125 @@ If you cannot produce valid JSON, wrap your answer in <json>...</json> tags.
 # 2.  Decision prompt – classification of one failed ValidationRecord
 # ---------------------------------------------------------------------------
 
-DECISION_PROMPT_TEMPLATE = """
-## Failed Validation Record
-
-```json
-{record_json}
-```
-
-## Rule Metadata
-- Rule type    : {rule_type}
-- Severity     : {severity}
-- Failure rate : {failure_rate:.2%}  ({row_count_failed} of {total_row_count} rows)
-
-## Historical Context
-Similar past failures for rule **{rule_name}** on table **{table_name}**:
-```json
-{historical_json}
-```
-
-## Your Task
-Classify this failed validation record. Consider:
-1. Is the `expected_constraint` ({expected_constraint}) reasonable for column `{column_name}`?
-2. Does the `failed_value` ({failed_value}) suggest a data-entry error, pipeline bug,
-   rule misconfiguration, or genuine bad data?
-3. Do the historical outcomes indicate this rule generates false positives?
-4. What is the statistical significance given the failure rate?
-
-Respond ONLY with the JSON schema defined in the system prompt.
-"""
-
-
 def build_decision_prompt(
     record: Dict[str, Any],
     historical_outcomes: List[Dict[str, Any]],
+    configured_rules: Optional[List[Dict[str, Any]]] = None,
+    health_score_history: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    failure_rate = 0.0
-    total = record.get("total_row_count", 0)
+    """
+    Build the full decision prompt with:
+    - The failed record
+    - Configured business rules for this table (authoritative ground truth)
+    - Historical similar failures + their resolutions
+    - Historical health score trend (improving / degrading / stable)
+    - Computed failure statistics for confidence calibration
+    """
+    total  = record.get("total_row_count", 0)
     failed = record.get("row_count_failed", 1)
-    if total > 0:
-        failure_rate = failed / total
+    failure_rate = failed / total if total > 0 else 0.0
 
-    return DECISION_PROMPT_TEMPLATE.format(
-        record_json=json.dumps(record, indent=2, default=str),
-        rule_type=record.get("rule_type", "UNKNOWN"),
-        severity=record.get("severity", "MEDIUM"),
-        failure_rate=failure_rate,
-        row_count_failed=failed,
-        total_row_count=total,
-        rule_name=record.get("rule_name", ""),
-        table_name=record.get("table_name", ""),
-        historical_json=json.dumps(historical_outcomes, indent=2, default=str),
-        expected_constraint=record.get("expected_constraint", ""),
-        failed_value=record.get("failed_value", ""),
-        column_name=record.get("column_name", ""),
-    )
+    # --- Historical outcome analysis
+    true_failures   = sum(1 for o in historical_outcomes if o.get("classification") == "TRUE_FAILURE")
+    false_positives = sum(1 for o in historical_outcomes if o.get("classification") == "FALSE_POSITIVE")
+    needs_inv       = sum(1 for o in historical_outcomes if o.get("classification") == "NEEDS_INVESTIGATION")
+    correct_actions = sum(1 for o in historical_outcomes if o.get("was_correct") is True)
+    historical_total = len(historical_outcomes)
+
+    if historical_total > 0:
+        historical_summary = (
+            f"{historical_total} similar past failure(s): "
+            f"{true_failures} TRUE_FAILURE, {false_positives} FALSE_POSITIVE, "
+            f"{needs_inv} NEEDS_INVESTIGATION.  "
+            f"AI was correct in {correct_actions}/{historical_total} resolved cases."
+        )
+        dominant = max(
+            [("TRUE_FAILURE", true_failures),
+             ("FALSE_POSITIVE", false_positives),
+             ("NEEDS_INVESTIGATION", needs_inv)],
+            key=lambda x: x[1]
+        )
+        dominant_pct = dominant[1] / historical_total
+        historical_signal = (
+            f"Historical dominant classification: **{dominant[0]}** "
+            f"({dominant_pct:.0%} of past cases)."
+        )
+    else:
+        historical_summary = "No historical data available for this rule+table combination."
+        historical_signal  = "First occurrence — base confidence on rule type and failure rate alone."
+
+    # --- Health score trend
+    if health_score_history and len(health_score_history) >= 2:
+        scores  = [h.get("data_health_score", 100) for h in health_score_history[-5:]]
+        trend   = scores[-1] - scores[0]
+        trend_s = f"DEGRADING ({trend:+.0f} pts)" if trend < -5 else (
+                  f"IMPROVING ({trend:+.0f} pts)" if trend > 5 else "STABLE")
+        health_context = (
+            f"Last {len(scores)} profiling runs: scores = {scores}. "
+            f"Trend: **{trend_s}**."
+        )
+    else:
+        health_context = "No historical health score data available."
+
+    # --- Configured rules section
+    if configured_rules:
+        rules_text = json.dumps(configured_rules, indent=2, default=str)
+        rules_section = f"""
+## Configured Business Rules for {record.get('database_name','')}.{record.get('table_name','')}
+These rules were defined by the data engineering team and are authoritative:
+```json
+{rules_text}
+```
+→ If the failing record matches a configured rule's `condition`, classify as TRUE_FAILURE
+  unless the data profile provides strong contradicting evidence.
+"""
+    else:
+        rules_section = "\n## Configured Business Rules\n(none configured for this table)\n"
+
+    return f"""
+## Failed Validation Record
+```json
+{json.dumps(record, indent=2, default=str)}
+```
+
+## Rule Statistics
+- Rule type    : {record.get('rule_type', 'UNKNOWN')}
+- Severity     : {record.get('severity', 'MEDIUM')}
+- Failure rate : {failure_rate:.2%}  ({failed} of {total} rows)
+- Column       : {record.get('column_name', 'n/a')}
+- Constraint   : {record.get('expected_constraint', 'n/a')}
+- Failed value : {record.get('failed_value', 'n/a')}
+{rules_section}
+## Historical Analysis (confidence calibration)
+{historical_summary}
+{historical_signal}
+
+### Last {len(historical_outcomes)} Similar Failures (most recent first)
+```json
+{json.dumps(historical_outcomes[:10], indent=2, default=str)}
+```
+
+## Table Health Score Trend
+{health_context}
+
+## Confidence Calibration Checklist
+Before deciding confidence, answer these:
+- [ ] Does a configured rule explicitly describe this failure?  → +0.15 confidence if yes
+- [ ] Do historical outcomes strongly agree on one classification? → +0.15 if ≥80% agree
+- [ ] Is failure_rate > 5%? → +0.10 if yes (statistically meaningful)
+- [ ] Is the table health trend DEGRADING? → +0.10 if yes (corroborates TRUE_FAILURE)
+- [ ] Is this the first occurrence? → -0.20 if yes (insufficient evidence)
+- [ ] Is rule_type BUSINESS/UNKNOWN? → -0.10 (ambiguous semantics)
+
+## Your Task
+1. Check if this failure matches any configured rule above.
+2. Analyse the historical pattern — what did similar failures turn out to be?
+3. Factor in the health score trend.
+4. Apply the confidence checklist.
+5. Output your classification + confidence with explicit reasoning.
+
+Respond ONLY with the JSON schema in the system prompt.
+""".strip()
 
 
 # ---------------------------------------------------------------------------

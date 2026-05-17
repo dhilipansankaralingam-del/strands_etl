@@ -19,7 +19,7 @@ import logging
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 import boto3
 
@@ -179,20 +179,58 @@ class ValidationAnalysisAgent:
         self,
         record: ValidationRecord,
         history: List[Dict[str, Any]],
+        configured_rules: Optional[List[Dict[str, Any]]] = None,
+        health_score_history: Optional[List[Dict[str, Any]]] = None,
     ) -> AnalysisResult:
         """
         Core classification agent.
 
-        Builds a prompt from the failed record + historical context,
-        invokes Bedrock, and parses the structured JSON response.
+        Builds a prompt from the failed record + configured rules +
+        historical outcomes + health score trend, invokes Bedrock,
+        and parses the structured JSON response.
         """
-        prompt = build_decision_prompt(record.to_dict(), history)
-        raw = self._invoke_bedrock(prompt, agent_type="decision")
+        from validation.prompt_logger import get_logger
+        plogger = get_logger()
+
+        agent_system_notes = {
+            "decision": (
+                "Focus: classify the record accurately using ALL context provided.\n"
+                "Apply the confidence calibration checklist before outputting your score.\n"
+                "Reference configured rules and historical patterns explicitly."
+            ),
+        }
+        system = SYSTEM_PROMPT + "\n\n" + agent_system_notes.get("decision", "")
+        prompt = build_decision_prompt(
+            record.to_dict(),
+            history,
+            configured_rules=configured_rules,
+            health_score_history=health_score_history,
+        )
+
+        plogger.log_prompt(
+            agent_type="decision",
+            system_prompt=system,
+            user_prompt=prompt,
+            table_name=f"{record.database_name}.{record.table_name}",
+            extra_context={
+                "record_id":    record.record_id,
+                "rule_name":    record.rule_name,
+                "severity":     record.severity,
+                "history_size": len(history),
+                "rules_count":  len(configured_rules or []),
+            },
+        )
+
+        raw, in_tok, out_tok = self._invoke_bedrock_with_usage(prompt, system)
+        plogger.log_response("decision", f"{record.database_name}.{record.table_name}", raw, in_tok, out_tok)
+
         parsed = self._parse_json(raw)
 
-        classification = ValidationClassification(
-            parsed.get("classification", ValidationClassification.NEEDS_INVESTIGATION)
-        )
+        try:
+            classification = ValidationClassification(parsed.get("classification", ValidationClassification.NEEDS_INVESTIGATION))
+        except ValueError:
+            classification = ValidationClassification.NEEDS_INVESTIGATION
+
         action_str = parsed.get("recommended_action", RecommendedAction.MONITOR.value)
         try:
             action = RecommendedAction(action_str)
@@ -350,15 +388,8 @@ class ValidationAnalysisAgent:
     # Bedrock helper
     # ------------------------------------------------------------------
 
-    def _invoke_bedrock(self, prompt: str, agent_type: str = "decision") -> str:
-        """Invoke Bedrock Claude with system + user prompt."""
-        agent_system_notes = {
-            "decision": "Focus: classify the record accurately. Be concise.",
-            "learning": "Focus: extract generalizable patterns from historical data.",
-            "batch": "Focus: high-level executive summary. Be brief and actionable.",
-        }
-        system = SYSTEM_PROMPT + "\n\n" + agent_system_notes.get(agent_type, "")
-
+    def _invoke_bedrock_with_usage(self, prompt: str, system: str) -> Tuple[str, int, int]:
+        """Invoke Bedrock and return (text, input_tokens, output_tokens)."""
         try:
             body = {
                 "anthropic_version": "bedrock-2023-05-31",
@@ -370,11 +401,13 @@ class ValidationAnalysisAgent:
                 modelId=self.model_id,
                 body=json.dumps(body),
             )
-            result = json.loads(response["body"].read())
-            return result["content"][0]["text"]
+            result   = json.loads(response["body"].read())
+            text     = result["content"][0]["text"]
+            usage    = result.get("usage", {})
+            return text, usage.get("input_tokens", 0), usage.get("output_tokens", 0)
         except Exception as e:
-            logger.error(f"Bedrock invocation failed ({agent_type}): {e}")
-            return json.dumps({
+            logger.error(f"Bedrock invocation failed: {e}")
+            fallback = json.dumps({
                 "classification": ValidationClassification.NEEDS_INVESTIGATION.value,
                 "confidence": 0.0,
                 "explanation": f"Agent invocation failed: {e}",
@@ -382,6 +415,17 @@ class ValidationAnalysisAgent:
                 "recommended_action": RecommendedAction.ESCALATE.value,
                 "suggested_next_steps": ["Check Bedrock connectivity and IAM permissions."],
             })
+            return fallback, 0, 0
+
+    def _invoke_bedrock(self, prompt: str, agent_type: str = "decision") -> str:
+        """Invoke Bedrock Claude with system + user prompt (legacy — returns text only)."""
+        agent_system_notes = {
+            "learning": "Focus: extract generalizable patterns from historical data.",
+            "batch": "Focus: high-level executive summary. Be brief and actionable.",
+        }
+        system = SYSTEM_PROMPT + "\n\n" + agent_system_notes.get(agent_type, "")
+        text, _, _ = self._invoke_bedrock_with_usage(prompt, system)
+        return text
 
     def _parse_json(self, raw: str) -> Dict[str, Any]:
         """Extract JSON from a Bedrock response (handles markdown fences, tags)."""

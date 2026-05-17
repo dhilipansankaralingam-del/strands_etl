@@ -1,18 +1,23 @@
 {
-  "_comment": "Configuration for the Strands Audit AI Analysis + Data Profiling pipeline",
+  "_comment": "Strands Audit AI Analysis + Data Profiling — all config in one place",
 
-  "athena": {
-    "database": "audit_db",
-    "table":    "etl_orchestrator_audit",
-    "output_location": "s3://strands-etl-athena-results/audit-analysis/",
-    "region": "us-east-1"
-  },
+  "audit_table": "audit_db.etl_orchestrator_audit",
+
+  "profile_tables": [
+    "audit_db.etl_orchestrator_audit"
+  ],
+
+  "athena_output_location": "s3://strands-etl-athena-results/audit-analysis/",
+  "learning_bucket": "strands-etl-learning",
+  "aws_region": "us-east-1",
 
   "ai": {
     "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
-    "learning_bucket": "strands-etl-learning",
     "severity_filter": "MEDIUM",
-    "max_records_per_run": 100
+    "max_records_per_run": 100,
+    "historical_outcomes_limit": 20,
+    "confidence_threshold_high": 0.85,
+    "confidence_threshold_medium": 0.60
   },
 
   "profiling": {
@@ -25,33 +30,86 @@
     "duplicate_key_threshold_pct": 0.5
   },
 
-  "tables": [
-    {
-      "name": "etl_orchestrator_audit",
-      "database": "audit_db",
-      "key_columns": ["run_id", "event_type", "source_label", "status", "validation_name"],
+  "table_config": {
+    "audit_db.etl_orchestrator_audit": {
+      "key_columns": ["run_id", "event_type", "source_label", "status", "validation_name", "glue_job_name"],
       "primary_key_column": "run_id",
       "timestamp_column": "event_timestamp",
       "partition_column": "run_date",
       "metric_columns": [],
       "freshness_sla_hours": 26
     }
+  },
+
+  "table_rules": {
+    "audit_db.etl_orchestrator_audit": [
+      {
+        "rule_name": "glue_job_name_not_null_on_trigger",
+        "description": "glue_job_name must never be NULL when event_type is GLUE_TRIGGER. A null here means the trigger fired but the job reference was lost.",
+        "rule_type": "NOT_NULL",
+        "severity": "CRITICAL",
+        "condition": "event_type = 'GLUE_TRIGGER' AND glue_job_name IS NULL"
+      },
+      {
+        "rule_name": "status_must_be_known_value",
+        "description": "status column must only contain known values: OK, Stale, PASS, FAIL, WARN, NOT_EXECUTED, SKIPPED, ABORTED, Check with Source. Any other value indicates a code bug.",
+        "rule_type": "REGEX",
+        "severity": "HIGH",
+        "condition": "status NOT IN ('OK','Stale','PASS','FAIL','WARN','NOT_EXECUTED','SKIPPED','ABORTED','Check with Source')"
+      },
+      {
+        "rule_name": "validation_must_have_query",
+        "description": "When event_type is VALIDATION, the query column must not be empty. Missing query means we cannot reproduce the check.",
+        "rule_type": "NOT_NULL",
+        "severity": "MEDIUM",
+        "condition": "event_type = 'VALIDATION' AND (query IS NULL OR TRIM(query) = '')"
+      },
+      {
+        "rule_name": "cost_must_be_non_negative",
+        "description": "cost_usd should be >= 0. A negative cost indicates a calculation error in the Athena cost formula.",
+        "rule_type": "RANGE",
+        "severity": "LOW",
+        "condition": "TRY_CAST(cost_usd AS DOUBLE) < 0"
+      },
+      {
+        "rule_name": "run_id_must_be_unique_per_day",
+        "description": "Each run_id should appear only once per run_date partition. Duplicates suggest the orchestrator was triggered multiple times or had a retry loop.",
+        "rule_type": "BUSINESS",
+        "severity": "HIGH",
+        "condition": "COUNT(*) > 1 GROUP BY run_id, run_date"
+      }
+    ]
+  },
+
+  "natural_language_validations": [
+    {
+      "table": "audit_db.etl_orchestrator_audit",
+      "query": "Are there any runs where a GLUE_TRIGGER event has no matching VALIDATION event on the same run_date?",
+      "severity": "HIGH"
+    },
+    {
+      "table": "audit_db.etl_orchestrator_audit",
+      "query": "Show me the top 5 source_labels that have had the most FAIL statuses in the last 7 days",
+      "severity": "MEDIUM"
+    },
+    {
+      "table": "audit_db.etl_orchestrator_audit",
+      "query": "Is the average Athena cost_usd per run trending upward over the last 14 days?",
+      "severity": "LOW"
+    }
   ],
 
   "actions": {
-    "rerun": {
-      "glue_job_name": "etl_orchestrator_job"
-    },
-    "escalate": {
-      "sns_topic_arn": "arn:aws:sns:us-east-1:123456789012:dq-alerts"
-    }
+    "rerun_glue_job": "etl_orchestrator_job",
+    "sns_topic_arn": "arn:aws:sns:us-east-1:123456789012:dq-alerts"
   },
 
   "output": {
-    "print_summary": true,
-    "print_anomalies": true,
-    "print_actions": true,
-    "save_report_to_s3": true,
-    "report_prefix": "validation/audit/reports/"
+    "csv_directory": "output/",
+    "log_prompts_to_console": true,
+    "log_responses_to_console": true,
+    "prompt_preview_chars": 800,
+    "save_to_s3": true,
+    "s3_report_prefix": "validation/audit/reports/"
   }
 }
