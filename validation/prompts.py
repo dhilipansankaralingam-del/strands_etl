@@ -10,6 +10,7 @@ Four prompt categories:
 
 from typing import Dict, Any, List, Optional
 import json
+from datetime import datetime, date as date_type
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,7 @@ def build_decision_prompt(
     historical_outcomes: List[Dict[str, Any]],
     configured_rules: Optional[List[Dict[str, Any]]] = None,
     health_score_history: Optional[List[Dict[str, Any]]] = None,
+    run_date: Optional[str] = None,
 ) -> str:
     """
     Build the full decision prompt with:
@@ -148,6 +150,58 @@ def build_decision_prompt(
     else:
         health_context = "No historical health score data available."
 
+    # --- Day-of-week context (used for seasonal pattern matching)
+    effective_date = run_date or record.get("failure_timestamp", "")[:10]
+    try:
+        dt = datetime.strptime(effective_date[:10], "%Y-%m-%d")
+        day_of_week = dt.strftime("%A")          # e.g. "Saturday"
+        day_of_month = str(dt.day)               # e.g. "31"
+        day_of_week_num = dt.weekday()           # 0=Mon … 6=Sun
+        is_weekend = day_of_week_num >= 5
+    except Exception:
+        day_of_week = "Unknown"
+        day_of_month = "?"
+        is_weekend = False
+
+    date_context = (
+        f"Failure date: **{effective_date}** ({day_of_week}, day-of-month={day_of_month}, "
+        f"{'WEEKEND' if is_weekend else 'WEEKDAY'})"
+    )
+
+    # --- Parse known_seasonal_patterns from any configured rule
+    seasonal_instructions: List[str] = []
+    if configured_rules:
+        for rule in configured_rules:
+            for pattern in rule.get("known_seasonal_patterns", []):
+                pattern_days     = pattern.get("days", [])
+                pattern_dom      = [str(d) for d in pattern.get("days_of_month", [])]
+                ai_instruction   = pattern.get("ai_instruction", "")
+                pattern_name     = pattern.get("pattern", "")
+                # Check if today matches the pattern
+                day_match = day_of_week in pattern_days if pattern_days else False
+                dom_match = day_of_month in pattern_dom if pattern_dom else False
+                if day_match or dom_match:
+                    seasonal_instructions.append(
+                        f"  ⚠ Pattern **{pattern_name}** MATCHES today ({day_of_week}, day {day_of_month}): "
+                        f"{ai_instruction}"
+                    )
+                else:
+                    seasonal_instructions.append(
+                        f"  ○ Pattern **{pattern_name}** does NOT match today "
+                        f"(applies to days={pattern_days or pattern_dom}): {ai_instruction}"
+                    )
+
+    if seasonal_instructions:
+        seasonal_section = (
+            "\n## Seasonal Pattern Context\n"
+            + date_context + "\n"
+            + "\n".join(seasonal_instructions)
+            + "\n→ If a MATCHING pattern's ai_instruction calls this a FALSE_POSITIVE, "
+              "apply that instruction and lower confidence accordingly.\n"
+        )
+    else:
+        seasonal_section = f"\n## Date Context\n{date_context}\n"
+
     # --- Configured rules section
     if configured_rules:
         rules_text = json.dumps(configured_rules, indent=2, default=str)
@@ -159,9 +213,9 @@ These rules were defined by the data engineering team and are authoritative:
 ```
 → If the failing record matches a configured rule's `condition`, classify as TRUE_FAILURE
   unless the data profile provides strong contradicting evidence.
-"""
+{seasonal_section}"""
     else:
-        rules_section = "\n## Configured Business Rules\n(none configured for this table)\n"
+        rules_section = f"\n## Configured Business Rules\n(none configured for this table)\n{seasonal_section}"
 
     return f"""
 ## Failed Validation Record

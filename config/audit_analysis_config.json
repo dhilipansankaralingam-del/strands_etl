@@ -4,6 +4,7 @@
   "audit_table": "audit_db.etl_orchestrator_audit",
 
   "profile_tables": [
+    "orders_db.orders_fact",
     "audit_db.etl_orchestrator_audit"
   ],
 
@@ -31,66 +32,220 @@
   },
 
   "table_config": {
+    "orders_db.orders_fact": {
+      "primary_key_column": "order_id",
+      "timestamp_column": "order_date",
+      "partition_column": "order_date",
+      "freshness_sla_hours": 26,
+      "metric_columns": ["order_amount", "cost_usd"],
+
+      "_comment_profiling_tiers": "FULL=3 Athena queries, STATS_ONLY=1, COUNT_ONLY=shared batch, SKIP=excluded",
+      "profiling_columns": {
+        "order_id":             {"tier": "FULL",       "role": "primary_key"},
+        "region":               {"tier": "FULL",       "role": "dimension"},
+        "order_date":           {"tier": "FULL",       "role": "timestamp"},
+        "order_amount":         {"tier": "FULL",       "role": "metric",     "never_zero": true},
+        "cost_usd":             {"tier": "FULL",       "role": "metric",     "never_zero": true},
+        "status":               {"tier": "STATS_ONLY", "role": "dimension"},
+        "customer_name":        {"tier": "COUNT_ONLY", "role": "free_text"},
+        "customer_notes":       {"tier": "COUNT_ONLY", "role": "free_text"},
+        "internal_audit_json":  {"tier": "SKIP"}
+      }
+    },
+
     "audit_db.etl_orchestrator_audit": {
       "key_columns": ["run_id", "event_type", "source_label", "status", "validation_name", "glue_job_name"],
       "primary_key_column": "run_id",
       "timestamp_column": "event_timestamp",
       "partition_column": "run_date",
       "metric_columns": [],
-      "freshness_sla_hours": 26
+      "freshness_sla_hours": 26,
+
+      "profiling_columns": {
+        "run_id":          {"tier": "FULL",       "role": "primary_key"},
+        "event_type":      {"tier": "FULL",       "role": "dimension"},
+        "status":          {"tier": "FULL",       "role": "dimension"},
+        "source_label":    {"tier": "STATS_ONLY", "role": "dimension"},
+        "glue_job_name":   {"tier": "STATS_ONLY", "role": "dimension"},
+        "event_timestamp": {"tier": "FULL",       "role": "timestamp"},
+        "cost_usd":        {"tier": "STATS_ONLY", "role": "metric"},
+        "query":           {"tier": "COUNT_ONLY", "role": "free_text"},
+        "error_message":   {"tier": "COUNT_ONLY", "role": "free_text"}
+      }
     }
   },
 
   "table_rules": {
+    "orders_db.orders_fact": [
+      {
+        "rule_name": "region_share_zscore_anomaly",
+        "rule_type": "STATISTICAL",
+        "severity": "HIGH",
+        "description": "Each region's share of daily order count is monitored via z-score against a 60-day rolling baseline stratified by day-of-week.",
+        "validation_query": "SELECT region, COUNT(*) AS cnt, COUNT(*)*1.0/SUM(COUNT(*)) OVER() AS share_pct FROM orders_db.orders_fact WHERE DATE(order_date) = DATE '{run_date}' GROUP BY region",
+        "how_zscore_is_computed": "z_score = (today_share_pct - dow_mean) / dow_stddev  where dow_mean/stddev are computed from the same day-of-week in the last 60 days",
+        "zscore_threshold": 3.0,
+        "rolling_window_days": 60,
+        "baseline_strategy": "day_of_week",
+        "known_seasonal_patterns": [
+          {
+            "pattern": "weekend_redistribution",
+            "days": ["Saturday", "Sunday"],
+            "ai_instruction": "If failure occurs on Saturday or Sunday AND the failing region is NORTH or SOUTH AND z_score < 4.5 → classify as FALSE_POSITIVE. Weekend order mix naturally shifts toward residential regions."
+          },
+          {
+            "pattern": "month_end_b2b_spike",
+            "days_of_month": ["28", "29", "30", "31"],
+            "ai_instruction": "If failure day is 28–31 of any month AND the failing region is WEST → classify as FALSE_POSITIVE. B2B bulk orders concentrate in WEST at month-end."
+          }
+        ],
+        "likely_true_failure_signals": [
+          "z_score > 4.5",
+          "Region count near zero (< 5 orders)",
+          "Multiple regions flagged on the same day",
+          "Failure on a Tuesday or Wednesday (no seasonal explanation)"
+        ],
+        "likely_false_positive_signals": [
+          "Saturday/Sunday NORTH/SOUTH z_score between 3.0 and 4.5",
+          "Day 28–31 WEST region",
+          "z_score between 3.0 and 3.5 on any day"
+        ]
+      },
+      {
+        "rule_name": "order_amount_not_null",
+        "rule_type": "NOT_NULL",
+        "severity": "CRITICAL",
+        "description": "order_amount must never be NULL. A null here means revenue will be understated.",
+        "condition": "order_amount IS NULL"
+      },
+      {
+        "rule_name": "order_amount_positive",
+        "rule_type": "RANGE",
+        "severity": "HIGH",
+        "description": "order_amount must be > 0. Zero or negative amounts indicate a calculation error.",
+        "condition": "order_amount <= 0"
+      }
+    ],
+
     "audit_db.etl_orchestrator_audit": [
       {
         "rule_name": "glue_job_name_not_null_on_trigger",
-        "description": "glue_job_name must never be NULL when event_type is GLUE_TRIGGER. A null here means the trigger fired but the job reference was lost.",
+        "description": "glue_job_name must never be NULL when event_type is GLUE_TRIGGER.",
         "rule_type": "NOT_NULL",
         "severity": "CRITICAL",
         "condition": "event_type = 'GLUE_TRIGGER' AND glue_job_name IS NULL"
       },
       {
         "rule_name": "status_must_be_known_value",
-        "description": "status column must only contain known values: OK, Stale, PASS, FAIL, WARN, NOT_EXECUTED, SKIPPED, ABORTED, Check with Source. Any other value indicates a code bug.",
+        "description": "status column must only contain known values.",
         "rule_type": "REGEX",
         "severity": "HIGH",
         "condition": "status NOT IN ('OK','Stale','PASS','FAIL','WARN','NOT_EXECUTED','SKIPPED','ABORTED','Check with Source')"
       },
       {
         "rule_name": "validation_must_have_query",
-        "description": "When event_type is VALIDATION, the query column must not be empty. Missing query means we cannot reproduce the check.",
+        "description": "When event_type is VALIDATION, the query column must not be empty.",
         "rule_type": "NOT_NULL",
         "severity": "MEDIUM",
         "condition": "event_type = 'VALIDATION' AND (query IS NULL OR TRIM(query) = '')"
       },
       {
         "rule_name": "cost_must_be_non_negative",
-        "description": "cost_usd should be >= 0. A negative cost indicates a calculation error in the Athena cost formula.",
+        "description": "cost_usd should be >= 0.",
         "rule_type": "RANGE",
         "severity": "LOW",
         "condition": "TRY_CAST(cost_usd AS DOUBLE) < 0"
-      },
-      {
-        "rule_name": "run_id_must_be_unique_per_day",
-        "description": "Each run_id should appear only once per run_date partition. Duplicates suggest the orchestrator was triggered multiple times or had a retry loop.",
-        "rule_type": "BUSINESS",
-        "severity": "HIGH",
-        "condition": "COUNT(*) > 1 GROUP BY run_id, run_date"
       }
     ]
   },
 
+  "auto_ruleset_generation": {
+    "_comment": "Reads profiling baselines from S3 and generates SQL checks run via Athena API. FAIL rows are inserted into results_table so AuditActionAgent picks them up.",
+    "enabled": true,
+    "min_baseline_runs": 10,
+    "runner": "athena",
+    "results_table": "audit_db.etl_orchestrator_audit",
+
+    "rule_generation_policy": {
+      "IsComplete": {
+        "_comment": "Generate an IsComplete check when historical null% was below this threshold",
+        "generate_when_null_pct_below": 0.01
+      },
+      "IsUnique": {
+        "_comment": "Generate uniqueness check only for columns whose historical distinct_pct > threshold",
+        "generate_when_distinct_pct_above": 0.99,
+        "only_for_roles": ["primary_key"]
+      },
+      "RowCount": {
+        "_comment": "Row count must stay within ± tolerance_pct of the baseline",
+        "generate_when": "baseline_runs >= 10",
+        "tolerance_pct": 15
+      },
+      "ColumnValues_enum": {
+        "_comment": "For low-cardinality stable dimensions: distinct count must not expand",
+        "generate_when": "distinct_count <= 20"
+      },
+      "ColumnValues_range": {
+        "_comment": "For numeric columns: min/max must stay within ± tolerance_pct",
+        "generate_when": "column_is_numeric AND baseline_runs >= 10",
+        "tolerance_pct": 20
+      },
+      "ZScore_distribution": {
+        "_comment": "Z-score checks are already handled by table_rules[].validation_query — this entry is documentation only",
+        "zscore_threshold": 3.0,
+        "baseline_strategy": "day_of_week"
+      }
+    }
+  },
+
+  "ml_anomaly_scoring": {
+    "_comment": "ML-based anomaly scoring on top of rule-based detectors. Requires scikit-learn (Isolation Forest) and adtk (time-series). Set enabled=true once you have min_baseline_runs of history.",
+    "enabled": false,
+    "min_baseline_runs": 20,
+
+    "isolation_forest": {
+      "enabled": false,
+      "_comment": "Trains one Isolation Forest per column on historical stats features. Flags current run stats that fall outside the normal distribution.",
+      "contamination": 0.05,
+      "features": ["null_pct", "distinct_count", "row_count", "mean_value", "stddev_value"],
+      "retrain_every_n_runs": 10
+    },
+
+    "adtk": {
+      "enabled": false,
+      "_comment": "Time-series anomaly detection on metric trends across profiling runs. SeasonalAD captures day-of-week patterns automatically.",
+      "detectors": {
+        "LevelShiftAD": {
+          "_comment": "Flags sudden sustained level shifts (e.g. row_count drops by 30% and stays low)",
+          "applies_to": ["row_count", "null_pct"]
+        },
+        "SeasonalAD": {
+          "_comment": "Detects deviations from day-of-week seasonality. freq=7 means weekly period.",
+          "applies_to": ["region__null_pct", "row_count"]
+        },
+        "InterquartileRangeAD": {
+          "_comment": "Flags IQR outliers — good for metric columns where extreme spikes are the signal",
+          "applies_to": ["order_amount__mean_value", "cost_usd__mean_value"]
+        }
+      }
+    }
+  },
+
   "natural_language_validations": [
     {
-      "table": "audit_db.etl_orchestrator_audit",
-      "query": "Are there any runs where a GLUE_TRIGGER event has no matching VALIDATION event on the same run_date?",
+      "table": "orders_db.orders_fact",
+      "query": "Are there any orders where order_amount is NULL or zero for today?",
+      "severity": "CRITICAL"
+    },
+    {
+      "table": "orders_db.orders_fact",
+      "query": "Show me the top 3 regions by order count for the last 7 days and flag any region whose share dropped by more than 10 percentage points vs the prior 7 days",
       "severity": "HIGH"
     },
     {
       "table": "audit_db.etl_orchestrator_audit",
-      "query": "Show me the top 5 source_labels that have had the most FAIL statuses in the last 7 days",
-      "severity": "MEDIUM"
+      "query": "Are there any runs where a GLUE_TRIGGER event has no matching VALIDATION event on the same run_date?",
+      "severity": "HIGH"
     },
     {
       "table": "audit_db.etl_orchestrator_audit",

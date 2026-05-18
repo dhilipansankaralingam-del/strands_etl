@@ -235,13 +235,15 @@ class AuditActionAgent:
         # Load historical health scores for trend analysis
         health_history = self._load_health_score_history(table_key)
 
-        # Step A: AI classification (with rules + health trend)
+        # Step A: AI classification (with rules + health trend + run_date for seasonal patterns)
+        run_date = record.failure_timestamp[:10] if record.failure_timestamp else None
         history = self.validation_agent._get_similar_outcomes(record, limit=20)
         analysis: AnalysisResult = self.validation_agent.decision_agent(
             record,
             history,
             configured_rules=rules if rules else None,
             health_score_history=health_history if health_history else None,
+            run_date=run_date,
         )
 
         # Step B: Data profile for the affected table (cached per table)
@@ -258,6 +260,7 @@ class AuditActionAgent:
                     timestamp_column=tc.get("timestamp_column") or record.additional_context.get("timestamp_column"),
                     partition_column=tc.get("partition_column"),
                     freshness_sla_hours=tc.get("freshness_sla_hours", 26.0),
+                    profiling_columns=tc.get("profiling_columns"),
                 )
                 profile_cache[table_key] = profile
             except Exception as e:

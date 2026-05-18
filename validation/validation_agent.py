@@ -181,6 +181,7 @@ class ValidationAnalysisAgent:
         history: List[Dict[str, Any]],
         configured_rules: Optional[List[Dict[str, Any]]] = None,
         health_score_history: Optional[List[Dict[str, Any]]] = None,
+        run_date: Optional[str] = None,
     ) -> AnalysisResult:
         """
         Core classification agent.
@@ -205,6 +206,7 @@ class ValidationAnalysisAgent:
             history,
             configured_rules=configured_rules,
             health_score_history=health_score_history,
+            run_date=run_date or (record.failure_timestamp[:10] if record.failure_timestamp else None),
         )
 
         plogger.log_prompt(

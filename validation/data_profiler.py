@@ -62,6 +62,22 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from strands import Agent, tool
 
+# ML libraries — optional; silently disabled if not installed
+try:
+    import numpy as np
+    from sklearn.ensemble import IsolationForest
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+
+try:
+    import pandas as pd
+    from adtk.detector import LevelShiftAD, SeasonalAD, InterquartileRangeAD, PersistAD
+    from adtk.data import validate_series
+    _ADTK_AVAILABLE = True
+except ImportError:
+    _ADTK_AVAILABLE = False
+
 from validation.models import (
     AnomalyReport,
     AnomalySeverity,
@@ -123,6 +139,7 @@ class DataProfilerAgent:
         zero_inflation_pct: float = _DEFAULT_ZERO_INFLATION_PCT,
         dup_key_pct: float = _DEFAULT_DUP_KEY_PCT,
         freshness_sla_hours: float = _DEFAULT_FRESHNESS_SLA_HOURS,
+        ml_config: Optional[Dict[str, Any]] = None,
     ):
         self.database              = database
         self.athena_output         = athena_output_location
@@ -141,6 +158,12 @@ class DataProfilerAgent:
         self.bedrock = boto3.client("bedrock-runtime", region_name=aws_region)
         self.glue    = boto3.client("glue",            region_name=aws_region)
 
+        # ML anomaly scoring config
+        self.ml_config = ml_config or {}
+        self._ml_enabled = self.ml_config.get("enabled", False)
+        self._if_config  = self.ml_config.get("isolation_forest", {})
+        self._adtk_config = self.ml_config.get("adtk", {})
+
         # State shared across tool calls within one profile() invocation
         self._state: Dict[str, Any] = {}
 
@@ -154,10 +177,11 @@ class DataProfilerAgent:
         run_id: str,
         key_columns: Optional[List[str]] = None,
         primary_key_column: Optional[str] = None,
-        metric_columns: Optional[List[str]] = None,    # columns that must never be 0
+        metric_columns: Optional[List[str]] = None,
         timestamp_column: Optional[str] = None,
         partition_column: Optional[str] = None,
         freshness_sla_hours: Optional[float] = None,
+        profiling_columns: Optional[Dict[str, Any]] = None,
     ) -> DataProfileResult:
         """
         Run the full agentic profiling loop and return a DataProfileResult.
@@ -171,7 +195,9 @@ class DataProfilerAgent:
         # ── 1. Gather raw stats (tools run in Python directly before agent loop)
         schema_info        = self._get_glue_schema(table_name)
         baseline           = self._load_baseline(table_name)
-        column_profiles    = self._build_column_profiles(table_name, schema_info, baseline, key_columns)
+        column_profiles    = self._build_column_profiles(
+            table_name, schema_info, baseline, key_columns, profiling_columns
+        )
         kpi_snapshot       = self._build_kpi_snapshot(table_name, run_id, timestamp_column, partition_column, baseline)
         schema_drift       = self._detect_schema_drift(schema_info, baseline)
 
@@ -187,6 +213,11 @@ class DataProfilerAgent:
         anomalies += self._check_boundary_explosion(table_name, run_id, column_profiles)
         anomalies += self._check_zero_inflation(table_name, run_id, column_profiles, metric_columns)
         anomalies += self._check_encoding_rot(table_name, run_id, column_profiles)
+
+        # ── 2b. ML anomaly scoring (Isolation Forest + ADTK) if enabled
+        if self._ml_enabled:
+            anomalies += self._run_isolation_forest(table_name, run_id, column_profiles, baseline)
+            anomalies += self._run_adtk(table_name, run_id, baseline)
 
         # ── 3. LLM agent loop — AI interprets stats and refines anomaly list
         ai_response = self._run_ai_agent(
@@ -255,15 +286,57 @@ class DataProfilerAgent:
         schema_info: Dict[str, Any],
         baseline: Dict[str, Any],
         key_columns: Optional[List[str]],
+        profiling_columns: Optional[Dict[str, Any]] = None,
     ) -> List[ColumnProfile]:
-        """Run per-column Athena profiling queries and build ColumnProfile objects."""
-        columns = key_columns or schema_info.get("columns", [])
+        """
+        Run per-column Athena profiling queries and build ColumnProfile objects.
+
+        Column selection and query depth are controlled by the profiling_columns tier config:
+          FULL       — stats + top-values + sample + zero-count (3 Athena queries)
+          STATS_ONLY — stats query only (1 query; no top-values/sample)
+          COUNT_ONLY — null_count and distinct_count only (shared table-level query)
+          SKIP       — column excluded entirely (0 queries)
+
+        If profiling_columns is None, all key_columns fall back to FULL tier.
+        """
+        if profiling_columns:
+            # Build ordered list from tier config, honouring SKIP
+            columns = [c for c, cfg in profiling_columns.items() if cfg.get("tier", "FULL") != "SKIP"]
+        else:
+            columns = key_columns or schema_info.get("columns", [])
+
         profiles: List[ColumnProfile] = []
         baseline_cols: Dict[str, Any] = baseline.get("column_profiles", {})
 
+        # For COUNT_ONLY columns we can batch them into a single Athena query to save cost
+        count_only_cols = []
+        if profiling_columns:
+            count_only_cols = [
+                c for c, cfg in profiling_columns.items()
+                if cfg.get("tier") == "COUNT_ONLY"
+            ]
+
+        count_only_stats: Dict[str, Dict[str, Any]] = {}
+        if count_only_cols:
+            count_only_stats = self._run_count_only_batch(table_name, count_only_cols)
+
         for col in columns[:30]:  # cap at 30 columns to avoid runaway cost
             col_type = schema_info.get("types", {}).get(col, "string")
-            stats = self._run_column_stats_query(table_name, col, col_type)
+            tier = "FULL"
+            if profiling_columns and col in profiling_columns:
+                tier = profiling_columns[col].get("tier", "FULL")
+
+            if tier == "COUNT_ONLY":
+                raw = count_only_stats.get(col)
+                if raw is None:
+                    continue
+                stats = raw
+            elif tier == "STATS_ONLY":
+                stats = self._run_column_stats_query(table_name, col, col_type, stats_only=True)
+            else:
+                # FULL (default)
+                stats = self._run_column_stats_query(table_name, col, col_type, stats_only=False)
+
             if stats is None:
                 continue
 
@@ -289,8 +362,48 @@ class DataProfilerAgent:
             ))
         return profiles
 
+    def _run_count_only_batch(
+        self, table_name: str, columns: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Single Athena query returning null_count and distinct_count for many columns at once.
+        Used by COUNT_ONLY tier to minimise Athena costs.
+        """
+        aggs = ", ".join(
+            f"COUNT_IF({c} IS NULL) AS {c}__null_cnt, "
+            f"COUNT(DISTINCT {c}) AS {c}__distinct_cnt, "
+            f"COUNT(*) AS row_count"
+            for c in columns[:20]  # Athena has expression limits
+        )
+        sql = f"SELECT {aggs} FROM {self.database}.{table_name} LIMIT 1"
+        rows = self._run_athena(sql)
+        if not rows:
+            return {}
+
+        r = rows[0]
+        row_count = int(r.get("row_count", 0) or 0)
+        result: Dict[str, Dict[str, Any]] = {}
+        for c in columns:
+            null_count = int(r.get(f"{c}__null_cnt", 0) or 0)
+            distinct_count = int(r.get(f"{c}__distinct_cnt", 0) or 0)
+            null_pct = null_count / row_count if row_count else 0.0
+            distinct_pct = distinct_count / (row_count - null_count) if (row_count - null_count) > 0 else 0.0
+            result[c] = {
+                "row_count": row_count,
+                "null_count": null_count,
+                "null_pct": null_pct,
+                "distinct_count": distinct_count,
+                "distinct_pct": distinct_pct,
+                "top_values": [],
+                "sample_values": [],
+                "zero_count": 0,
+                "is_numeric": False,
+                "is_string": True,
+            }
+        return result
+
     def _run_column_stats_query(
-        self, table_name: str, column: str, col_type: str
+        self, table_name: str, column: str, col_type: str, stats_only: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Execute an Athena query to gather per-column statistics."""
         is_numeric = any(t in col_type.lower() for t in ("int", "double", "float", "decimal", "bigint", "long"))
@@ -322,8 +435,13 @@ FROM {self.database}.{table_name}
         null_pct      = null_count / row_count if row_count else 0.0
         distinct_pct  = distinct_count / (row_count - null_count) if (row_count - null_count) > 0 else 0.0
 
-        # Top-5 value frequencies
-        top_sql = f"""
+        # Top-5 value frequencies and sample values skipped in STATS_ONLY tier
+        top_values = []
+        sample_values = []
+        zero_count = 0
+
+        if not stats_only:
+            top_sql = f"""
 SELECT CAST({column} AS VARCHAR) AS val, COUNT(*) AS cnt
 FROM {self.database}.{table_name}
 WHERE {column} IS NOT NULL
@@ -331,28 +449,25 @@ GROUP BY {column}
 ORDER BY cnt DESC
 LIMIT 5
 """
-        top_rows = self._run_athena(top_sql) or []
-        top_values = [
-            {"value": tr.get("val"), "freq_pct": int(tr.get("cnt", 0)) / row_count if row_count else 0}
-            for tr in top_rows
-        ]
+            top_rows = self._run_athena(top_sql) or []
+            top_values = [
+                {"value": tr.get("val"), "freq_pct": int(tr.get("cnt", 0)) / row_count if row_count else 0}
+                for tr in top_rows
+            ]
 
-        # Sample 5 raw values (for encoding-rot check)
-        sample_sql = f"""
+            sample_sql = f"""
 SELECT CAST({column} AS VARCHAR) AS val
 FROM {self.database}.{table_name}
 WHERE {column} IS NOT NULL
 LIMIT 5
 """
-        sample_rows = self._run_athena(sample_sql) or []
-        sample_values = [sr.get("val") for sr in sample_rows]
+            sample_rows = self._run_athena(sample_sql) or []
+            sample_values = [sr.get("val") for sr in sample_rows]
 
-        # Zero count for numeric columns
-        zero_count = 0
-        if is_numeric:
-            z_sql = f"SELECT COUNT(*) AS zc FROM {self.database}.{table_name} WHERE CAST({column} AS DOUBLE) = 0"
-            z_rows = self._run_athena(z_sql) or []
-            zero_count = int(z_rows[0].get("zc", 0)) if z_rows else 0
+            if is_numeric:
+                z_sql = f"SELECT COUNT(*) AS zc FROM {self.database}.{table_name} WHERE CAST({column} AS DOUBLE) = 0"
+                z_rows = self._run_athena(z_sql) or []
+                zero_count = int(z_rows[0].get("zc", 0)) if z_rows else 0
 
         return {
             "row_count": row_count,
@@ -858,6 +973,221 @@ FROM {self.database}.{table_name}
         return results
 
     # ------------------------------------------------------------------
+    # ML anomaly scoring
+    # ------------------------------------------------------------------
+
+    def _run_isolation_forest(
+        self,
+        table_name: str,
+        run_id: str,
+        column_profiles: List[ColumnProfile],
+        baseline: Dict[str, Any],
+    ) -> List[AnomalyReport]:
+        """
+        Score each numeric column's current stats using Isolation Forest trained on
+        the historical baseline run history stored in S3.
+
+        Activated only when:
+          - ml_config.isolation_forest.enabled = true
+          - sklearn is installed
+          - ≥ min_baseline_runs of history exist in S3
+        """
+        if not self._if_config.get("enabled", False):
+            return []
+        if not _SKLEARN_AVAILABLE:
+            logger.warning("Isolation Forest requested but scikit-learn is not installed. pip install scikit-learn")
+            return []
+
+        history_runs = self._load_run_history(table_name, limit=100)
+        min_runs = self.ml_config.get("min_baseline_runs", 20)
+        if len(history_runs) < min_runs:
+            logger.info(
+                f"[IsolationForest] Skipping {table_name}: only {len(history_runs)} "
+                f"runs available (need {min_runs})"
+            )
+            return []
+
+        feature_names = self._if_config.get(
+            "features", ["null_pct", "distinct_count", "row_count", "mean_value", "stddev_value"]
+        )
+        contamination = self._if_config.get("contamination", 0.05)
+
+        results: List[AnomalyReport] = []
+        for profile in column_profiles:
+            # Build historical feature matrix for this column
+            X_hist = []
+            for run in history_runs:
+                col_hist = run.get("column_profiles", {}).get(profile.column_name, {})
+                row = [float(col_hist.get(f) or 0) for f in feature_names]
+                X_hist.append(row)
+
+            if len(X_hist) < min_runs:
+                continue
+
+            current_row = [float(getattr(profile, f, None) or 0) for f in feature_names]
+
+            try:
+                X_np = np.array(X_hist, dtype=float)
+                clf = IsolationForest(contamination=contamination, random_state=42)
+                clf.fit(X_np)
+                score = clf.decision_function([current_row])[0]
+                is_outlier = clf.predict([current_row])[0] == -1
+
+                if is_outlier:
+                    results.append(AnomalyReport(
+                        anomaly_id=str(uuid.uuid4()),
+                        table_name=table_name,
+                        database_name=self.database,
+                        column_name=profile.column_name,
+                        anomaly_type=AnomalyType.DISTRIBUTION_SKEW,
+                        severity=AnomalySeverity.MEDIUM,
+                        description=(
+                            f"Isolation Forest flagged '{profile.column_name}' as a statistical outlier "
+                            f"(anomaly score={score:.4f}). Current stats deviate significantly from "
+                            f"the {len(X_hist)}-run baseline."
+                        ),
+                        observed_value=json.dumps({f: current_row[i] for i, f in enumerate(feature_names)}),
+                        expected_range=f"Within Isolation Forest normal boundary (score > 0)",
+                        z_score=score,
+                        detection_sql=None,
+                        run_id=run_id,
+                        ai_explanation=f"ML anomaly score: {score:.4f}",
+                        recommended_action="Investigate column stats manually; compare to historical baselines.",
+                    ))
+            except Exception as e:
+                logger.warning(f"[IsolationForest] Failed for column {profile.column_name}: {e}")
+
+        return results
+
+    def _run_adtk(
+        self,
+        table_name: str,
+        run_id: str,
+        baseline: Dict[str, Any],
+    ) -> List[AnomalyReport]:
+        """
+        Apply ADTK time-series anomaly detection on metric time-series from run history.
+
+        Supported detectors (configured per metric in ml_config.adtk.detectors):
+          - LevelShiftAD   — detects sudden level shifts
+          - SeasonalAD     — detects deviations from seasonal patterns (day-of-week)
+          - InterquartileRangeAD — detects IQR outliers
+          - PersistAD      — detects values persisting unchanged
+
+        Activated only when ml_config.adtk.enabled = true and adtk is installed.
+        """
+        if not self._adtk_config.get("enabled", False):
+            return []
+        if not _ADTK_AVAILABLE:
+            logger.warning("ADTK requested but adtk is not installed. pip install adtk")
+            return []
+
+        history_runs = self._load_run_history(table_name, limit=90)
+        min_runs = self.ml_config.get("min_baseline_runs", 20)
+        if len(history_runs) < min_runs:
+            return []
+
+        detectors_cfg = self._adtk_config.get("detectors", {})
+        results: List[AnomalyReport] = []
+
+        # Build metric time-series from run history
+        metric_series: Dict[str, List[Tuple[datetime, float]]] = {}
+        for run in history_runs:
+            ts_str = run.get("updated_at", "")
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except Exception:
+                continue
+            kpi = run.get("kpi_snapshot", {})
+            metric_series.setdefault("row_count", []).append((ts, float(kpi.get("row_count") or 0)))
+            metric_series.setdefault("null_pct", [])  # populated below from column profiles
+            for col, col_data in run.get("column_profiles", {}).items():
+                key = f"{col}__null_pct"
+                metric_series.setdefault(key, []).append((ts, float(col_data.get("null_pct") or 0)))
+
+        detector_map = {
+            "LevelShiftAD":            lambda: LevelShiftAD(c=6.0),
+            "SeasonalAD":              lambda: SeasonalAD(freq=7),
+            "InterquartileRangeAD":    lambda: InterquartileRangeAD(c=3.0),
+            "PersistAD":               lambda: PersistAD(c=3.0, side="both"),
+        }
+
+        for detector_name, det_cfg in detectors_cfg.items():
+            applies_to = det_cfg.get("applies_to", [])
+            det_factory = detector_map.get(detector_name)
+            if not det_factory:
+                continue
+
+            for metric in applies_to:
+                points = metric_series.get(metric, [])
+                if len(points) < min_runs:
+                    continue
+                try:
+                    points_sorted = sorted(points, key=lambda x: x[0])
+                    idx = [p[0] for p in points_sorted]
+                    vals = [p[1] for p in points_sorted]
+                    series = pd.Series(vals, index=pd.DatetimeIndex(idx))
+                    series = validate_series(series)
+
+                    detector = det_factory()
+                    anomalies_mask = detector.fit_detect(series)
+                    flagged_dates = anomalies_mask[anomalies_mask == True].index.tolist() if anomalies_mask is not None else []
+
+                    # Only report if the LATEST point is flagged
+                    if flagged_dates and series.index[-1] in flagged_dates:
+                        col_name = metric.replace("__null_pct", "") if "__" in metric else None
+                        results.append(AnomalyReport(
+                            anomaly_id=str(uuid.uuid4()),
+                            table_name=table_name,
+                            database_name=self.database,
+                            column_name=col_name,
+                            anomaly_type=AnomalyType.TEMPORAL_ANOMALY if "row_count" in metric else AnomalyType.NULL_FLOOD,
+                            severity=AnomalySeverity.HIGH,
+                            description=(
+                                f"ADTK {detector_name} flagged '{metric}' at "
+                                f"{series.index[-1].date()}: value={series.iloc[-1]:.4f}. "
+                                f"Time-series shows an unexpected pattern vs {len(points)} historical runs."
+                            ),
+                            observed_value=f"{series.iloc[-1]:.4f}",
+                            expected_range=f"Within ADTK {detector_name} bounds",
+                            z_score=None,
+                            detection_sql=None,
+                            run_id=run_id,
+                            ai_explanation=f"ADTK {detector_name} anomaly on metric: {metric}",
+                            recommended_action="Investigate time-series pattern; check upstream data source.",
+                        ))
+                except Exception as e:
+                    logger.warning(f"[ADTK] {detector_name} on {metric} failed: {e}")
+
+        return results
+
+    def _load_run_history(self, table_name: str, limit: int = 90) -> List[Dict[str, Any]]:
+        """Load the last N profile baselines from S3 for ML training."""
+        try:
+            prefix = f"{self.BASELINE_PREFIX}{self.database}/{table_name}/history/"
+            response = self.s3.list_objects_v2(
+                Bucket=self.learning_bucket,
+                Prefix=prefix,
+                MaxKeys=limit,
+            )
+            objects = sorted(
+                response.get("Contents", []),
+                key=lambda x: x["LastModified"],
+                reverse=True,
+            )
+            runs = []
+            for obj in objects[:limit]:
+                try:
+                    body = self.s3.get_object(Bucket=self.learning_bucket, Key=obj["Key"])["Body"].read()
+                    runs.append(json.loads(body))
+                except Exception:
+                    pass
+            return runs
+        except Exception as e:
+            logger.warning(f"Could not load run history for {table_name}: {e}")
+            return []
+
+    # ------------------------------------------------------------------
     # AI agent loop
     # ------------------------------------------------------------------
 
@@ -981,17 +1311,29 @@ FROM {self.database}.{table_name}
         kpi_snapshot: KPISnapshot,
         schema_info: Dict[str, Any],
     ) -> None:
+        run_ts = datetime.utcnow().isoformat()
         baseline = {
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": run_ts,
             "column_profiles": {p.column_name: p.to_dict() for p in column_profiles},
             "kpi_snapshot": kpi_snapshot.to_dict(),
             "schema": schema_info,
         }
         try:
+            # Always update the latest snapshot
             key = f"{self.BASELINE_PREFIX}{self.database}/{table_name}/latest.json"
             self.s3.put_object(
                 Bucket=self.learning_bucket,
                 Key=key,
+                Body=json.dumps(baseline, indent=2, default=str),
+            )
+            # Also append to timestamped history for ML training
+            history_key = (
+                f"{self.BASELINE_PREFIX}{self.database}/{table_name}/history/"
+                f"{run_ts.replace(':', '-')}.json"
+            )
+            self.s3.put_object(
+                Bucket=self.learning_bucket,
+                Key=history_key,
                 Body=json.dumps(baseline, indent=2, default=str),
             )
         except Exception as e:

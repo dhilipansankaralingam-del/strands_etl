@@ -179,6 +179,7 @@ def run_profiling(cfg: dict, csv_exporter) -> list:
             zero_inflation_pct      = profiling["zero_inflation_threshold_pct"] / 100,
             dup_key_pct             = profiling["duplicate_key_threshold_pct"] / 100,
             freshness_sla_hours     = profiling["freshness_sla_hours"],
+            ml_config               = cfg.get("ml_anomaly_scoring"),
         )
 
         run_id = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
@@ -193,6 +194,7 @@ def run_profiling(cfg: dict, csv_exporter) -> list:
             timestamp_column    = tc.get("timestamp_column"),
             partition_column    = tc.get("partition_column"),
             freshness_sla_hours = tc.get("freshness_sla_hours", profiling["freshness_sla_hours"]),
+            profiling_columns   = tc.get("profiling_columns"),
         )
 
         _print_profile(result)
@@ -208,6 +210,40 @@ def run_profiling(cfg: dict, csv_exporter) -> list:
         results.append(result)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Mode D½ — Auto-ruleset generation
+# ---------------------------------------------------------------------------
+
+def run_auto_rulesets(cfg: dict, run_date: str) -> list:
+    from validation.auto_ruleset_generator import AutoRulesetGenerator
+
+    ruleset_cfg = cfg.get("auto_ruleset_generation", {})
+    if not ruleset_cfg.get("enabled", False):
+        print(_c("  auto_ruleset_generation disabled in config — skipping.", "GREY"))
+        return []
+
+    results_tbl_full = ruleset_cfg.get("results_table", cfg["audit_table"])
+    rs_db, rs_tbl    = parse_db_table(results_tbl_full)
+
+    gen = AutoRulesetGenerator(
+        database        = rs_db,
+        results_table   = rs_tbl,
+        athena_output   = cfg["athena_output_location"],
+        learning_bucket = cfg["learning_bucket"],
+        aws_region      = cfg["aws_region"],
+        ruleset_config  = ruleset_cfg,
+    )
+
+    _banner("AUTO-RULESET GENERATION", "YELLOW")
+    summaries = []
+    for full_name in cfg.get("profile_tables", []):
+        tc = cfg.get("table_config", {}).get(full_name, {})
+        summary = gen.run(target_table=full_name, table_cfg=tc, run_date=run_date)
+        summaries.append(summary)
+        _print_ruleset_summary(full_name, summary)
+    return summaries
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +336,24 @@ def _print_audit_summary(report: dict) -> None:
             print(f"    {ok}  {act:<20}  {d.get('rule_name',''):<30}  {d.get('table_name','')}")
 
 
+def _print_ruleset_summary(table: str, summary: dict) -> None:
+    if summary.get("skipped") or not summary.get("enabled", True):
+        return
+    if summary.get("error"):
+        print(_c(f"  ✗  {table}: {summary['error']}", "RED"))
+        return
+    total = summary.get("rules_generated", 0)
+    passed = summary.get("pass", 0)
+    failed = summary.get("fail", 0)
+    sc = "GREEN" if failed == 0 else ("YELLOW" if failed < total // 2 else "RED")
+    print(f"\n  {_c(table, 'CYAN')}  — {total} rules  "
+          f"{_c(str(passed)+' PASS', 'GREEN')}  {_c(str(failed)+' FAIL', sc)}")
+    for r in summary.get("results", []):
+        status_c = "GREEN" if r["status"] == "PASS" else "RED"
+        col = f"[{r['column_name']}]" if r.get("column_name") else "[table]"
+        print(f"    {_c(r['status'], status_c):<16}  {r['rule_name']:<40}  {col}")
+
+
 def _print_nl_summary(findings: list) -> None:
     if not findings:
         return
@@ -324,9 +378,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--date",         default=str(date.today()), help="Date to analyse (YYYY-MM-DD)")
     p.add_argument("--severity",     default=None,  help="Min severity: LOW|MEDIUM|HIGH|CRITICAL")
     p.add_argument("--mode",         default="direct", choices=["direct", "agent"], help="Execution mode")
-    p.add_argument("--profile-only", action="store_true", help="Run data profiling only")
-    p.add_argument("--nl-only",      action="store_true", help="Run NL validations only")
-    p.add_argument("--full",         action="store_true", help="Run audit + profiling + NL validations")
+    p.add_argument("--profile-only",  action="store_true", help="Run data profiling only")
+    p.add_argument("--nl-only",       action="store_true", help="Run NL validations only")
+    p.add_argument("--ruleset-only",  action="store_true", help="Run auto-ruleset generation only")
+    p.add_argument("--full",          action="store_true", help="Run audit + profiling + NL + rulesets")
     p.add_argument("--config",       default=str(CONFIG_PATH), help="Path to config JSON")
     return p.parse_args()
 
@@ -355,13 +410,17 @@ def main() -> None:
         if args.profile_only or args.full:
             run_profiling(cfg, csv_exp)
 
+        # ── Auto-ruleset generation
+        if args.ruleset_only or args.full:
+            run_auto_rulesets(cfg, args.date)
+
         # ── NL validations
         if args.nl_only or args.full:
             nl_findings = run_nl_validations(cfg, csv_exp)
             _print_nl_summary(nl_findings)
 
         # ── Audit analysis (default / --full)
-        if not args.profile_only and not args.nl_only:
+        if not args.profile_only and not args.nl_only and not args.ruleset_only:
             if args.mode == "agent":
                 response = run_agent(cfg, args.date, severity)
                 _banner("STRANDS AGENT RESPONSE", "GREEN")
