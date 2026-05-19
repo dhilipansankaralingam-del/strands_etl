@@ -473,7 +473,7 @@ def main() -> None:
         email_cfg = report_cfg.get("email", {})
         if email_cfg.get("enabled", False):
             _banner("SENDING EMAIL", "MAGENTA")
-            sender = EmailSender(email_cfg, aws_region=cfg["aws_region"])
+            sender = EmailSender(email_cfg)
             attach_paths = (
                 [str(p) for p in Path(csv_dir).glob(f"*_{args.date}.csv")]
                 if email_cfg.get("attach_csvs", False)

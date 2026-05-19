@@ -278,19 +278,25 @@
   },
 
   "reporting": {
-    "_comment": "HTML report is always written to output/dq_report_{date}.html. Email is sent via AWS SES only when enabled=true.",
+    "_comment": "HTML report is always written to output/dq_report_{date}.html. Email is sent via SMTP when enabled=true.",
     "email": {
       "enabled": false,
-      "_comment_from": "Must be a verified SES sender address or domain",
-      "from_address": "dq-alerts@example.com",
-      "to_addresses": [
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "_comment_ports": "587=STARTTLS (Gmail/Outlook/Office365), 465=SSL, 25=plain relay",
+      "sender": "dq-alerts@example.com",
+      "recipients": [
         "data-engineering@example.com",
         "analytics-team@example.com"
       ],
-      "cc_addresses": [
+      "cc": [
         "data-governance@example.com"
       ],
-      "subject_prefix": "[Strands DQ]",
+      "subject": "[Strands DQ] Data Quality Report",
+      "_comment_auth": "Leave username/password empty for unauthenticated internal relays",
+      "username": "dq-alerts@example.com",
+      "password": "",
+      "use_tls": true,
       "_comment_attach": "Set attach_csvs=true to attach all 4 CSV files to the email",
       "attach_csvs": false
     }

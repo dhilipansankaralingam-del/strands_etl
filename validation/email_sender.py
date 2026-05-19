@@ -1,56 +1,63 @@
 """
 validation/email_sender.py
 ===========================
-Sends the HTML report via AWS SES.
+Sends the HTML report via SMTP (standard Python smtplib — no AWS dependency).
 
-Config section (in audit_analysis_config.json → reporting):
+Config section (in audit_analysis_config.json → reporting.email):
+
     "reporting": {
         "email": {
             "enabled": true,
-            "from_address": "dq-alerts@example.com",
-            "to_addresses": ["team@example.com", "manager@example.com"],
-            "cc_addresses": [],
-            "subject_prefix": "[Strands DQ]",
+            "smtp_host": "smtp.gmail.com",
+            "smtp_port": 587,
+            "sender": "dq-alerts@example.com",
+            "recipients": ["team@example.com", "manager@example.com"],
+            "cc": ["governance@example.com"],
+            "subject": "[Strands DQ] Data Quality Report",
+            "username": "dq-alerts@example.com",
+            "password": "app-password-here",
+            "use_tls": true,
             "attach_csvs": false
         }
     }
 
-Requires SES to be set up in the configured AWS region with the from_address
-verified (or the domain verified in production SES).
+Authentication is optional — omit username/password for relay servers
+that do not require credentials.
 
-Falls back gracefully — if SES fails or email is disabled, just logs a warning
-and writes the HTML to disk.
+TLS behaviour:
+  use_tls=true  + port 587  → STARTTLS (most common — Gmail, Outlook, Office 365)
+  use_tls=true  + port 465  → SMTP_SSL
+  use_tls=false             → plain SMTP (internal relay, localhost)
 """
 
 from __future__ import annotations
 
-import base64
 import logging
 import mimetypes
+import smtplib
+import ssl
+import email.mime.multipart as mp
+import email.mime.text      as mt
+import email.mime.base      as mb
+import email.encoders       as enc
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import boto3
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
 
 class EmailSender:
     """
-    Sends an HTML report email via AWS SES.
+    Sends an HTML report email via SMTP.
 
     Parameters
     ----------
     email_cfg : dict
         The reporting.email block from config.
-    aws_region : str
-        AWS region where SES is configured.
     """
 
-    def __init__(self, email_cfg: Dict[str, Any], aws_region: str = "us-east-1"):
-        self.cfg    = email_cfg
-        self.ses    = boto3.client("ses", region_name=aws_region)
+    def __init__(self, email_cfg: Dict[str, Any], **_kwargs):
+        self.cfg     = email_cfg
         self.enabled = email_cfg.get("enabled", False)
 
     def send(
@@ -60,16 +67,16 @@ class EmailSender:
         attachment_paths: Optional[List[str]] = None,
     ) -> bool:
         """
-        Send the HTML report email.
+        Send the HTML report email via SMTP.
 
         Parameters
         ----------
         html_body : str
             Full HTML string to send as the message body.
         run_date : str
-            YYYY-MM-DD — used in the subject line.
+            YYYY-MM-DD — appended to the subject line if not already present.
         attachment_paths : list of str, optional
-            Paths to CSV files to attach (used only if attach_csvs=true in config).
+            CSV files to attach (used only when attach_csvs=true in config).
 
         Returns True on success, False on failure.
         """
@@ -77,130 +84,102 @@ class EmailSender:
             logger.info("[EmailSender] Email disabled in config — skipping.")
             return False
 
-        to_addrs  = self.cfg.get("to_addresses", [])
-        cc_addrs  = self.cfg.get("cc_addresses", [])
-        from_addr = self.cfg.get("from_address", "")
-        prefix    = self.cfg.get("subject_prefix", "[Strands DQ]")
-        subject   = f"{prefix} Data Quality Report — {run_date}"
-        attach    = self.cfg.get("attach_csvs", False)
+        smtp_host  = self.cfg.get("smtp_host", "localhost")
+        smtp_port  = int(self.cfg.get("smtp_port", 587))
+        sender     = self.cfg.get("sender", "")
+        recipients = self.cfg.get("recipients", [])
+        cc         = self.cfg.get("cc", [])
+        subject    = self.cfg.get("subject", "[Strands DQ] Data Quality Report")
+        username   = self.cfg.get("username", "")
+        password   = self.cfg.get("password", "")
+        use_tls    = self.cfg.get("use_tls", True)
+        attach     = self.cfg.get("attach_csvs", False)
 
-        if not to_addrs or not from_addr:
-            logger.warning("[EmailSender] to_addresses or from_address missing in config.")
+        if not recipients or not sender:
+            logger.warning("[EmailSender] 'sender' or 'recipients' missing in config.")
             return False
 
-        # Build a plain-text fallback
+        # Append run_date to subject if not already included
+        if run_date not in subject:
+            subject = f"{subject} — {run_date}"
+
+        all_to = recipients + cc
         plain_text = (
             f"Strands AI Data Quality Report for {run_date}\n\n"
             "Please view this email in an HTML-capable client.\n\n"
             "Report generated by Strands Audit Analysis Pipeline."
         )
 
-        if attach and attachment_paths:
-            return self._send_with_attachments(
-                subject, from_addr, to_addrs, cc_addrs,
-                html_body, plain_text, attachment_paths,
-            )
-        else:
-            return self._send_simple(
-                subject, from_addr, to_addrs, cc_addrs, html_body, plain_text
-            )
-
-    # ------------------------------------------------------------------
-    # Simple send (no attachments — uses SES send_email API)
-    # ------------------------------------------------------------------
-
-    def _send_simple(
-        self,
-        subject: str,
-        from_addr: str,
-        to_addrs: List[str],
-        cc_addrs: List[str],
-        html_body: str,
-        plain_text: str,
-    ) -> bool:
-        try:
-            dest: Dict[str, Any] = {"ToAddresses": to_addrs}
-            if cc_addrs:
-                dest["CcAddresses"] = cc_addrs
-
-            self.ses.send_email(
-                Source=from_addr,
-                Destination=dest,
-                Message={
-                    "Subject": {"Data": subject, "Charset": "UTF-8"},
-                    "Body": {
-                        "Text": {"Data": plain_text, "Charset": "UTF-8"},
-                        "Html": {"Data": html_body,  "Charset": "UTF-8"},
-                    },
-                },
-            )
-            logger.info(
-                f"[EmailSender] Report sent to {to_addrs} (subject: {subject})"
-            )
-            return True
-        except ClientError as e:
-            logger.error(f"[EmailSender] SES send_email failed: {e}")
-            return False
-
-    # ------------------------------------------------------------------
-    # Send with CSV attachments (uses SES send_raw_email + MIME)
-    # ------------------------------------------------------------------
-
-    def _send_with_attachments(
-        self,
-        subject: str,
-        from_addr: str,
-        to_addrs: List[str],
-        cc_addrs: List[str],
-        html_body: str,
-        plain_text: str,
-        attachment_paths: List[str],
-    ) -> bool:
-        import email.mime.multipart as mp
-        import email.mime.text      as mt
-        import email.mime.base      as mb
-        import email.encoders       as enc
-
+        # Build the MIME message
         msg = mp.MIMEMultipart("mixed")
         msg["Subject"] = subject
-        msg["From"]    = from_addr
-        msg["To"]      = ", ".join(to_addrs)
-        if cc_addrs:
-            msg["Cc"] = ", ".join(cc_addrs)
+        msg["From"]    = sender
+        msg["To"]      = ", ".join(recipients)
+        if cc:
+            msg["Cc"]  = ", ".join(cc)
 
-        # Body: alternative (text + html)
+        # Alternative body: plain text + HTML
         alt = mp.MIMEMultipart("alternative")
         alt.attach(mt.MIMEText(plain_text, "plain", "utf-8"))
         alt.attach(mt.MIMEText(html_body,  "html",  "utf-8"))
         msg.attach(alt)
 
-        # Attachments
-        for path_str in attachment_paths:
-            p = Path(path_str)
-            if not p.exists():
-                continue
-            mime_type, _ = mimetypes.guess_type(str(p))
-            main_type, sub_type = (mime_type or "application/octet-stream").split("/", 1)
-            with open(p, "rb") as fh:
-                data = fh.read()
-            part = mb.MIMEBase(main_type, sub_type)
-            part.set_payload(data)
-            enc.encode_base64(part)
-            part.add_header("Content-Disposition", "attachment", filename=p.name)
-            msg.attach(part)
+        # Optional CSV attachments
+        if attach and attachment_paths:
+            for path_str in attachment_paths:
+                p = Path(path_str)
+                if not p.exists():
+                    logger.warning(f"[EmailSender] Attachment not found, skipping: {p}")
+                    continue
+                mime_type, _ = mimetypes.guess_type(str(p))
+                main_type, sub_type = (mime_type or "application/octet-stream").split("/", 1)
+                with open(p, "rb") as fh:
+                    data = fh.read()
+                part = mb.MIMEBase(main_type, sub_type)
+                part.set_payload(data)
+                enc.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment", filename=p.name)
+                msg.attach(part)
+            logger.debug(f"[EmailSender] Attached {len(attachment_paths)} file(s)")
 
+        # Send
         try:
-            all_addrs = to_addrs + cc_addrs
-            self.ses.send_raw_email(
-                Source=from_addr,
-                Destinations=all_addrs,
-                RawMessage={"Data": msg.as_bytes()},
-            )
+            if use_tls and smtp_port == 465:
+                # SSL from the start
+                context = ssl.create_default_context()
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as server:
+                    if username and password:
+                        server.login(username, password)
+                    server.sendmail(sender, all_to, msg.as_bytes())
+            elif use_tls:
+                # STARTTLS (port 587 or custom)
+                context = ssl.create_default_context()
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                    if username and password:
+                        server.login(username, password)
+                    server.sendmail(sender, all_to, msg.as_bytes())
+            else:
+                # Plain SMTP — internal relay / localhost
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    if username and password:
+                        server.login(username, password)
+                    server.sendmail(sender, all_to, msg.as_bytes())
+
             logger.info(
-                f"[EmailSender] Report + {len(attachment_paths)} attachment(s) "
-                f"sent to {to_addrs}"
+                f"[EmailSender] Report sent via {smtp_host}:{smtp_port} "
+                f"→ {recipients} (subject: {subject})"
             )
             return True
-        except ClientError as e:
-            logger.error(f"[EmailSender] SES send_raw_email failed: {e}")
-            return False
+
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"[EmailSender] SMTP authentication failed: {e}")
+        except smtplib.SMTPConnectError as e:
+            logger.error(f"[EmailSender] Could not connect to {smtp_host}:{smtp_port} — {e}")
+        except smtplib.SMTPException as e:
+            logger.error(f"[EmailSender] SMTP error: {e}")
+        except OSError as e:
+            logger.error(f"[EmailSender] Network error: {e}")
+        return False
