@@ -21,6 +21,8 @@
     "confidence_threshold_medium": 0.60
   },
 
+  "pipeline_name": "Strands ETL Audit",
+
   "profiling": {
     "freshness_sla_hours": 26,
     "null_flood_delta_pct": 20,
@@ -28,7 +30,9 @@
     "distribution_skew_threshold_pct": 80,
     "boundary_explosion_multiplier": 10,
     "zero_inflation_threshold_pct": 1,
-    "duplicate_key_threshold_pct": 0.5
+    "duplicate_key_threshold_pct": 0.5,
+    "_comment_lookback": "default_lookback_days: 0 = current day only, 7 = last 7 days. Override per table via table_config.<table>.profiling_lookback_days",
+    "default_lookback_days": 0
   },
 
   "table_config": {
@@ -38,6 +42,9 @@
       "partition_column": "order_date",
       "freshness_sla_hours": 26,
       "metric_columns": ["order_amount", "cost_usd"],
+      "_comment_date_filter": "date_filter_column restricts every profiling Athena query to the given date range. profiling_lookback_days=0 means current day only; 7 means last 7 days.",
+      "date_filter_column": "order_date",
+      "profiling_lookback_days": 0,
 
       "_comment_profiling_tiers": "FULL=3 Athena queries, STATS_ONLY=1, COUNT_ONLY=shared batch, SKIP=excluded",
       "profiling_columns": {
@@ -60,6 +67,8 @@
       "partition_column": "run_date",
       "metric_columns": [],
       "freshness_sla_hours": 26,
+      "date_filter_column": "run_date",
+      "profiling_lookback_days": 0,
 
       "profiling_columns": {
         "run_id":          {"tier": "FULL",       "role": "primary_key"},
@@ -266,5 +275,24 @@
     "prompt_preview_chars": 800,
     "save_to_s3": true,
     "s3_report_prefix": "validation/audit/reports/"
+  },
+
+  "reporting": {
+    "_comment": "HTML report is always written to output/dq_report_{date}.html. Email is sent via AWS SES only when enabled=true.",
+    "email": {
+      "enabled": false,
+      "_comment_from": "Must be a verified SES sender address or domain",
+      "from_address": "dq-alerts@example.com",
+      "to_addresses": [
+        "data-engineering@example.com",
+        "analytics-team@example.com"
+      ],
+      "cc_addresses": [
+        "data-governance@example.com"
+      ],
+      "subject_prefix": "[Strands DQ]",
+      "_comment_attach": "Set attach_csvs=true to attach all 4 CSV files to the email",
+      "attach_csvs": false
+    }
   }
 }

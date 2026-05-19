@@ -166,6 +166,7 @@ class DataProfilerAgent:
 
         # State shared across tool calls within one profile() invocation
         self._state: Dict[str, Any] = {}
+        self._date_filter_sql: str = ""  # set by profile() before any Athena calls
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -182,13 +183,46 @@ class DataProfilerAgent:
         partition_column: Optional[str] = None,
         freshness_sla_hours: Optional[float] = None,
         profiling_columns: Optional[Dict[str, Any]] = None,
+        date_filter_column: Optional[str] = None,
+        run_date: Optional[str] = None,
+        lookback_days: int = 0,
     ) -> DataProfileResult:
         """
         Run the full agentic profiling loop and return a DataProfileResult.
+
+        Parameters
+        ----------
+        date_filter_column : str, optional
+            Column name to use for date-range filtering (e.g. "order_date", "run_date").
+            If supplied, all Athena queries are restricted to:
+              date_filter_column BETWEEN (run_date - lookback_days) AND run_date
+        run_date : str, optional
+            YYYY-MM-DD. Defaults to today if date_filter_column is set.
+        lookback_days : int
+            How many days before run_date to include (0 = current day only, 7 = last 7 days).
         """
+        from datetime import date as date_type, timedelta
+
         sla = freshness_sla_hours or self.freshness_sla_hours
-        profile_id = str(uuid.uuid4())
+        profile_id  = str(uuid.uuid4())
         profiled_at = datetime.utcnow().isoformat()
+
+        # Build date filter clause (injected into every Athena query in this profile run)
+        date_filter_sql = ""
+        if date_filter_column:
+            rd     = run_date or str(date_type.today())
+            rd_dt  = datetime.strptime(rd, "%Y-%m-%d").date()
+            start  = str(rd_dt - timedelta(days=lookback_days))
+            end    = rd
+            date_filter_sql = (
+                f"{date_filter_column} BETWEEN DATE '{start}' AND DATE '{end}'"
+            )
+            logger.info(
+                f"[DataProfilerAgent] Date filter: {date_filter_column} "
+                f"BETWEEN {start} AND {end} (lookback={lookback_days}d)"
+            )
+
+        self._date_filter_sql = date_filter_sql  # shared across all _run_* helpers
 
         logger.info(f"[DataProfilerAgent] Starting profile for {self.database}.{table_name} run={run_id}")
 
@@ -362,6 +396,11 @@ class DataProfilerAgent:
             ))
         return profiles
 
+    def _where(self, extra: str = "") -> str:
+        """Build a WHERE clause combining date filter and any extra condition."""
+        parts = [p for p in [self._date_filter_sql, extra] if p]
+        return ("WHERE " + " AND ".join(parts)) if parts else ""
+
     def _run_count_only_batch(
         self, table_name: str, columns: List[str]
     ) -> Dict[str, Dict[str, Any]]:
@@ -375,7 +414,8 @@ class DataProfilerAgent:
             f"COUNT(*) AS row_count"
             for c in columns[:20]  # Athena has expression limits
         )
-        sql = f"SELECT {aggs} FROM {self.database}.{table_name} LIMIT 1"
+        where = self._where()
+        sql = f"SELECT {aggs} FROM {self.database}.{table_name} {where} LIMIT 1"
         rows = self._run_athena(sql)
         if not rows:
             return {}
@@ -416,6 +456,7 @@ class DataProfilerAgent:
             f", STDDEV(CAST({column} AS DOUBLE)) AS stddev_val"
         ) if is_numeric else ""
 
+        where = self._where()
         sql = f"""
 SELECT
     COUNT(*)                             AS row_count,
@@ -423,6 +464,7 @@ SELECT
     COUNT(DISTINCT {column})             AS distinct_count
     {numeric_aggs}
 FROM {self.database}.{table_name}
+{where}
 """
         rows = self._run_athena(sql)
         if not rows:
@@ -441,10 +483,11 @@ FROM {self.database}.{table_name}
         zero_count = 0
 
         if not stats_only:
+            not_null_filter = self._where(f"{column} IS NOT NULL")
             top_sql = f"""
 SELECT CAST({column} AS VARCHAR) AS val, COUNT(*) AS cnt
 FROM {self.database}.{table_name}
-WHERE {column} IS NOT NULL
+{not_null_filter}
 GROUP BY {column}
 ORDER BY cnt DESC
 LIMIT 5
@@ -458,14 +501,15 @@ LIMIT 5
             sample_sql = f"""
 SELECT CAST({column} AS VARCHAR) AS val
 FROM {self.database}.{table_name}
-WHERE {column} IS NOT NULL
+{not_null_filter}
 LIMIT 5
 """
             sample_rows = self._run_athena(sample_sql) or []
             sample_values = [sr.get("val") for sr in sample_rows]
 
             if is_numeric:
-                z_sql = f"SELECT COUNT(*) AS zc FROM {self.database}.{table_name} WHERE CAST({column} AS DOUBLE) = 0"
+                zero_filter = self._where(f"CAST({column} AS DOUBLE) = 0")
+                z_sql = f"SELECT COUNT(*) AS zc FROM {self.database}.{table_name} {zero_filter}"
                 z_rows = self._run_athena(z_sql) or []
                 zero_count = int(z_rows[0].get("zc", 0)) if z_rows else 0
 
@@ -495,8 +539,10 @@ LIMIT 5
         baseline: Dict[str, Any],
     ) -> KPISnapshot:
         """Build a KPISnapshot by running aggregate Athena queries."""
-        # Total row count
-        rc_rows = self._run_athena(f"SELECT COUNT(*) AS rc FROM {self.database}.{table_name}")
+        where = self._where()
+
+        # Total row count (scoped to date filter)
+        rc_rows = self._run_athena(f"SELECT COUNT(*) AS rc FROM {self.database}.{table_name} {where}")
         row_count = int(rc_rows[0]["rc"]) if rc_rows else 0
 
         # Previous row count from baseline
@@ -510,7 +556,7 @@ LIMIT 5
         latest_partition_value = None
         if timestamp_col:
             ts_rows = self._run_athena(
-                f"SELECT MAX({timestamp_col}) AS max_ts FROM {self.database}.{table_name}"
+                f"SELECT MAX({timestamp_col}) AS max_ts FROM {self.database}.{table_name} {where}"
             )
             if ts_rows and ts_rows[0].get("max_ts"):
                 try:
@@ -528,7 +574,7 @@ LIMIT 5
         partition_count = 0
         if partition_col:
             pc_rows = self._run_athena(
-                f"SELECT COUNT(DISTINCT {partition_col}) AS pc FROM {self.database}.{table_name}"
+                f"SELECT COUNT(DISTINCT {partition_col}) AS pc FROM {self.database}.{table_name} {where}"
             )
             partition_count = int(pc_rows[0]["pc"]) if pc_rows else 0
 

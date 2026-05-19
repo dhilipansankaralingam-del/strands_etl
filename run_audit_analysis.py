@@ -154,7 +154,7 @@ def run_agent(cfg: dict, run_date: str, severity: str) -> str:
 # Mode C — Data profiling only
 # ---------------------------------------------------------------------------
 
-def run_profiling(cfg: dict, csv_exporter) -> list:
+def run_profiling(cfg: dict, csv_exporter, run_date: str = "") -> list:
     from validation.data_profiler import DataProfilerAgent
     from validation.prompt_logger import get_logger
 
@@ -195,6 +195,10 @@ def run_profiling(cfg: dict, csv_exporter) -> list:
             partition_column    = tc.get("partition_column"),
             freshness_sla_hours = tc.get("freshness_sla_hours", profiling["freshness_sla_hours"]),
             profiling_columns   = tc.get("profiling_columns"),
+            date_filter_column  = tc.get("date_filter_column"),
+            run_date            = run_date or None,
+            lookback_days       = tc.get("profiling_lookback_days",
+                                         profiling.get("default_lookback_days", 0)),
         )
 
         _print_profile(result)
@@ -402,17 +406,31 @@ def main() -> None:
     )
 
     from validation.csv_exporter import CSVExporter
-    csv_dir = out_cfg.get("csv_directory", "output")
+    from validation.html_reporter import HTMLReporter
+    from validation.email_sender  import EmailSender
+
+    csv_dir     = out_cfg.get("csv_directory", "output")
+    report_cfg  = cfg.get("reporting", {})
+    reporter    = HTMLReporter(
+        run_date    = args.date,
+        config_path = args.config,
+        pipeline    = cfg.get("pipeline_name", "Strands ETL Audit"),
+    )
+
+    profile_results: list = []
+    nl_findings:     list = []
+    audit_report:    dict = {}
+    ruleset_summaries: list = []
 
     with CSVExporter(output_dir=csv_dir, run_date=args.date) as csv_exp:
 
         # ── Profile tables
         if args.profile_only or args.full:
-            run_profiling(cfg, csv_exp)
+            profile_results = run_profiling(cfg, csv_exp, run_date=args.date)
 
         # ── Auto-ruleset generation
         if args.ruleset_only or args.full:
-            run_auto_rulesets(cfg, args.date)
+            ruleset_summaries = run_auto_rulesets(cfg, args.date)
 
         # ── NL validations
         if args.nl_only or args.full:
@@ -426,8 +444,8 @@ def main() -> None:
                 _banner("STRANDS AGENT RESPONSE", "GREEN")
                 print(response)
             else:
-                report = run_direct(cfg, args.date, severity, csv_exp)
-                _print_audit_summary(report)
+                audit_report = run_direct(cfg, args.date, severity, csv_exp)
+                _print_audit_summary(audit_report)
 
             # Also run NL validations in full mode
             if args.full:
@@ -435,23 +453,46 @@ def main() -> None:
                 _print_nl_summary(nl_findings)
 
         # ── Write token usage CSV
-        for u in plogger.to_dicts():
+        token_usages = plogger.to_dicts()
+        for u in token_usages:
             csv_exp.write_token_usage(u)
+
+        # ── Build HTML report (while CSV files are still open so paths exist)
+        reporter.add_audit_report(audit_report)
+        reporter.add_profile_results(profile_results)
+        reporter.add_nl_findings(nl_findings)
+        reporter.add_token_usages(token_usages)
+        reporter.add_ruleset_summaries(ruleset_summaries)
+
+        html_path = Path(csv_dir) / f"dq_report_{args.date}.html"
+        reporter.save(str(html_path))
+        _banner("HTML REPORT", "CYAN")
+        print(f"  Report saved → {_c(str(html_path), 'GREEN')}")
+
+        # ── Email report
+        email_cfg = report_cfg.get("email", {})
+        if email_cfg.get("enabled", False):
+            _banner("SENDING EMAIL", "MAGENTA")
+            sender = EmailSender(email_cfg, aws_region=cfg["aws_region"])
+            attach_paths = (
+                [str(p) for p in Path(csv_dir).glob(f"*_{args.date}.csv")]
+                if email_cfg.get("attach_csvs", False)
+                else []
+            )
+            ok = sender.send(
+                html_body        = reporter.render(),
+                run_date         = args.date,
+                attachment_paths = attach_paths,
+            )
+            if ok:
+                print(_c(f"  Email sent to {email_cfg.get('to_addresses','')}", "GREEN"))
+            else:
+                print(_c("  Email send failed — check SES config and logs.", "RED"))
+        else:
+            print(_c("  Email disabled (set reporting.email.enabled=true to enable).", "GREY"))
 
     # ── Token + cost summary (printed after CSV closes so files are flushed)
     _print_token_summary(plogger)
-
-    # ── Future enhancement reminder
-    print(_c(
-        "\n  💡  FUTURE ENHANCEMENTS TO CONSIDER:\n"
-        "      • ML-based anomaly scoring (Isolation Forest / ADTK) for numeric columns\n"
-        "      • Cross-table referential integrity checks via config\n"
-        "      • Slack/Teams webhook alongside SNS for real-time alerts\n"
-        "      • Auto-generated Glue Data Quality ruleset from profiling baselines\n"
-        "      • Streaming mode: Kinesis → Lambda → real-time profile updates\n"
-        "      (ask me to implement any of these!)",
-        "GREY"
-    ))
 
 
 if __name__ == "__main__":

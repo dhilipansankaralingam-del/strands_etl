@@ -143,30 +143,22 @@ class AuditActionAgent:
 
     def run_for_date(self, date: str, severity_filter: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
         """
-        Fetch all FAIL records for a given date and process them.
+        Fetch all FAIL records for a given run_date and process them.
 
         Parameters
         ----------
         date : str
-            Date in YYYY-MM-DD format. Matches on failure_timestamp date part.
-        severity_filter : str, optional
-            Minimum severity to include: LOW | MEDIUM | HIGH | CRITICAL.
-            Defaults to all severities.
+            Date in YYYY-MM-DD format. Matched against the run_date column.
         limit : int
             Max records to process per run.
-
-        Example
-        -------
-            agent = AuditActionAgent(database="insurance_dw", table="audit_validation")
-            report = agent.run_for_date("2024-07-01")
-            report = agent.run_for_date("2024-07-01", severity_filter="HIGH")
+        severity_filter : unused, kept for backward compatibility.
         """
-        return self.run(date=date, severity_filter=severity_filter, limit=limit)
+        return self.run(date=date, limit=limit)
 
     def run(
         self,
         date: Optional[str] = None,
-        severity_filter: Optional[str] = None,
+        severity_filter: Optional[str] = None,   # kept for backward compat, not used
         limit: int = 100,
     ) -> Dict[str, Any]:
         """
@@ -175,13 +167,12 @@ class AuditActionAgent:
         Parameters
         ----------
         date : str, optional
-            YYYY-MM-DD date to filter failures on. Omit to fetch latest failures.
-        severity_filter : str, optional
-            Minimum severity level: LOW | MEDIUM | HIGH | CRITICAL.
+            YYYY-MM-DD matched against the run_date column in the audit table.
+            Omit to fetch today's failures.
         """
-        logger.info(f"[AuditActionAgent] Starting audit: date={date}, severity={severity_filter}")
+        logger.info(f"[AuditActionAgent] Starting audit: run_date={date}")
 
-        records = self._fetch_audit_failures(date=date, severity_filter=severity_filter, limit=limit)
+        records = self._fetch_audit_failures(date=date, limit=limit)
         if not records:
             return {"message": "No FAIL records found matching the criteria.", "total": 0}
 
@@ -645,26 +636,20 @@ class AuditActionAgent:
     def _fetch_audit_failures(
         self,
         date: Optional[str],
-        severity_filter: Optional[str],
         limit: int,
     ) -> List[ValidationRecord]:
         """
-        Simple Athena query — fetch FAIL rows for a given date from the audit table.
+        Fetch FAIL rows from the audit table for a given run_date.
 
-        date format : YYYY-MM-DD  (matched against DATE(failure_timestamp))
+        Matches on the run_date column (partition key) for efficient predicate pushdown.
+        date format: YYYY-MM-DD
         """
-        severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-
         where_clauses = ["status = 'FAIL'"]
 
         if date:
-            where_clauses.append(f"DATE(failure_timestamp) = DATE '{date}'")
-
-        if severity_filter and severity_filter in severity_rank:
-            min_rank  = severity_rank[severity_filter]
-            sev_in    = [s for s, r in severity_rank.items() if r >= min_rank]
-            sev_list  = ", ".join(f"'{s}'" for s in sev_in)
-            where_clauses.append(f"severity IN ({sev_list})")
+            where_clauses.append(f"run_date = '{date}'")
+        else:
+            where_clauses.append("run_date = CAST(CURRENT_DATE AS VARCHAR)")
 
         sql = f"""
 SELECT
@@ -681,7 +666,8 @@ SELECT
     severity,
     rule_type,
     row_count_failed,
-    total_row_count
+    total_row_count,
+    run_date
 FROM {self.audit_database}.{self.audit_table}
 WHERE {' AND '.join(where_clauses)}
 ORDER BY
