@@ -1,0 +1,450 @@
+"""
+validation/html_reporter.py
+============================
+Generates a self-contained HTML email report summarising one pipeline run.
+
+Two sections
+------------
+1. Audit Validation Findings
+   Columns: Validation | Check Type | Severity | Status | Actual Value |
+            Verdict / Explanation | Token Usage | Cost (USD)
+
+2. Data Profiling
+   Columns: Table | Column | Anomaly Type | Severity | Observed | Expected |
+            AI Explanation | Health Score
+
+Triggered at the end of every run by run_audit_analysis.py.
+Email recipients and subject are configured in config → reporting.email.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Colour palette
+# ---------------------------------------------------------------------------
+_SEV_COLOUR = {
+    "CRITICAL": "#c0392b",
+    "HIGH":     "#e67e22",
+    "MEDIUM":   "#f1c40f",
+    "LOW":      "#27ae60",
+}
+_STATUS_COLOUR = {
+    "FAIL":            "#c0392b",
+    "PASS":            "#27ae60",
+    "WARNING":         "#e67e22",
+    "INCONCLUSIVE":    "#7f8c8d",
+    "TRUE_FAILURE":    "#c0392b",
+    "FALSE_POSITIVE":  "#27ae60",
+    "NEEDS_INVESTIGATION": "#e67e22",
+    "ERROR":           "#8e44ad",
+}
+_ACTION_COLOUR = {
+    "ESCALATE":         "#c0392b",
+    "DATA_CORRECTION":  "#e67e22",
+    "FIX_LOGIC":        "#e67e22",
+    "RERUN":            "#2980b9",
+    "MONITOR":          "#f1c40f",
+    "IGNORE":           "#95a5a6",
+}
+
+
+def _h(text: Any) -> str:
+    """HTML-escape and stringify."""
+    return html.escape(str(text or ""))
+
+
+def _sev_badge(severity: str) -> str:
+    colour = _SEV_COLOUR.get(severity.upper(), "#7f8c8d")
+    return (
+        f'<span style="background:{colour};color:#fff;padding:2px 7px;'
+        f'border-radius:3px;font-size:11px;font-weight:bold;">'
+        f'{_h(severity)}</span>'
+    )
+
+
+def _status_badge(status: str) -> str:
+    colour = _STATUS_COLOUR.get(status.upper(), "#7f8c8d")
+    return (
+        f'<span style="background:{colour};color:#fff;padding:2px 7px;'
+        f'border-radius:3px;font-size:11px;font-weight:bold;">'
+        f'{_h(status)}</span>'
+    )
+
+
+def _action_badge(action: str) -> str:
+    colour = _ACTION_COLOUR.get(action.upper(), "#7f8c8d")
+    return (
+        f'<span style="background:{colour};color:#fff;padding:2px 7px;'
+        f'border-radius:3px;font-size:11px;font-weight:bold;">'
+        f'{_h(action)}</span>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTML skeleton
+# ---------------------------------------------------------------------------
+
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; font-size: 13px; color: #2c3e50;
+          margin: 0; padding: 20px; background: #f5f6fa; }}
+  h1   {{ color: #2c3e50; font-size: 20px; margin-bottom: 4px; }}
+  h2   {{ color: #34495e; font-size: 15px; border-bottom: 2px solid #3498db;
+          padding-bottom: 6px; margin-top: 28px; }}
+  .meta {{ color: #7f8c8d; font-size: 12px; margin-bottom: 20px; }}
+  .kpi-row {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }}
+  .kpi {{ background: #fff; border-radius: 6px; padding: 12px 20px;
+          box-shadow: 0 1px 4px rgba(0,0,0,.1); min-width: 110px; }}
+  .kpi-val {{ font-size: 26px; font-weight: bold; }}
+  .kpi-lbl {{ color: #7f8c8d; font-size: 11px; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff;
+           box-shadow: 0 1px 4px rgba(0,0,0,.1); border-radius: 6px;
+           overflow: hidden; margin-bottom: 24px; }}
+  th  {{ background: #2c3e50; color: #fff; padding: 9px 12px;
+         text-align: left; font-size: 12px; white-space: nowrap; }}
+  td  {{ padding: 8px 12px; border-bottom: 1px solid #ecf0f1;
+         vertical-align: top; font-size: 12px; }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:nth-child(even) td {{ background: #f9f9f9; }}
+  .mono {{ font-family: monospace; font-size: 11px; background: #ecf0f1;
+           padding: 2px 4px; border-radius: 3px; }}
+  .footer {{ color: #95a5a6; font-size: 11px; margin-top: 30px;
+             border-top: 1px solid #ddd; padding-top: 10px; }}
+  .section-empty {{ color: #95a5a6; padding: 12px; font-style: italic; }}
+</style>
+</head>
+<body>
+<h1>🔍 Strands AI — Data Quality Report</h1>
+<div class="meta">
+  Run date: <strong>{run_date}</strong> &nbsp;|&nbsp;
+  Generated: <strong>{generated_at}</strong> &nbsp;|&nbsp;
+  Pipeline: <strong>{pipeline}</strong>
+</div>
+
+{kpi_section}
+
+{audit_section}
+
+{profiling_section}
+
+{nl_section}
+
+{token_section}
+
+<div class="footer">
+  Generated by Strands AI Audit Analysis Pipeline &nbsp;|&nbsp;
+  Config: {config_path}
+</div>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# HTMLReporter
+# ---------------------------------------------------------------------------
+
+class HTMLReporter:
+    """
+    Collects data from all pipeline stages and renders a single HTML report.
+
+    Usage (inside run_audit_analysis.py):
+        reporter = HTMLReporter(run_date="2024-07-01", config_path="config/...")
+        reporter.add_audit_report(report)
+        reporter.add_profile_results(profile_results)
+        reporter.add_nl_findings(nl_findings)
+        reporter.add_token_usages(plogger.to_dicts())
+        html_str = reporter.render()
+        reporter.save("output/report_2024-07-01.html")
+    """
+
+    def __init__(
+        self,
+        run_date: str,
+        config_path: str = "config/audit_analysis_config.json",
+        pipeline: str = "Strands ETL Audit",
+    ):
+        self.run_date     = run_date
+        self.config_path  = config_path
+        self.pipeline     = pipeline
+        self._audit_report: Dict[str, Any]    = {}
+        self._profiles:     List[Any]         = []
+        self._nl_findings:  List[Any]         = []
+        self._token_usages: List[Dict]        = []
+        self._ruleset_summaries: List[Dict]   = []
+
+    def add_audit_report(self, report: Dict[str, Any]) -> None:
+        self._audit_report = report
+
+    def add_profile_results(self, results: list) -> None:
+        self._profiles = results
+
+    def add_nl_findings(self, findings: list) -> None:
+        self._nl_findings = findings
+
+    def add_token_usages(self, usages: List[Dict]) -> None:
+        self._token_usages = usages
+
+    def add_ruleset_summaries(self, summaries: List[Dict]) -> None:
+        self._ruleset_summaries = summaries
+
+    # ------------------------------------------------------------------
+    # Render
+    # ------------------------------------------------------------------
+
+    def render(self) -> str:
+        return _HTML_TEMPLATE.format(
+            title=f"DQ Report — {self.run_date}",
+            run_date=_h(self.run_date),
+            generated_at=_h(datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")),
+            pipeline=_h(self.pipeline),
+            config_path=_h(self.config_path),
+            kpi_section=self._render_kpis(),
+            audit_section=self._render_audit(),
+            profiling_section=self._render_profiling(),
+            nl_section=self._render_nl(),
+            token_section=self._render_tokens(),
+        )
+
+    def save(self, path: str) -> Path:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(self.render(), encoding="utf-8")
+        return out
+
+    # ------------------------------------------------------------------
+    # KPI bar
+    # ------------------------------------------------------------------
+
+    def _render_kpis(self) -> str:
+        total       = self._audit_report.get("total_failures", 0)
+        summary     = self._audit_report.get("summary", {})
+        dispatched  = summary.get("actions_dispatched", 0)
+        successful  = summary.get("successful_dispatches", 0)
+        profile_cnt = len(self._profiles)
+        anomaly_cnt = sum(len(getattr(p, "anomalies", [])) for p in self._profiles)
+        nl_cnt      = len(self._nl_findings)
+        nl_fail     = sum(1 for f in self._nl_findings if getattr(f, "verdict", "") == "FAIL")
+        total_cost  = sum(float(u.get("cost_usd", 0)) for u in self._token_usages)
+
+        def kpi(val, lbl, colour="#2c3e50"):
+            return (
+                f'<div class="kpi"><div class="kpi-val" style="color:{colour}">'
+                f'{_h(val)}</div><div class="kpi-lbl">{_h(lbl)}</div></div>'
+            )
+
+        kpis = "".join([
+            kpi(total,        "Audit Failures",       "#c0392b" if total else "#27ae60"),
+            kpi(dispatched,   "Actions Dispatched",   "#2980b9"),
+            kpi(successful,   "Successful Dispatches","#27ae60"),
+            kpi(profile_cnt,  "Tables Profiled",      "#8e44ad"),
+            kpi(anomaly_cnt,  "Profiling Anomalies",  "#e67e22" if anomaly_cnt else "#27ae60"),
+            kpi(nl_cnt,       "NL Validations",       "#16a085"),
+            kpi(nl_fail,      "NL FAILs",             "#c0392b" if nl_fail else "#27ae60"),
+            kpi(f"${total_cost:.4f}", "Total AI Cost","#7f8c8d"),
+        ])
+        return f'<div class="kpi-row">{kpis}</div>'
+
+    # ------------------------------------------------------------------
+    # Audit findings table
+    # ------------------------------------------------------------------
+
+    def _render_audit(self) -> str:
+        actions = self._audit_report.get("actions_taken", [])
+        header = "<h2>🚨 Audit Validation Findings</h2>"
+        if not actions:
+            return header + '<p class="section-empty">No FAIL records found for this run date.</p>'
+
+        cols = [
+            "Validation (Rule)", "Check Type", "Table / Column",
+            "Severity", "AI Classification", "Action Taken",
+            "Actual Value", "Verdict / Explanation",
+            "Token Usage", "Cost (USD)",
+        ]
+        th = "".join(f"<th>{c}</th>" for c in cols)
+        rows_html = ""
+        for a in actions:
+            token_in  = a.get("input_tokens", 0) or 0
+            token_out = a.get("output_tokens", 0) or 0
+            cost      = float(a.get("cost_usd", 0) or 0)
+            col_name  = a.get("column_name", "") or ""
+            table     = a.get("table_name", "") or ""
+            rows_html += (
+                "<tr>"
+                f"<td><span class='mono'>{_h(a.get('rule_name',''))}</span></td>"
+                f"<td>{_h(a.get('rule_type',''))}</td>"
+                f"<td>{_h(table)}"
+                + (f"<br><small style='color:#7f8c8d'>{_h(col_name)}</small>" if col_name else "")
+                + f"</td>"
+                f"<td>{_sev_badge(a.get('severity',''))}</td>"
+                f"<td>{_status_badge(a.get('classification',''))}</td>"
+                f"<td>{_action_badge(a.get('action_taken',''))}</td>"
+                f"<td><span class='mono'>{_h(str(a.get('failed_value',''))[:80])}</span></td>"
+                f"<td>{_h(str(a.get('explanation',''))[:200])}</td>"
+                f"<td style='white-space:nowrap'>↑{token_in:,} ↓{token_out:,}</td>"
+                f"<td style='white-space:nowrap'>${cost:.5f}</td>"
+                "</tr>"
+            )
+
+        sev = self._audit_report.get("summary", {}).get("severity_breakdown", {})
+        sev_pills = " ".join(
+            f'{_sev_badge(s)}&nbsp;<strong>{c}</strong>'
+            for s, c in sev.items()
+        )
+
+        return (
+            header
+            + (f'<p style="font-size:12px;color:#7f8c8d">Severity breakdown: {sev_pills}</p>' if sev else "")
+            + f"<table><thead><tr>{th}</tr></thead><tbody>{rows_html}</tbody></table>"
+        )
+
+    # ------------------------------------------------------------------
+    # Data profiling table
+    # ------------------------------------------------------------------
+
+    def _render_profiling(self) -> str:
+        header = "<h2>📊 Data Profiling Results</h2>"
+        if not self._profiles:
+            return header + '<p class="section-empty">No tables profiled in this run.</p>'
+
+        cols = [
+            "Table", "Column", "Anomaly Type", "Severity",
+            "Observed Value", "Expected Range",
+            "AI Explanation", "Health Score",
+        ]
+        th = "".join(f"<th>{c}</th>" for c in cols)
+        rows_html = ""
+
+        for result in self._profiles:
+            table_full = f"{getattr(result,'database_name','')}.{getattr(result,'table_name','')}"
+            score      = getattr(result, "data_health_score", 100)
+            score_col  = "#c0392b" if score < 40 else ("#e67e22" if score < 70 else "#27ae60")
+            score_cell = f'<strong style="color:{score_col}">{score}/100</strong>'
+
+            anomalies = getattr(result, "anomalies", [])
+            if not anomalies:
+                rows_html += (
+                    "<tr>"
+                    f"<td>{_h(table_full)}</td>"
+                    f"<td colspan='6' style='color:#27ae60'>✓ No anomalies detected</td>"
+                    f"<td>{score_cell}</td>"
+                    "</tr>"
+                )
+            else:
+                first = True
+                for a in anomalies:
+                    rows_html += (
+                        "<tr>"
+                        + (f"<td rowspan='{len(anomalies)}'>{_h(table_full)}</td>" if first else "")
+                        + f"<td>{_h(getattr(a,'column_name','') or '[table]')}</td>"
+                        f"<td><span class='mono'>{_h(getattr(a,'anomaly_type',{}).value if hasattr(getattr(a,'anomaly_type',''),'value') else str(getattr(a,'anomaly_type','')))}</span></td>"
+                        f"<td>{_sev_badge(getattr(a,'severity',{}).value if hasattr(getattr(a,'severity',''),'value') else str(getattr(a,'severity','')))}</td>"
+                        f"<td><span class='mono'>{_h(str(getattr(a,'observed_value',''))[:80])}</span></td>"
+                        f"<td>{_h(str(getattr(a,'expected_range',''))[:80])}</td>"
+                        f"<td>{_h(str(getattr(a,'ai_explanation','') or getattr(a,'description',''))[:200])}</td>"
+                        + (f"<td rowspan='{len(anomalies)}'>{score_cell}</td>" if first else "")
+                        + "</tr>"
+                    )
+                    first = False
+
+        return header + f"<table><thead><tr>{th}</tr></thead><tbody>{rows_html}</tbody></table>"
+
+    # ------------------------------------------------------------------
+    # NL validations table
+    # ------------------------------------------------------------------
+
+    def _render_nl(self) -> str:
+        header = "<h2>💬 Natural Language Validations</h2>"
+        if not self._nl_findings:
+            return header + '<p class="section-empty">No NL validations configured.</p>'
+
+        cols = [
+            "Table", "Query", "SQL Generated",
+            "Verdict", "Confidence", "Rows Returned",
+            "Explanation", "Token Usage", "Cost (USD)",
+        ]
+        th = "".join(f"<th>{c}</th>" for c in cols)
+        rows_html = ""
+
+        for f in self._nl_findings:
+            row = f.to_csv_row() if hasattr(f, "to_csv_row") else (f if isinstance(f, dict) else {})
+            token_in  = int(row.get("input_tokens", 0) or 0)
+            token_out = int(row.get("output_tokens", 0) or 0)
+            cost      = float(row.get("cost_usd", 0) or 0)
+            sql_snip  = str(row.get("sql_generated", ""))[:120]
+            rows_html += (
+                "<tr>"
+                f"<td>{_h(row.get('table',''))}</td>"
+                f"<td>{_h(str(row.get('nl_query',''))[:120])}</td>"
+                f"<td><span class='mono'>{_h(sql_snip)}</span></td>"
+                f"<td>{_status_badge(row.get('verdict',''))}</td>"
+                f"<td>{_h(row.get('confidence',''))}</td>"
+                f"<td>{_h(row.get('row_count',''))}</td>"
+                f"<td>{_h(str(row.get('explanation',''))[:200])}</td>"
+                f"<td style='white-space:nowrap'>↑{token_in:,} ↓{token_out:,}</td>"
+                f"<td style='white-space:nowrap'>${cost:.5f}</td>"
+                "</tr>"
+            )
+
+        return header + f"<table><thead><tr>{th}</tr></thead><tbody>{rows_html}</tbody></table>"
+
+    # ------------------------------------------------------------------
+    # Token usage summary table
+    # ------------------------------------------------------------------
+
+    def _render_tokens(self) -> str:
+        header = "<h2>🪙 AI Token Usage &amp; Cost</h2>"
+        if not self._token_usages:
+            return header + '<p class="section-empty">No token usage recorded.</p>'
+
+        cols = [
+            "Agent Type", "Table", "Input Tokens",
+            "Output Tokens", "Total Tokens", "Cost (USD)", "Timestamp",
+        ]
+        th = "".join(f"<th>{c}</th>" for c in cols)
+        rows_html = ""
+        total_in = total_out = total_cost = 0
+
+        for u in self._token_usages:
+            tin  = int(u.get("input_tokens", 0) or 0)
+            tout = int(u.get("output_tokens", 0) or 0)
+            cost = float(u.get("cost_usd", 0) or 0)
+            total_in   += tin
+            total_out  += tout
+            total_cost += cost
+            rows_html += (
+                "<tr>"
+                f"<td>{_h(u.get('agent_type',''))}</td>"
+                f"<td>{_h(u.get('table_name',''))}</td>"
+                f"<td style='text-align:right'>{tin:,}</td>"
+                f"<td style='text-align:right'>{tout:,}</td>"
+                f"<td style='text-align:right'>{tin+tout:,}</td>"
+                f"<td style='text-align:right'>${cost:.5f}</td>"
+                f"<td>{_h(u.get('timestamp',''))}</td>"
+                "</tr>"
+            )
+
+        rows_html += (
+            "<tr style='font-weight:bold;background:#ecf0f1'>"
+            "<td colspan='2'>TOTAL</td>"
+            f"<td style='text-align:right'>{total_in:,}</td>"
+            f"<td style='text-align:right'>{total_out:,}</td>"
+            f"<td style='text-align:right'>{total_in+total_out:,}</td>"
+            f"<td style='text-align:right'>${total_cost:.5f}</td>"
+            "<td></td></tr>"
+        )
+
+        return header + f"<table><thead><tr>{th}</tr></thead><tbody>{rows_html}</tbody></table>"
