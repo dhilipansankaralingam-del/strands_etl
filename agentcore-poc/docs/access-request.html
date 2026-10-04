@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+<title>AgentCore Access Request</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#EDF1F5; --surface:#FFFFFF; --surface-2:#F6F8FA;
+    --ink:#0C1520; --ink-2:#324055; --muted:#65758A;
+    --line:#D2DAE4; --line-soft:#E4EAF1;
+    --accent:#0B6E6E; --accent-ink:#075151; --accent-wash:#DDF0EE;
+    --ok:#0E7A42; --warn:#9A5B00; --danger:#B42318; --off:#8FA0B4;
+    --shadow:0 1px 2px rgba(12,21,32,.06),0 8px 24px rgba(12,21,32,.06);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+      --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+      --line:#27333F; --line-soft:#1F2932;
+      --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+      --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --off:#63768C;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+    --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+    --line:#27333F; --line-soft:#1F2932;
+    --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+    --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --off:#63768C;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding-inline:16px;padding-block:28px 64px}
+  h1,h2,h3{text-wrap:balance;margin:0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:5px;padding:1px 5px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  h1{font-size:clamp(27px,5vw,38px);font-weight:600;letter-spacing:-.02em;line-height:1.12}
+  .lede{color:var(--ink-2);max-width:66ch;margin-top:12px;font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:var(--ink-2)}
+  .chip b{color:var(--ink);font-weight:600}
+  section.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:18px;box-shadow:var(--shadow)}
+  section.card h2{font-size:19px;font-weight:600;margin-bottom:4px}
+  .sub{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:12px}
+  .card p, .card li{color:var(--ink-2)}
+  .card p{margin:10px 0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:12px 0}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-2)}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  td:first-child{color:var(--ink);font-weight:500}
+  .tablewrap{overflow-x:auto}
+  .tag{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:999px;white-space:nowrap;display:inline-block}
+  .in{background:var(--accent-wash);color:var(--accent-ink);border:1px solid var(--accent)}
+  .out{background:transparent;color:var(--off);border:1px solid var(--line)}
+  .later{background:transparent;color:var(--warn);border:1px solid var(--warn)}
+  blockquote{margin:0;padding:16px 18px;background:var(--surface-2);border-left:3px solid var(--accent);border-radius:8px;color:var(--ink-2);font-size:14.5px}
+  blockquote p{margin:9px 0}
+  blockquote p:first-child{margin-top:0} blockquote p:last-child{margin-bottom:0}
+  blockquote strong{color:var(--ink)}
+  .note{display:flex;gap:9px;margin-top:12px;padding:11px 13px;border:1px dashed var(--line);border-radius:9px;background:var(--surface-2);font-size:14px;color:var(--ink-2)}
+  .note b{color:var(--accent)}
+  footer{margin-top:28px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">Access request · Bedrock AgentCore · us-east-1</div>
+  <h1>AgentCore Access Request</h1>
+  <p class="lede">What our agent service uses, what it doesn't, and the three things only an administrator can switch on. Written so it can be forwarded as-is.</p>
+  <div class="chips">
+    <span class="chip">Region <b>us-east-1</b></span>
+    <span class="chip"><b>3</b> admin actions</span>
+    <span class="chip"><b>2</b> service roles created</span>
+    <span class="chip">Data stays <b>in-account</b></span>
+  </div>
+</header>
+
+<section class="card">
+  <h2>What we're deploying, in four lines</h2>
+  <p>An internal service that answers staff questions by researching our documentation and drafting a written brief, with an automated quality check before the answer is returned. It runs on <strong>Amazon Bedrock AgentCore Runtime</strong> — a managed AWS service that executes our Python code in an isolated micro-VM per user session — and calls <strong>Anthropic Claude via Amazon Bedrock</strong>.</p>
+  <p>No third-party SaaS. No data leaves the AWS account or the region. Users reach it through an HTTP API behind a JWT authorizer; no caller holds AWS credentials.</p>
+</section>
+
+<section class="card">
+  <h2>AgentCore components — what we use and what we don't</h2>
+  <div class="sub">AgentCore is a family of services. Scoping the approval to the three we actually use is the point of this table.</div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Component</th><th>Status</th><th>What it does for us</th></tr>
+    <tr><td>Runtime</td><td><span class="tag in">In use</span></td><td>Hosts the agent. One isolated micro-VM per session, sessions up to 8 hours, billed on active compute.</td></tr>
+    <tr><td>Memory</td><td><span class="tag in">In use</span></td><td>Conversation turns plus extracted user preferences, so the service improves per person. 30-day expiry.</td></tr>
+    <tr><td>Observability</td><td><span class="tag in">In use</span></td><td>OpenTelemetry traces and metrics into CloudWatch — one span per agent step.</td></tr>
+    <tr><td>Evaluations</td><td><span class="tag in">In use</span></td><td>Scores agent output against a test set before release, and samples live traffic for quality drift.</td></tr>
+    <tr><td>Gateway</td><td><span class="tag later">Likely next</span></td><td>Turns internal APIs into agent tools. We'll need it when connecting real data sources.</td></tr>
+    <tr><td>Identity</td><td><span class="tag out">Not used</span></td><td>Outbound auth to third-party services on a user's behalf.</td></tr>
+    <tr><td>Browser / Code Interpreter</td><td><span class="tag out">Not used</span></td><td>Sandboxed web browsing and code execution.</td></tr>
+    <tr><td>Harness</td><td><span class="tag out">Not used</span></td><td>A no-code alternative to Runtime: you declare model, tools and instructions and AWS supplies the agent loop. We write our own code, so we use Runtime instead. Nothing to enable for it.</td></tr>
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>The three things only an admin can do</h2>
+  <div class="sub">Everything else is ordinary IAM. These are account-level and one-time.</div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Action</th><th>Where</th><th>Why it's needed</th></tr>
+    <tr><td>Enable <strong>Claude Sonnet</strong> in Bedrock model access</td><td>Console → Bedrock → Model access, us-east-1</td><td>Foundation models are opt-in per account <em>and</em> region. Nothing runs until this is granted — no IAM policy overrides it.</td></tr>
+    <tr><td>Enable <strong>CloudWatch Transaction Search</strong></td><td>Console → CloudWatch → Application Signals → Transaction Search</td><td>Turns agent traces into searchable span data. Without it, monitoring and quality evaluation are both blind, and the failure is silent. Needs <code>xray:UpdateTraceSegmentDestination</code>, <code>xray:UpdateIndexingRule</code>, <code>logs:PutResourcePolicy</code>.</td></tr>
+    <tr><td><strong>Bedrock quota increase</strong> — tokens per minute, Claude Sonnet</td><td>Service Quotas</td><td>One user request makes five model calls in quick succession. Default quotas throttle sooner than expected.</td></tr>
+  </table>
+  </div>
+  <div class="note"><b>!</b><div>Transaction Search is the one that catches people out. It reports success while silently doing nothing if the CloudWatch Logs resource policy is missing — we lost a day to exactly that.</div></div>
+</section>
+
+<section class="card">
+  <h2>Permissions for the deployment role</h2>
+  <div class="sub">For our team, or the CI pipeline that deploys on our behalf</div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Service</th><th>Actions</th><th>Scope</th></tr>
+    <tr><td><code>bedrock-agentcore-control</code></td><td>Create / Update / Get / List / Delete on AgentRuntime, AgentRuntimeEndpoint, Memory, Evaluator, OnlineEvaluationConfig</td><td>Account</td></tr>
+    <tr><td><code>bedrock-agentcore</code></td><td><code>InvokeAgentRuntime</code>, <code>Evaluate</code>, memory data operations</td><td>Our runtime and memory ARNs</td></tr>
+    <tr><td><code>iam</code></td><td><code>CreateRole</code>, <code>PutRolePolicy</code>, <code>PassRole</code>, <code>UpdateAssumeRolePolicy</code></td><td><strong>Restrict to role names prefixed <code>multiagent-poc-*</code></strong> — this is the sensitive grant, and a name boundary is the right control</td></tr>
+    <tr><td><code>s3</code></td><td>Create bucket, Put / Get object</td><td><code>bedrock-agentcore-code-&lt;account&gt;-&lt;region&gt;</code> and the results bucket</td></tr>
+    <tr><td><code>logs</code>, <code>cloudwatch</code>, <code>xray</code></td><td>Log groups, <code>PutDashboard</code>, <code>PutMetricAlarm</code>, <code>PutMetricData</code></td><td><code>/aws/bedrock-agentcore/*</code>, our metrics namespace</td></tr>
+    <tr><td><code>cloudformation</code>, <code>lambda</code>, <code>apigateway</code>, <code>sqs</code>, <code>dynamodb</code>, <code>sns</code></td><td>Standard serverless deployment</td><td>Our stack only</td></tr>
+    <tr><td><code>cognito-idp</code></td><td>User pool management</td><td>Only if we manage the pool rather than federating to the corporate IdP</td></tr>
+    <tr><td><code>ecr</code></td><td>Push / pull images</td><td>Not required — we deploy code from S3, not containers</td></tr>
+  </table>
+  </div>
+  <p>If the account uses service control policies, these same namespaces need to be allowed: <code>bedrock</code>, <code>bedrock-agentcore</code>, <code>bedrock-agentcore-control</code>, plus the standard ones above.</p>
+</section>
+
+<section class="card">
+  <h2>The two roles the deployment creates</h2>
+  <div class="sub">The agent runs as these — worth reviewing, since they define what it can reach</div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Role</th><th>Can do</th><th>Cannot do</th></tr>
+    <tr><td>Runtime execution role</td><td>Read our deployment package from S3, invoke Bedrock models, read and write our AgentCore Memory, write logs, traces and metrics</td><td>Reach any other account resource. No data store, no network beyond AWS APIs.</td></tr>
+    <tr><td>Evaluations role</td><td>Read trace data from CloudWatch Logs, call a judge model</td><td>Invoke the agent, or touch memory</td></tr>
+  </table>
+  </div>
+  <p>Both are trusted by the <code>bedrock-agentcore.amazonaws.com</code> service principal only — never by a user — with <code>aws:SourceAccount</code> and <code>aws:SourceArn</code> conditions guarding against the confused-deputy problem.</p>
+</section>
+
+<section class="card">
+  <h2>The message to send</h2>
+  <div class="sub">Short version, if the tables are the attachment</div>
+  <blockquote>
+    <p><strong>Subject: Access request — agent service on Bedrock AgentCore (us-east-1)</strong></p>
+    <p>We're moving an internal AI agent service from prototype to production. It runs on Amazon Bedrock AgentCore Runtime with Claude via Bedrock — managed AWS services, no third-party SaaS, no data leaving our account or region. Users reach it through an authenticated HTTP API; no caller holds AWS credentials.</p>
+    <p>Three things need an administrator:</p>
+    <p>1. Enable Claude Sonnet in Bedrock model access (us-east-1)<br>
+       2. Enable CloudWatch Transaction Search — this is what makes agent traces searchable, and monitoring and quality evaluation both depend on it<br>
+       3. A quota increase for Claude Sonnet tokens/minute</p>
+    <p>Plus a deployment role for our team — the specific permissions are in the attached table. The one grant worth your attention is <code>iam:CreateRole</code> and <code>iam:PassRole</code>, which we've scoped to role names prefixed <code>multiagent-poc-*</code>; the deployment creates two service roles, both trusted only by the AgentCore service principal with source-account conditions.</p>
+    <p>Spend is bounded by Lambda reserved concurrency (10 parallel sessions) and API throttling. A Budgets alert on Bedrock spend would be welcome. Happy to walk through any of it.</p>
+  </blockquote>
+</section>
+
+<section class="card">
+  <h2>The two questions they'll ask</h2>
+  <p><strong>Does data leave AWS?</strong> No. Bedrock runs in-account and in-region; the model is called through an AWS API, not an external endpoint. Prompts and generated text are stored in CloudWatch Logs, AgentCore Memory (30-day expiry) and an encrypted S3 bucket (90-day lifecycle) — all under our account's existing controls.</p>
+  <p><strong>Can it run up an unbounded bill?</strong> No. Worker concurrency caps parallel agent sessions at 10, the API is throttled at 10 requests per second, and runtime billing is on active compute rather than uptime — an idle session costs almost nothing. A Budgets alert on Bedrock is a sensible addition.</p>
+  <p>If they'd prefer a dedicated AWS account for this rather than a shared one, the answer is yes — it's the cleanest blast-radius and cost boundary, and nothing in the setup assumes otherwise.</p>
+</section>
+
+<footer>
+  Prepared for the production deployment of <code>research_orchestrator</code> on AgentCore Runtime · us-east-1
+</footer>
+</div>
+
+</body>
+</html>

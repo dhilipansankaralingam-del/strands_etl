@@ -1,0 +1,19 @@
+# Deployment state — contains account-specific resource IDs
+deploy/state.json
+
+# Build output
+build/
+*.zip
+
+# Eval results may contain prompts and generated content
+eval/results/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# SAM
+production/.aws-sam/
+samconfig.toml

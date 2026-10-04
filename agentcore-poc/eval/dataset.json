@@ -1,0 +1,52 @@
+[
+  {
+    "id": "memory-basics",
+    "prompt": "Write a short report (under 300 words) explaining AgentCore Memory for backend engineers.",
+    "assertions": [
+      "The response explains both short-term and long-term memory.",
+      "The response mentions at least one long-term memory strategy such as semantic, summary or user preference.",
+      "The response is a structured report with headings and a sources section."
+    ],
+    "expected_trajectory": ["researcher", "writer", "reviewer"],
+    "must_contain": ["short-term", "long-term"],
+    "max_words": 380
+  },
+  {
+    "id": "observability",
+    "prompt": "Create a brief report for an SRE team on how to observe AI agents running on AgentCore.",
+    "assertions": [
+      "The response mentions CloudWatch and OpenTelemetry.",
+      "The response mentions enabling Transaction Search or tracing.",
+      "The response cites sources from the knowledge base."
+    ],
+    "expected_trajectory": ["researcher", "writer", "reviewer"],
+    "must_contain": ["CloudWatch"],
+    "max_words": 600
+  },
+  {
+    "id": "multiagent-patterns",
+    "prompt": "Compare multi-agent patterns (agents-as-tools, graph, swarm) for a product manager in under 250 words.",
+    "assertions": [
+      "The response compares at least three multi-agent patterns.",
+      "The response is written for a non-technical product manager audience.",
+      "The response stays under roughly 250 words."
+    ],
+    "expected_trajectory": ["researcher", "writer", "reviewer"],
+    "must_contain": ["swarm", "graph"],
+    "max_words": 320
+  },
+  {
+    "id": "memory-preference-recall",
+    "setup_turns": ["For every report you write for me: I am a CFO, use plain language with no technical jargon, and keep it under 150 words."],
+    "wait_seconds_after_setup": 90,
+    "new_session": true,
+    "prompt": "Write me a report on what AgentCore Runtime is.",
+    "assertions": [
+      "The response is written in plain, non-technical language suitable for a CFO.",
+      "The response is short (roughly 150 words or fewer)."
+    ],
+    "expected_trajectory": ["researcher", "writer", "reviewer"],
+    "must_contain": ["Runtime"],
+    "max_words": 220
+  }
+]

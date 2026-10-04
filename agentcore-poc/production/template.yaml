@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Production front door for the multi-agent brief service.
+  Client -> HTTP API (JWT auth) -> submit Lambda -> SQS -> worker Lambda -> AgentCore Runtime.
+  The API answers in milliseconds; the worker owns the slow agent call.
+
+Parameters:
+  AgentRuntimeArn:
+    Type: String
+    Description: From deploy/state.json (agent_runtime_arn)
+  AgentEndpoint:
+    Type: String
+    Default: DEFAULT
+    Description: Runtime endpoint/qualifier - point at a prod endpoint for blue-green
+  UserPoolId:
+    Type: String
+    Description: Cognito user pool that issues caller tokens
+  UserPoolClientId:
+    Type: String
+  NotifyEmail:
+    Type: String
+    Default: ''
+    Description: Optional - subscribes this address to completion notices
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotifyEmail, '']]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    MemorySize: 512
+    Tracing: Active                 # X-Ray, so the Lambda hop joins the agent trace
+    Environment:
+      Variables:
+        JOBS_TABLE: !Ref JobsTable
+        POWERTOOLS_SERVICE_NAME: brief-service
+
+Resources:
+
+  JobsTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey: {Name: job_id, Type: String}
+      SSESpecification: {SSEEnabled: true}
+      # Jobs delete themselves via the expires_at attribute written by the submit Lambda
+      TableName: !Sub '${AWS::StackName}-jobs'
+
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-briefs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  BriefQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # Must exceed the worker's timeout, or SQS hands the same job to a second worker
+      VisibilityTimeout: 960
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BriefDLQ.Arn
+        maxReceiveCount: 3
+
+  BriefDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600   # 14 days to inspect what failed
+
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+
+  NotifySubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      Protocol: email
+      Endpoint: !Ref NotifyEmail
+      TopicArn: !Ref NotifyTopic
+
+  BriefApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}'
+              audience: [!Ref UserPoolClientId]
+      # Cheap insurance against one client hammering the agent
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  SubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: lambda_submit.handler
+      Timeout: 10
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref BriefQueue
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref JobsTable}
+        - SQSSendMessagePolicy: {QueueName: !GetAtt BriefQueue.QueueName}
+      Events:
+        Submit:
+          Type: HttpApi
+          Properties: {ApiId: !Ref BriefApi, Path: /briefs, Method: POST}
+
+  StatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: lambda_submit.get_handler
+      Timeout: 10
+      Policies:
+        - DynamoDBReadPolicy: {TableName: !Ref JobsTable}
+      Events:
+        Status:
+          Type: HttpApi
+          Properties: {ApiId: !Ref BriefApi, Path: '/briefs/{job_id}', Method: GET}
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: lambda_worker.handler
+      Timeout: 900                   # the agent call is the slow part
+      ReservedConcurrentExecutions: 10   # a ceiling on parallel agent sessions = cost control
+      Environment:
+        Variables:
+          AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          AGENT_ENDPOINT: !Ref AgentEndpoint
+          RESULT_BUCKET: !Ref ResultsBucket
+          NOTIFY_TOPIC_ARN: !Ref NotifyTopic
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref JobsTable}
+        - S3WritePolicy: {BucketName: !Ref ResultsBucket}
+        - SNSPublishMessagePolicy: {TopicName: !GetAtt NotifyTopic.TopicName}
+        - Statement:
+            - Effect: Allow
+              Action: [bedrock-agentcore:InvokeAgentRuntime]
+              Resource:
+                - !Ref AgentRuntimeArn
+                - !Sub '${AgentRuntimeArn}/runtime-endpoint/*'
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BriefQueue.Arn
+            BatchSize: 1             # one brief per invocation; no partial-batch headaches
+            ScalingConfig: {MaximumConcurrency: 10}
+
+  # Optional: a standing 07:00 UTC weekday brief, same agent, no human in the loop
+  ScheduledBrief:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: lambda_worker.handler
+      Timeout: 900
+      Environment:
+        Variables:
+          AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          AGENT_ENDPOINT: !Ref AgentEndpoint
+          RESULT_BUCKET: !Ref ResultsBucket
+          NOTIFY_TOPIC_ARN: !Ref NotifyTopic
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref JobsTable}
+        - S3WritePolicy: {BucketName: !Ref ResultsBucket}
+        - SNSPublishMessagePolicy: {TopicName: !GetAtt NotifyTopic.TopicName}
+        - Statement:
+            - Effect: Allow
+              Action: [bedrock-agentcore:InvokeAgentRuntime]
+              Resource:
+                - !Ref AgentRuntimeArn
+                - !Sub '${AgentRuntimeArn}/runtime-endpoint/*'
+      Events:
+        Weekday0700:
+          Type: Schedule
+          Properties:
+            Schedule: 'cron(0 7 ? * MON-FRI *)'
+            Enabled: false           # flip to true when you want it
+            Input: >-
+              {"Records":[{"body":"{\"job_id\":\"scheduled\",\"user_id\":\"scheduler\",
+              \"session_id\":\"scheduled-daily-brief-session-000000\",
+              \"prompt\":\"Write today's market brief for the sales team.\"}"}]}
+
+  # Quality alarm: the reviewer's average score falling is the earliest signal
+  # that a prompt or model change has degraded output.
+  ReviewScoreAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average reviewer score dropped below 7
+      Namespace: AgentCoreMultiAgentPOC
+      MetricName: ReviewScore
+      Dimensions:
+        - {Name: Service, Value: research_orchestrator}
+      Statistic: Average
+      Period: 900
+      EvaluationPeriods: 2
+      Threshold: 7
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref NotifyTopic]
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Briefs are landing in the dead-letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - {Name: QueueName, Value: !GetAtt BriefDLQ.QueueName}
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref NotifyTopic]
+
+Outputs:
+  ApiUrl:
+    Description: POST /briefs here with a Cognito ID token
+    Value: !Sub 'https://${BriefApi}.execute-api.${AWS::Region}.amazonaws.com'
+  ResultsBucketName:
+    Value: !Ref ResultsBucket
+  DeadLetterQueue:
+    Value: !Ref BriefDLQ

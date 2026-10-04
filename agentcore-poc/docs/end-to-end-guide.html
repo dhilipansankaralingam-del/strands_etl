@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+<title>AgentCore End-to-End Guide</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#EDF1F5; --surface:#FFFFFF; --surface-2:#F6F8FA;
+    --ink:#0C1520; --ink-2:#324055; --muted:#65758A;
+    --line:#D2DAE4; --line-soft:#E4EAF1;
+    --accent:#0B6E6E; --accent-ink:#075151; --accent-wash:#DDF0EE;
+    --ok:#0E7A42; --warn:#9A5B00; --danger:#B42318; --wire:#8FA0B4; --wire-fill:#EDF1F5;
+    --shadow:0 1px 2px rgba(12,21,32,.06),0 8px 24px rgba(12,21,32,.06);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+      --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+      --line:#27333F; --line-soft:#1F2932;
+      --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+      --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --wire:#63768C; --wire-fill:#101820;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+    --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+    --line:#27333F; --line-soft:#1F2932;
+    --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+    --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --wire:#63768C; --wire-fill:#101820;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1140px;margin:0 auto;padding-inline:16px;padding-block:28px 64px}
+  h1,h2,h3{text-wrap:balance;margin:0}
+  a{color:var(--accent-ink);text-underline-offset:3px}
+  code{font-family:var(--mono);font-size:.87em;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:5px;padding:1px 5px}
+
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  h1{font-size:clamp(28px,5vw,40px);font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  .lede{color:var(--ink-2);max-width:68ch;margin-top:12px;font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:var(--ink-2)}
+  .chip b{color:var(--ink);font-weight:600}
+
+  .cols{display:grid;grid-template-columns:200px minmax(0,1fr);gap:38px;align-items:start}
+  .cols main{min-width:0}
+  @media (max-width:880px){ .cols{grid-template-columns:minmax(0,1fr);gap:20px} }
+  nav.rail{position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px);border-left:1px solid var(--line);padding-left:14px}
+  @media (max-width:880px){ nav.rail{position:static;border-left:0;border-top:1px solid var(--line);padding-left:0;padding-top:14px} }
+  .rail-title{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:14px 0 8px}
+  .rail-title:first-child{margin-top:0}
+  .rail a{display:flex;gap:9px;align-items:baseline;text-decoration:none;color:var(--ink-2);font-size:13.5px;padding:3px 0}
+  .rail a:hover{color:var(--accent-ink)}
+  .rail a span{font-family:var(--mono);font-size:11.5px;color:var(--muted);min-width:20px}
+
+  .phase{margin:30px 0 14px;display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .phase span{font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+  .phase h2{font-size:22px;font-weight:600;letter-spacing:-.01em}
+
+  section.step{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:18px;box-shadow:var(--shadow);scroll-margin-top:20px}
+  .step-head{display:flex;gap:13px;align-items:flex-start;margin-bottom:4px}
+  .num{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--accent);background:var(--accent-wash);border-radius:7px;min-width:36px;height:29px;display:grid;place-items:center;flex:none}
+  .step h3{font-size:18px;font-weight:600;letter-spacing:-.01em}
+  .where{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:3px}
+  .step p, .step li{color:var(--ink-2)}
+  .step p{margin:10px 0}
+  ol.doit,ul.plain{margin:10px 0 4px;padding-left:20px}
+  ol.doit li,ul.plain li{margin:6px 0}
+
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.6;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:9px;padding:13px 14px;overflow-x:auto;margin:12px 0}
+  pre .p{color:var(--accent)}pre .c{color:var(--muted)}pre .o{color:var(--ink-2)}pre .ok{color:var(--ok)}
+  .term{background:#0C1520;border-color:#0C1520;color:#D6E2EE}
+  .term .p{color:#49BFB2}.term .c{color:#7E8FA3}.term .o{color:#B9C8D8}.term .ok{color:#5FCE8E}
+
+  svg text{font-family:var(--sans)}
+  svg [font-family*="--mono"]{font-family:var(--mono)}
+  svg [fill="var(--muted)"]{fill:var(--muted)} svg [stroke="var(--muted)"]{stroke:var(--muted)}
+  svg [fill="var(--ink-2)"]{fill:var(--ink-2)}
+  svg [fill="var(--accent)"]{fill:var(--accent)} svg [stroke="var(--accent)"]{stroke:var(--accent)}
+  svg [fill="var(--accent-wash)"]{fill:var(--accent-wash)}
+  svg [fill="var(--surface)"]{fill:var(--surface)} svg [fill="var(--surface-2)"]{fill:var(--surface-2)}
+  svg [stroke="var(--line)"]{stroke:var(--line)} svg [fill="var(--line)"]{fill:var(--line)}
+  svg [fill="var(--ok)"]{fill:var(--ok)} svg [stroke="var(--ok)"]{stroke:var(--ok)}
+  svg [fill="var(--danger)"]{fill:var(--danger)} svg [stroke="var(--danger)"]{stroke:var(--danger)}
+  svg [fill="var(--warn)"]{fill:var(--warn)} svg [fill="var(--wire)"]{fill:var(--wire)}
+
+  figure{margin:18px 0 6px}
+  figure svg{display:block;width:100%;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  figcaption{font-size:12.5px;color:var(--muted);margin-top:8px;font-family:var(--mono)}
+
+  .check{display:flex;gap:9px;align-items:flex-start;margin-top:13px;padding:11px 13px;border:1px dashed var(--line);border-radius:9px;background:var(--surface-2);font-size:14px;color:var(--ink-2)}
+  .check b{color:var(--ok)}
+  .warnbox{border-left:3px solid var(--warn)} .warnbox b{color:var(--warn)}
+  .dangerbox{border-left:3px solid var(--danger)} .dangerbox b{color:var(--danger)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:13px 0}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-2)}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  .tablewrap{overflow-x:auto}
+  footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">research_orchestrator · Bedrock AgentCore · us-east-1</div>
+  <h1>AgentCore End-to-End Guide</h1>
+  <p class="lede">Two phases: get the agent running, then make it something real users can depend on. Every step has the command, what you should see, and the one check that proves it worked. The warnings are the ones that actually bit us during this build, not hypotheticals.</p>
+  <div class="chips">
+    <span class="chip">Phase 1 <b>~40 min</b></span>
+    <span class="chip">Phase 2 <b>~1 day</b></span>
+    <span class="chip">Runs in <b>CloudShell</b></span>
+    <span class="chip">No <b>Docker</b> needed</span>
+  </div>
+</header>
+
+<div class="cols">
+<nav class="rail">
+  <div class="rail-title">Phase 1 · Deploy</div>
+  <a href="#s0"><span>00</span>Session setup</a>
+  <a href="#s1"><span>01</span>Model access</a>
+  <a href="#s2"><span>02</span>Observability</a>
+  <a href="#s3"><span>03</span>IAM roles</a>
+  <a href="#s4"><span>04</span>Memory</a>
+  <a href="#s5"><span>05</span>Package to S3</a>
+  <a href="#s6"><span>06</span>Deploy runtime</a>
+  <a href="#s7"><span>07</span>First invoke</a>
+  <a href="#s8"><span>08</span>Verify telemetry</a>
+  <div class="rail-title">Phase 2 · Productionize</div>
+  <a href="#p1"><span>09</span>Real knowledge</a>
+  <a href="#p2"><span>10</span>Prod endpoint</a>
+  <a href="#p3"><span>11</span>Trigger layer</a>
+  <a href="#p4"><span>12</span>Eval gate</a>
+  <a href="#p5"><span>13</span>Guardrails &amp; limits</a>
+  <a href="#p6"><span>14</span>Release loop</a>
+  <div class="rail-title">Reference</div>
+  <a href="#bit"><span>—</span>What bit us</a>
+</nav>
+
+<main>
+
+<figure>
+  <svg viewBox="0 0 980 190" role="img" aria-label="The end-to-end pipeline: account prerequisites, then package and deploy, then verify, then the production layer of endpoint, trigger and gate.">
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+      <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker>
+    </defs>
+    <text x="20" y="26" font-family="var(--mono)" font-size="10" fill="var(--muted)">PHASE 1 — ONE TIME PER ACCOUNT</text>
+    <rect x="20" y="36" width="250" height="60" rx="9" fill="var(--surface-2)" stroke="var(--line)"/>
+    <text x="36" y="60" font-size="13" font-weight="600" fill="currentColor">Account prerequisites</text>
+    <text x="36" y="78" font-size="10.5" fill="var(--muted)" font-family="var(--mono)">model access · transaction search · quotas</text>
+
+    <text x="296" y="26" font-family="var(--mono)" font-size="10" fill="var(--muted)">PHASE 1 — EVERY DEPLOY</text>
+    <rect x="296" y="36" width="190" height="60" rx="9" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="312" y="60" font-size="13" font-weight="600" fill="currentColor">Build &amp; deploy</text>
+    <text x="312" y="78" font-size="10.5" fill="var(--muted)" font-family="var(--mono)">zip → S3 → runtime version</text>
+
+    <rect x="512" y="36" width="170" height="60" rx="9" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="528" y="60" font-size="13" font-weight="600" fill="currentColor">Verify</text>
+    <text x="528" y="78" font-size="10.5" fill="var(--muted)" font-family="var(--mono)">invoke · trace · eval</text>
+
+    <text x="708" y="26" font-family="var(--mono)" font-size="10" fill="var(--accent)">PHASE 2 — PRODUCTION</text>
+    <rect x="708" y="36" width="252" height="60" rx="9" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.4"/>
+    <text x="724" y="60" font-size="13" font-weight="600" fill="currentColor">Promote &amp; serve</text>
+    <text x="724" y="78" font-size="10.5" fill="var(--ink-2)" font-family="var(--mono)">prod endpoint · API · eval gate</text>
+
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <line x1="274" y1="66" x2="292" y2="66"/><line x1="490" y1="66" x2="508" y2="66"/>
+    </g>
+    <line x1="686" y1="66" x2="704" y2="66" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ara)"/>
+
+    <path d="M834 100 V130 H390 V100" fill="none" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ara)"/>
+    <text x="560" y="148" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent)">every change re-enters here — build, verify, gate, promote</text>
+    <text x="20" y="172" font-family="var(--mono)" font-size="10" fill="var(--muted)">The account prerequisites are done once. Everything right of them repeats for the life of the service.</text>
+  </svg>
+  <figcaption>The shape of the whole thing. Steps 00–08 walk the top row; 09–14 build the right-hand box and the loop back.</figcaption>
+</figure>
+
+<div class="phase"><span>Phase 1</span><h2>Get it running</h2></div>
+
+<section class="step" id="s0">
+  <div class="step-head"><div class="num">00</div><div><h3>Open a session</h3><div class="where">CloudShell · every new terminal</div></div></div>
+  <p>CloudShell is already authenticated as your console identity — no <code>aws configure</code>, no access keys. But a reclaimed session drops you outside the virtualenv and the config, and that produces confusing errors three steps later.</p>
+<pre class="term"><span class="p">$</span> cd ~/agentcore-multiagent-poc
+<span class="p">$</span> source .venv/bin/activate          <span class="c"># prompt shows (.venv)</span>
+<span class="p">$</span> source deploy/config.env           <span class="c"># prints Account / Region / Agent</span>
+<span class="p">$</span> aws sts get-caller-identity</pre>
+  <p>First time only, before the two <code>source</code> lines:</p>
+<pre class="term"><span class="p">$</span> unzip agentcore-multiagent-poc.zip && cd agentcore-multiagent-poc
+<span class="p">$</span> python3 -m venv .venv && source .venv/bin/activate
+<span class="p">$</span> pip install -r requirements.txt pytest
+<span class="p">$</span> python -m pytest -q tests/          <span class="c"># proves the agent logic with no AWS at all</span>
+<span class="ok">3 passed</span></pre>
+  <div class="check warnbox"><b>!</b><div>When CloudShell's upload gives you <code>name-1.py</code> or <code>name_2.py</code>, rename it onto the real filename before running. Running the numbered leftover means debugging a bug that was already fixed.</div></div>
+</section>
+
+<section class="step" id="s1">
+  <div class="step-head"><div class="num">01</div><div><h3>Enable the model</h3><div class="where">Console · Bedrock → Model access · us-east-1</div></div></div>
+  <p>Foundation models are opt-in per account <em>and</em> region. No IAM policy overrides this, and the failure arrives at step 07 rather than here.</p>
+  <ol class="doit">
+    <li>Bedrock console, region <strong>us-east-1</strong> → left nav → <strong>Model access</strong></li>
+    <li><strong>Modify model access</strong> → tick <strong>Anthropic Claude Sonnet</strong> → Next → Submit</li>
+  </ol>
+<pre class="term"><span class="p">$</span> aws bedrock list-inference-profiles --region us-east-1 \
+    --query "inferenceProfileSummaries[?contains(inferenceProfileId,'sonnet')].inferenceProfileId"
+<span class="o">[ "us.anthropic.claude-sonnet-4-6" ]</span></pre>
+  <div class="check"><b>✓</b><div>If that id isn't listed, put one that is into <code>MODEL_ID</code> in <code>deploy/config.env</code>.</div></div>
+</section>
+
+<section class="step" id="s2">
+  <div class="step-head"><div class="num">02</div><div><h3>Turn on Transaction Search — and verify it</h3><div class="where">Script or Console · once per account+region</div></div></div>
+  <p>This converts OpenTelemetry spans into searchable span documents in the <code>aws/spans</code> log group. Without it, GenAI Observability is empty and Evaluations fails with <em>"log events alone cannot be evaluated"</em>. Both failures are silent in the sense that nothing points at this setting.</p>
+<pre class="term"><span class="p">$</span> bash deploy/01_enable_observability.sh
+<span class="o">==&gt; Allowing X-Ray to write spans into CloudWatch Logs
+    resource policy in place
+==&gt; Switching trace segment destination to CloudWatch Logs
+==&gt; Waiting for the destination to report CloudWatchLogs (up to 5 min)
+    Destination=CloudWatchLogs Status=ACTIVE</span>
+<span class="ok">Transaction Search is ON.</span>
+
+<span class="c"># the check that actually matters — run it even if the script says it is fine</span>
+<span class="p">$</span> aws xray get-trace-segment-destination
+<span class="ok">{ "Destination": "CloudWatchLogs", "Status": "ACTIVE" }</span></pre>
+  <div class="check dangerbox"><b>✕</b><div><strong>If it says <code>"Destination": "XRay"</code>, Transaction Search is off</strong> no matter what any script printed. The usual cause is the CloudWatch Logs resource policy being too narrow — X-Ray needs the log group ARN both with and without the <code>:*</code> suffix, plus <code>logs:CreateLogStream</code> alongside <code>logs:PutLogEvents</code>. The current script grants exactly that. Console fallback: CloudWatch → Application Signals → Transaction Search.</div></div>
+</section>
+
+<section class="step" id="s3">
+  <div class="step-head"><div class="num">03</div><div><h3>Create the two IAM roles</h3><div class="where">Terminal · <code>deploy/02_create_iam_roles.py</code></div></div></div>
+  <p>One role for the container to run as, one for Evaluations to read traces and call a judge model. Both trusted by the AgentCore service principal with source-account conditions. Re-running updates the policies in place.</p>
+<pre class="term"><span class="p">$</span> python deploy/02_create_iam_roles.py
+<span class="o">  created role multiagent-poc-runtime-role
+  created role multiagent-poc-eval-role
+  waiting 15s for IAM propagation...</span></pre>
+  <div class="check"><b>✓</b><div>Both ARNs land in <code>deploy/state.json</code> — the file that threads every later step together. The 15-second wait isn't superstition: IAM is eventually consistent and creating a runtime with a role the control plane can't see yet is a classic <code>CREATE_FAILED</code>.</div></div>
+</section>
+
+<section class="step" id="s4">
+  <div class="step-head"><div class="num">04</div><div><h3>Create memory</h3><div class="where">Terminal · 2–3 min</div></div></div>
+  <p>One memory resource with three extraction strategies. Short-term (the raw turns) is automatic; the strategies turn conversations into durable preferences, facts and summaries, keyed on <code>actor_id</code>.</p>
+<pre class="term"><span class="p">$</span> python deploy/03_create_memory.py
+<span class="ok">MEMORY_ID=multiagent_poc_memory-AbC123XyZ</span></pre>
+</section>
+
+<section class="step" id="s5">
+  <div class="step-head"><div class="num">05</div><div><h3>Package the agent to S3</h3><div class="where">Terminal · no Docker required</div></div></div>
+  <p>AgentCore runs arm64 only. This downloads arm64 wheels rather than building an arm64 image, so the machine you're sitting at doesn't matter — which is why it works in CloudShell.</p>
+<pre class="term"><span class="p">$</span> python deploy/04b_package_and_upload.py
+<span class="o">==&gt; Installing arm64 dependencies with uv
+==&gt; Zipping (files 644, dirs 755 as the service requires)
+    deployment_package.zip: 38.9 MB zipped / 88.7 MB unzipped
+==&gt; Uploading s3://bedrock-agentcore-code-&lt;account&gt;-us-east-1/...</span>
+<span class="ok">Saved code_bucket / code_key to deploy/state.json</span></pre>
+  <div class="check warnbox"><b>!</b><div>Package <em>after</em> every code edit, not before. A zip built before your change deploys the old code, and the symptom is a fix that appears to have no effect.</div></div>
+</section>
+
+<section class="step" id="s6">
+  <div class="step-head"><div class="num">06</div><div><h3>Deploy the runtime</h3><div class="where">Terminal · 1–3 min</div></div></div>
+<pre class="term"><span class="p">$</span> python deploy/05_deploy_runtime.py
+<span class="o">==&gt; Artifact: code s3://bedrock-agentcore-code-.../deployment_package.zip
+==&gt; Creating runtime research_orchestrator
+  runtime: CREATING
+  runtime: READY</span>
+<span class="ok">READY  arn=arn:aws:bedrock-agentcore:...:runtime/research_orchestrator-XXXX  version=1</span></pre>
+  <div class="check dangerbox"><b>✕</b><div><strong>"Agent artifact type cannot be updated"</strong> means the runtime was created from a container image and you're deploying a zip (or the reverse). The type is fixed at creation. Replace it with <code>--recreate</code>, or give the new one its own name with <code>AGENT_NAME=…</code>. Memory, roles and the dashboard are separate and survive either way.</div></div>
+  <div class="check warnbox"><b>!</b><div>After a recreate the runtime id and ARN change — so the log group changes too. Anything holding the old ARN needs the new one; <code>state.json</code> updates itself.</div></div>
+</section>
+
+<section class="step" id="s7">
+  <div class="step-head"><div class="num">07</div><div><h3>Invoke it</h3><div class="where">Terminal · 40–90 s for a full run</div></div></div>
+<pre class="term"><span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan \
+    "Customer call in 20 min — brief me on AgentCore Memory."
+<span class="o">Invoking am-dhilipan / session-4a91... via DEFAULT  (40-90s)
+  working... 45s</span>
+<span class="o"># AgentCore Memory — What You Need to Know
+...
+_Review score: 8.5/10 after 1 revision(s)._
+
+session_id   : session-4a91…      review scores: [6.0, 8.5]
+latency      : 41320 ms agent-side / 42.1s wall clock
+  orchestrator  41320 ms   researcher  8210 ms
+  writer        12470 ms   reviewer    6350 ms</span></pre>
+  <p><strong>Prove memory works</strong> — the part worth demoing. State a preference, wait ~90 s for extraction, then ask in a <em>new</em> session:</p>
+<pre class="term"><span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan \
+    "For every brief: plain language, no jargon, under 150 words, bullets."
+<span class="c"># wait ~90s, then (no --session, so a brand new session)</span>
+<span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan "Brief me on AgentCore Runtime."
+<span class="ok">→ comes back short and jargon-free: that came from long-term memory</span></pre>
+  <div class="check warnbox"><b>!</b><div>A first run that returns in seconds is usually small talk — the orchestrator answering directly without calling specialists. A real research run makes five model calls and takes 40–90 s. If it appears to hang with no output, check that <code>deploy/common.py</code> sets <code>read_timeout=900</code> and disables client retries; the default 60-second timeout makes boto3 silently re-run the entire workflow.</div></div>
+</section>
+
+<section class="step" id="s8">
+  <div class="step-head"><div class="num">08</div><div><h3>Verify telemetry and evaluation</h3><div class="where">CloudWatch · 2–5 min after an invoke</div></div></div>
+<pre class="term"><span class="p">$</span> aws logs describe-log-groups --log-group-name-prefix aws/spans \
+    --query 'logGroups[].logGroupName'
+<span class="ok">[ "aws/spans" ]        # spans are being ingested — step 02 worked</span>
+
+<span class="p">$</span> python deploy/07_create_dashboard.py
+<span class="p">$</span> python eval/run_eval.py</pre>
+  <ul class="plain">
+    <li><strong>GenAI Observability</strong> → Bedrock AgentCore → your agent → Sessions. The span tree shows one span per agent, with two reviewer spans where a rewrite happened.</li>
+    <li><strong>Dashboard</strong> <code>multiagent-poc-dashboard</code> — per-agent latency and tokens, reviewer score, revision count.</li>
+    <li><strong>Evaluation</strong> — deterministic checks plus built-in judges scoring the real trace, including whether the agents ran in the right order.</li>
+  </ul>
+  <div class="check"><b>✓</b><div>This is the end of Phase 1. The agent runs, you can see inside it, and you can score it. Everything after this is about other people depending on it.</div></div>
+</section>
+
+<div class="phase"><span>Phase 2</span><h2>Make it production</h2></div>
+
+<section class="step" id="p1">
+  <div class="step-head"><div class="num">09</div><div><h3>Replace the knowledge base — do this first</h3><div class="where">Code · <code>agent/tools.py</code></div></div></div>
+  <p>Be clear-eyed about what you have: <code>agent/knowledge_base.json</code> is eight hand-written documents invented for the demo. The pipeline around it is production-shaped; its knowledge is not. Until this is real, everything else is scaffolding.</p>
+  <ul class="plain">
+    <li><strong>Bedrock Knowledge Base</strong> over your S3 documents — <code>tools.py</code> calls <code>bedrock-agent-runtime:Retrieve</code> instead of scanning a JSON file. Roughly 30 lines changed.</li>
+    <li><strong>AgentCore Gateway</strong> if your sources are APIs rather than documents — it turns REST endpoints and Lambdas into agent tools with auth handled.</li>
+    <li>Keep the citation discipline. The <code>[kb-003]</code> tags exist so a human can verify a claim; with real sources they become links, and that is what makes output trustworthy enough to act on.</li>
+  </ul>
+  <div class="check warnbox"><b>!</b><div>Also worth settling now: is "research and report" even your use case? The architecture — orchestrator, specialists, quality gate, memory — transfers to ticket triage or contract review unchanged. The prompts and tools don't. Swapping the task costs a day now and a rewrite later.</div></div>
+</section>
+
+<section class="step" id="p2">
+  <div class="step-head"><div class="num">10</div><div><h3>Create a prod endpoint you move deliberately</h3><div class="where">Terminal · <code>deploy/08_promote_endpoint.py</code></div></div></div>
+  <p>Today every deploy is instantly live, because <code>DEFAULT</code> always follows the newest version. Fine when you're the only caller; wrong the moment users depend on it.</p>
+<figure>
+  <svg viewBox="0 0 900 200" role="img" aria-label="Versions are immutable and the endpoint is a pointer: DEFAULT follows the newest version for testing while the prod endpoint stays on an older version until promoted.">
+    <g font-size="11.5">
+      <rect x="40" y="40" width="150" height="40" rx="7" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="115" y="65" text-anchor="middle" font-weight="600" fill="currentColor">version 2</text>
+      <rect x="40" y="96" width="150" height="40" rx="7" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="115" y="121" text-anchor="middle" font-weight="600" fill="currentColor">version 3</text>
+      <rect x="40" y="152" width="150" height="40" rx="7" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="115" y="177" text-anchor="middle" font-weight="600" fill="currentColor">version 4</text>
+      <text x="40" y="28" font-family="var(--mono)" font-size="10" fill="var(--muted)">IMMUTABLE VERSIONS</text>
+
+      <rect x="330" y="146" width="170" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="415" y="168" text-anchor="middle" font-weight="600" fill="currentColor">DEFAULT</text>
+      <text x="415" y="184" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">always newest · your testing</text>
+
+      <rect x="330" y="90" width="170" height="46" rx="8" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="415" y="112" text-anchor="middle" font-weight="600" fill="currentColor">prod</text>
+      <text x="415" y="128" text-anchor="middle" font-size="10" fill="var(--ink-2)" font-family="var(--mono)">moves only when you promote</text>
+
+      <rect x="610" y="90" width="250" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="735" y="112" text-anchor="middle" font-weight="600" fill="currentColor">Your users</text>
+      <text x="735" y="128" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">one ARN + qualifier, no version numbers</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <line x1="194" y1="172" x2="326" y2="170"/>
+    </g>
+    <line x1="194" y1="116" x2="326" y2="114" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ara)"/>
+    <line x1="504" y1="113" x2="606" y2="113" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ara)"/>
+    <text x="250" y="106" text-anchor="middle" font-family="var(--mono)" font-size="9" fill="var(--accent)">promote</text>
+  </svg>
+  <figcaption>Promotion and rollback are the same one-second operation — repoint the endpoint. No rebuild, no redeploy.</figcaption>
+</figure>
+<pre class="term"><span class="p">$</span> source deploy/config.prod.env
+<span class="p">$</span> python deploy/08_promote_endpoint.py            <span class="c"># show versions and where prod points</span>
+<span class="p">$</span> python deploy/08_promote_endpoint.py --promote  <span class="c"># create prod, point at newest</span>
+
+<span class="c"># test the two paths independently</span>
+<span class="p">$</span> python deploy/06_invoke.py --endpoint DEFAULT --actor me "new version"
+<span class="p">$</span> python deploy/06_invoke.py --endpoint prod    --actor me "what users get"
+
+<span class="p">$</span> python deploy/08_promote_endpoint.py --rollback <span class="c"># undo in seconds</span></pre>
+  <p><code>config.prod.env</code> also pins <code>MODEL_ID</code> explicitly. A model version changing under you alters output quality with no deploy, and your eval baseline stops meaning anything.</p>
+</section>
+
+<section class="step" id="p3">
+  <div class="step-head"><div class="num">11</div><div><h3>Put a front door on it</h3><div class="where">Terminal · <code>production/</code> SAM stack</div></div></div>
+  <p>One constraint shapes this: a brief takes 30–60 s, API Gateway gives up at ~29. So the request path cannot contain the agent call.</p>
+<figure>
+  <svg viewBox="0 0 900 230" role="img" aria-label="Production request flow: client posts to an authenticated HTTP API, a submit Lambda records a job and queues it returning 202, and a worker Lambda invokes the agent and writes results for the client to poll.">
+    <g font-size="11.5">
+      <rect x="20" y="60" width="110" height="52" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="75" y="82" text-anchor="middle" font-weight="600" fill="currentColor">Client</text>
+      <text x="75" y="99" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">Slack · web</text>
+
+      <rect x="168" y="52" width="124" height="68" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="230" y="75" text-anchor="middle" font-weight="600" fill="currentColor">HTTP API</text>
+      <text x="230" y="92" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">JWT auth</text>
+      <text x="230" y="108" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">throttled</text>
+
+      <rect x="330" y="52" width="124" height="68" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="392" y="75" text-anchor="middle" font-weight="600" fill="currentColor">submit λ</text>
+      <text x="392" y="92" text-anchor="middle" font-size="10" fill="var(--accent)" font-family="var(--mono)">202 + job_id</text>
+      <text x="392" y="108" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">milliseconds</text>
+
+      <rect x="492" y="62" width="92" height="48" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="538" y="84" text-anchor="middle" font-weight="600" fill="currentColor">SQS</text>
+      <text x="538" y="100" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">+ DLQ</text>
+
+      <rect x="622" y="52" width="124" height="68" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="684" y="75" text-anchor="middle" font-weight="600" fill="currentColor">worker λ</text>
+      <text x="684" y="92" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">900 s timeout</text>
+      <text x="684" y="108" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">max 10 at once</text>
+
+      <rect x="622" y="158" width="124" height="48" rx="8" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.3"/>
+      <text x="684" y="180" text-anchor="middle" font-weight="600" fill="currentColor">Agent</text>
+      <text x="684" y="196" text-anchor="middle" font-size="10" fill="var(--ink-2)" font-family="var(--mono)">prod endpoint</text>
+
+      <rect x="330" y="158" width="250" height="48" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="455" y="180" text-anchor="middle" font-weight="600" fill="currentColor">DynamoDB + S3</text>
+      <text x="455" y="196" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">job status · the brief</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <line x1="134" y1="86" x2="164" y2="86"/><line x1="296" y1="86" x2="326" y2="86"/>
+      <line x1="458" y1="86" x2="488" y2="86"/><line x1="588" y1="86" x2="618" y2="86"/>
+      <line x1="684" y1="124" x2="684" y2="154"/>
+      <path d="M622 182 H584"/>
+    </g>
+    <path d="M75 116 V182 H326" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+    <text x="150" y="176" font-family="var(--mono)" font-size="9" fill="var(--muted)">GET /briefs/{id}</text>
+  </svg>
+  <figcaption>The API answers in milliseconds; everything slow lives right of the queue. The queue also buys retries, a dead-letter queue and a concurrency cap that doubles as a spend cap.</figcaption>
+</figure>
+<pre class="term"><span class="p">$</span> cd production && sam build
+<span class="p">$</span> sam deploy --guided --parameter-overrides \
+    AgentRuntimeArn=$(jq -r .agent_runtime_arn ../deploy/state.json) \
+    AgentEndpoint=prod UserPoolId=$POOL UserPoolClientId=$CLIENT</pre>
+  <div class="check warnbox"><b>!</b><div>Authenticate with the Cognito <strong>ID token</strong>, not the access token — the API Gateway JWT authorizer matches the <code>aud</code> claim, which only the ID token carries. A <code>401</code> here is almost always this.</div></div>
+  <div class="check dangerbox"><b>✕</b><div><strong><code>actor_id</code> must come from the verified JWT, never the request body.</strong> Long-term memory is keyed on it, so a client that chooses its own actor id can read another user's remembered preferences and facts. One line in the submit Lambda; the difference between per-user memory and a shared bucket anyone can address.</div></div>
+</section>
+
+<section class="step" id="p4">
+  <div class="step-head"><div class="num">12</div><div><h3>Make the eval suite a release gate</h3><div class="where">CI · before every promote</div></div></div>
+  <p>The same input doesn't produce the same output, so you can't test this like normal code. A prompt change that fixes one case quietly breaks three others, and nobody notices until a user does.</p>
+  <ul class="plain">
+    <li>Replace my four cases with <strong>20–50 real requests</strong> and the answers your experts consider good.</li>
+    <li>Baseline the scores <em>before</em> any change ships, then fail the pipeline when they drop.</li>
+    <li>Add a feedback path — thumbs up/down written back to DynamoDB — and feed the bad ones into the eval set. That loop is what makes the system improve rather than drift.</li>
+    <li>Switch on online evaluation so live traffic is sampled too: the inputs you never thought of.</li>
+  </ul>
+  <div class="check"><b>✓</b><div>Judging the trace rather than the answer is what lets <code>ToolSelectionAccuracy</code> and <code>TrajectoryInOrderMatch</code> catch a right answer reached the wrong way — a system about to fail on the next input.</div></div>
+</section>
+
+<section class="step" id="p5">
+  <div class="step-head"><div class="num">13</div><div><h3>Guardrails, limits and retention</h3><div class="where">Before real user data touches it</div></div></div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Control</th><th>Setting</th><th>Why</th></tr>
+    <tr><td>Bedrock Guardrails</td><td>Attached to model calls</td><td>Input and output filtering, PII handling</td></tr>
+    <tr><td>What may enter memory</td><td>Decided and enforced in <code>orchestrator.py</code></td><td>It persists and ends up in future prompts. Customer names? Deal values? Write the rule down.</td></tr>
+    <tr><td>Worker concurrency</td><td>10 parallel sessions</td><td>Hard ceiling on simultaneous agent cost</td></tr>
+    <tr><td>API throttling</td><td>10 rps</td><td>One client can't swamp the service</td></tr>
+    <tr><td>Bedrock quota</td><td>Raised via Service Quotas</td><td>Five model calls per request hits defaults fast</td></tr>
+    <tr><td>AWS Budgets</td><td>Alert on Bedrock spend</td><td>Catches what the other two don't</td></tr>
+    <tr><td>Retention</td><td>Jobs 30 d (TTL) · briefs 90 d (lifecycle) · memory 30 d</td><td>Set to your policy, not the defaults shipped here</td></tr>
+    <tr><td>Environments</td><td>Separate AWS accounts for dev and prod</td><td>Cleanest blast-radius and cost boundary</td></tr>
+  </table>
+  </div>
+</section>
+
+<section class="step" id="p6">
+  <div class="step-head"><div class="num">14</div><div><h3>The release loop, from here on</h3><div class="where">Every change, forever</div></div></div>
+<pre class="term"><span class="c"># 1 · change code or prompts, then package and deploy to a new version</span>
+<span class="p">$</span> python deploy/04b_package_and_upload.py && python deploy/05_deploy_runtime.py
+
+<span class="c"># 2 · test that version through DEFAULT — users are still on prod</span>
+<span class="p">$</span> python deploy/06_invoke.py --endpoint DEFAULT --actor me "..."
+
+<span class="c"># 3 · gate: scores must hold against the baseline</span>
+<span class="p">$</span> python eval/run_eval.py
+
+<span class="c"># 4 · promote. Users move. Rollback is one command if it goes wrong.</span>
+<span class="p">$</span> python deploy/08_promote_endpoint.py --promote</pre>
+  <p><strong>Numbers to watch</strong> once it's live: cost per brief, acceptance rate, p90 latency, and revision rate. A climbing revision rate means the writer prompt or the knowledge base has degraded — it moves before users complain.</p>
+  <p><strong>A sensible pilot:</strong> weeks 1–2, real knowledge base and 5–10 users in Slack, measuring how many briefs get used versus discarded. Weeks 3–4, eval suite built from that traffic, alarms wired to a real channel, cost per brief established. Then expand — the architecture scales without redesign.</p>
+</section>
+
+<section class="step" id="bit">
+  <div class="step-head"><div class="num">↯</div><div><h3>What actually bit us</h3><div class="where">Real failures from this build, not hypotheticals</div></div></div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+    <tr><td>Evals: "log events alone cannot be evaluated"; GenAI Observability empty</td><td>Transaction Search never enabled — the resource policy was too narrow and the error was swallowed</td><td>Step 02. Verify <code>Destination: CloudWatchLogs</code> directly.</td></tr>
+    <tr><td>Invoke appears to hang, then runs forever</td><td>botocore's 60 s read timeout fires mid-flight and boto3 silently retries, re-running the whole workflow</td><td><code>read_timeout=900</code>, retries off, in <code>common.py</code></td></tr>
+    <tr><td><code>DashboardInvalidInputError</code>, 6 validation errors</td><td>SEARCH expressions: object not nested in an inner array, hyphenated namespace unquoted, <code>MetricName=("a" OR "b")</code> invalid</td><td>Current <code>07_create_dashboard.py</code></td></tr>
+    <tr><td>"Agent artifact type cannot be updated"</td><td>Container vs code artifact is fixed at creation</td><td><code>--recreate</code>, or a new <code>AGENT_NAME</code></td></tr>
+    <tr><td><code>ResourceNotFoundException</code> on deploy after a delete</td><td><code>state.json</code> still pointed at the deleted runtime</td><td>Current script handles it; or <code>jq 'del(.agent_runtime_id,...)'</code></td></tr>
+    <tr><td><code>ModuleNotFoundError: boto3</code></td><td>CloudShell reclaimed the session; the venv wasn't active</td><td>Step 00 — re-source both lines in every new terminal</td></tr>
+    <tr><td>A fix that appears to do nothing</td><td>Ran a numbered upload leftover (<code>name_2.py</code>), or packaged before the edit landed</td><td>Rename onto the real filename; re-run step 05 after edits</td></tr>
+  </table>
+  </div>
+</section>
+
+<footer>
+  Companion to <code>agentcore-multiagent-poc.zip</code> · commands match the scripts in <code>deploy/</code>, <code>eval/</code> and <code>production/</code>
+</footer>
+</main>
+</div>
+</div>
+
+</body>
+</html>
