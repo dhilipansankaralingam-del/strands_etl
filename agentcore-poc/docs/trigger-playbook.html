@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+<title>Agent Trigger Playbook</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#EDF1F5; --surface:#FFFFFF; --surface-2:#F6F8FA;
+    --ink:#0C1520; --ink-2:#324055; --muted:#65758A;
+    --line:#D2DAE4; --line-soft:#E4EAF1;
+    --accent:#0B6E6E; --accent-ink:#075151; --accent-wash:#DDF0EE;
+    --ok:#0E7A42; --warn:#9A5B00; --danger:#B42318;
+    --wire:#8FA0B4; --wire-fill:#EDF1F5; --shadow:0 1px 2px rgba(12,21,32,.06),0 8px 24px rgba(12,21,32,.06);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+      --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+      --line:#27333F; --line-soft:#1F2932;
+      --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+      --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A;
+      --wire:#63768C; --wire-fill:#101820; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+    --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+    --line:#27333F; --line-soft:#1F2932;
+    --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+    --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A;
+    --wire:#63768C; --wire-fill:#101820; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto;padding-inline:16px;padding-block:28px 64px}
+  h1,h2,h3{text-wrap:balance;margin:0}
+  a{color:var(--accent-ink);text-underline-offset:3px}
+  code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:5px;padding:1px 5px}
+
+  header.top{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:26px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  h1{font-size:clamp(28px,5vw,42px);font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  .lede{color:var(--ink-2);max-width:66ch;margin-top:12px;font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:var(--ink-2)}
+  .chip b{color:var(--ink);font-weight:600}
+
+  .part{margin:34px 0 14px;display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .part span{font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+  .part h2{font-size:23px;font-weight:600;letter-spacing:-.01em}
+
+  section.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:22px;margin-bottom:20px;box-shadow:var(--shadow);scroll-margin-top:20px}
+  section.card > h3{font-size:18px;font-weight:600;margin-bottom:4px}
+  .where{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:10px}
+  .card p, .card li{color:var(--ink-2)}
+  .card p{margin:10px 0}
+  ol.doit{margin:12px 0 4px;padding-left:20px}
+  ol.doit li{margin:7px 0}
+  ul.plain{margin:10px 0;padding-left:19px}
+  ul.plain li{margin:6px 0}
+
+  pre{font-family:var(--mono);font-size:12.6px;line-height:1.6;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:9px;padding:13px 14px;overflow-x:auto;margin:12px 0}
+  pre .p{color:var(--accent)}pre .c{color:var(--muted)}pre .o{color:var(--ink-2)}pre .ok{color:var(--ok)}
+  .term{background:#0C1520;border-color:#0C1520;color:#D6E2EE}
+  .term .p{color:#49BFB2}.term .c{color:#7E8FA3}.term .o{color:#B9C8D8}.term .ok{color:#5FCE8E}
+
+  svg text{font-family:var(--sans)}
+  svg [font-family*="--mono"]{font-family:var(--mono)}
+  svg [fill="var(--muted)"]{fill:var(--muted)} svg [stroke="var(--muted)"]{stroke:var(--muted)}
+  svg [fill="var(--ink-2)"]{fill:var(--ink-2)} svg [stroke="var(--ink-2)"]{stroke:var(--ink-2)}
+  svg [fill="var(--accent)"]{fill:var(--accent)} svg [stroke="var(--accent)"]{stroke:var(--accent)}
+  svg [fill="var(--accent-ink)"]{fill:var(--accent-ink)}
+  svg [fill="var(--accent-wash)"]{fill:var(--accent-wash)}
+  svg [fill="var(--surface)"]{fill:var(--surface)} svg [fill="var(--surface-2)"]{fill:var(--surface-2)}
+  svg [fill="var(--line)"]{fill:var(--line)} svg [stroke="var(--line)"]{stroke:var(--line)}
+  svg [stroke="var(--line-soft)"]{stroke:var(--line-soft)}
+  svg [fill="var(--wire)"]{fill:var(--wire)} svg [stroke="var(--wire)"]{stroke:var(--wire)}
+  svg [fill="var(--ok)"]{fill:var(--ok)} svg [stroke="var(--ok)"]{stroke:var(--ok)}
+  svg [fill="var(--warn)"]{fill:var(--warn)} svg [stroke="var(--warn)"]{stroke:var(--warn)}
+  svg [fill="var(--danger)"]{fill:var(--danger)} svg [stroke="var(--danger)"]{stroke:var(--danger)}
+
+  figure{margin:18px 0 6px}
+  figure svg{display:block;width:100%;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  figcaption{font-size:12.5px;color:var(--muted);margin-top:8px;font-family:var(--mono)}
+
+  .why{margin:14px 0 4px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:9px;padding:12px 15px;background:var(--surface-2)}
+  .why summary{cursor:pointer;font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);list-style:none}
+  .why summary::-webkit-details-marker{display:none}
+  .why summary::after{content:" —"} .why[open] summary::after{content:" ⌄"}
+  .why summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+  .why[open] summary{margin-bottom:6px}
+  .why p{margin:9px 0;font-size:14.2px;color:var(--ink-2)}
+  .why ul{margin:9px 0;padding-left:19px;font-size:14.2px;color:var(--ink-2)}
+  .why strong{color:var(--ink);font-weight:600}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:14px 0}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-2)}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .tablewrap{overflow-x:auto}
+  .check{display:flex;gap:9px;align-items:flex-start;margin-top:14px;padding:11px 13px;border:1px dashed var(--line);border-radius:9px;background:var(--surface-2);font-size:14px;color:var(--ink-2)}
+  .check b{color:var(--ok)} .warnbox{border-left:3px solid var(--warn)} .warnbox b{color:var(--warn)}
+  footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">Multi-agent POC · running on AgentCore · us-east-1</div>
+  <h1>Agent Trigger Playbook</h1>
+  <p class="lede">One concrete use case, driven by hand from start to finish — then the same agent put behind a production front door that real users can call without holding AWS credentials.</p>
+  <div class="chips">
+    <span class="chip">Use case <b>pre-call brief</b></span>
+    <span class="chip">Demo run <b>~4 min</b></span>
+    <span class="chip">Prod stack <b>SAM, 13 resources</b></span>
+    <span class="chip">Code in <b>production/</b></span>
+  </div>
+</header>
+
+<div class="part"><span>The use case</span><h2>A pre-call brief for account managers</h2></div>
+
+<section class="card">
+  <p><strong>The situation.</strong> An account manager has a customer call in twenty minutes and needs a short, accurate brief on a topic the customer raised — written the way <em>they</em> like to read it. Today that's fifteen minutes of searching an internal wiki and a rushed skim.</p>
+  <p><strong>What the agent team does with it.</strong> The researcher pulls the relevant facts out of the knowledge base and tags each one with its source. The writer turns those into a structured brief for the stated audience. The reviewer scores it and sends it back once if it's thin. The orchestrator remembers that this particular AM wants plain language and 150 words, so the second brief already arrives in their format without being asked.</p>
+  <p><strong>Why it fits this architecture.</strong> It's a task where the answer must be grounded (hence a researcher with a real source of truth and citations), where quality varies enough to need a gate (hence the reviewer), and where the same person comes back repeatedly (hence memory). Strip any one of those away and a single prompt would do.</p>
+  <div class="check"><b>✓</b><div>Everything below runs against the deployment you already have — no changes to the agent code.</div></div>
+</section>
+
+<div class="part"><span>Part 1</span><h2>Start to end, by hand</h2></div>
+
+<figure>
+  <svg viewBox="0 0 900 470" role="img" aria-label="Sequence diagram of one brief: the caller invokes the runtime, the orchestrator reads memory then calls researcher, writer and reviewer, a low score triggers one rewrite, the report returns, and memory extraction plus trace ingestion happen afterwards.">
+    <defs>
+      <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker>
+    </defs>
+    <g font-size="11.5" font-weight="600">
+      <rect x="20" y="16" width="120" height="30" rx="7" fill="var(--surface-2)" stroke="var(--line)"/><text x="80" y="36" text-anchor="middle" fill="currentColor">You (CLI)</text>
+      <rect x="180" y="16" width="150" height="30" rx="7" fill="var(--accent-wash)" stroke="var(--accent)"/><text x="255" y="36" text-anchor="middle" fill="currentColor">Orchestrator</text>
+      <rect x="370" y="16" width="150" height="30" rx="7" fill="var(--surface-2)" stroke="var(--line)"/><text x="445" y="36" text-anchor="middle" fill="currentColor">Specialists</text>
+      <rect x="560" y="16" width="140" height="30" rx="7" fill="var(--surface-2)" stroke="var(--line)"/><text x="630" y="36" text-anchor="middle" fill="currentColor">Memory</text>
+      <rect x="740" y="16" width="140" height="30" rx="7" fill="var(--surface-2)" stroke="var(--line)"/><text x="810" y="36" text-anchor="middle" fill="currentColor">CloudWatch</text>
+    </g>
+    <g stroke="var(--line)" stroke-width="1" stroke-dasharray="3 4">
+      <line x1="80" y1="50" x2="80" y2="440"/><line x1="255" y1="50" x2="255" y2="440"/>
+      <line x1="445" y1="50" x2="445" y2="440"/><line x1="630" y1="50" x2="630" y2="440"/>
+      <line x1="810" y1="50" x2="810" y2="440"/>
+    </g>
+    <g font-family="var(--mono)" font-size="9.5" fill="var(--muted)">
+      <text x="14" y="76">0s</text><text x="14" y="126">1s</text><text x="14" y="186">9s</text>
+      <text x="14" y="246">22s</text><text x="14" y="306">28s</text><text x="14" y="366">41s</text><text x="14" y="416">+60s</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1.3" marker-end="url(#a1)" fill="none">
+      <line x1="80" y1="72" x2="250" y2="72"/>
+      <line x1="255" y1="102" x2="626" y2="102"/>
+      <line x1="255" y1="152" x2="441" y2="152"/>
+      <line x1="255" y1="212" x2="441" y2="212"/>
+      <line x1="255" y1="272" x2="441" y2="272"/>
+      <line x1="255" y1="332" x2="441" y2="332"/>
+    </g>
+    <line x1="250" y1="392" x2="84" y2="392" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#a2)"/>
+    <line x1="255" y1="422" x2="626" y2="422" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a2)"/>
+    <line x1="450" y1="422" x2="806" y2="422" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a2)"/>
+    <g font-size="10.5" fill="var(--ink-2)">
+      <text x="92" y="66">invoke · prompt + actor_id + session_id</text>
+      <text x="265" y="96">retrieve preferences for this actor</text>
+      <text x="265" y="146">researcher → knowledge base, cited notes</text>
+      <text x="265" y="206">writer → first draft</text>
+      <text x="265" y="266" fill="var(--danger)">reviewer → 6.0, "add the retention detail"</text>
+      <text x="265" y="326">writer (rewrite) → reviewer → 8.5 approve</text>
+      <text x="92" y="386" fill="var(--accent)" font-weight="600">brief + score + per-agent timings</text>
+      <text x="265" y="412" font-size="10">turns saved · extraction runs ~1 min later</text>
+      <text x="648" y="412" font-size="10">spans arrive 2–5 min later</text>
+    </g>
+  </svg>
+  <figcaption>One brief, 41 seconds. The two reviewer arrows are the quality gate; everything below the last solid line happens after you already have your answer.</figcaption>
+</figure>
+
+<section class="card">
+  <h3>Run it</h3>
+  <div class="where">CloudShell or laptop · project root · <code>source deploy/config.env</code> first</div>
+<pre class="term"><span class="c"># 1 · Tell it who you are and how you read. This is the turn that teaches it.</span>
+<span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan \
+    "I'm an account manager. For every brief: plain language, no jargon, under 150 words, bullets."
+
+<span class="c"># 2 · Wait ~90s for long-term extraction, then ask in a NEW session (no --session)</span>
+<span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan \
+    "Customer call in 20 min — brief me on AgentCore Memory and what it costs us to run."
+<span class="o"># AgentCore Memory — What You Need to Know
+
+- Stores two kinds of memory: the live conversation, and durable facts it
+  learns about each user [kb-003]
+- …
+
+_Review score: 8.5/10 after 1 revision(s)._
+
+----------------------------------------------------------------------
+session_id   : session-4a91…   actor_id: am-dhilipan
+review scores: [6.0, 8.5]      revisions: 1
+latency      : 41320 ms
+  orchestrator    41320 ms  in=9120  out=1450
+  researcher       8210 ms  in=1980  out=612
+  writer          12470 ms  in=2640  out=980
+  reviewer         6350 ms  in=3110  out=214</span>
+
+<span class="c"># 3 · Follow-up in the SAME session — short-term memory carries the draft</span>
+<span class="p">$</span> python deploy/06_invoke.py --actor am-dhilipan --session session-4a91… \
+    "Add one line on what happens if the customer asks about data retention."</pre>
+  <p>The thing to notice in step 2 is what you <em>didn't</em> say: no mention of plain language, bullets, or 150 words. That came out of long-term memory, in a session that had never seen the preference stated.</p>
+  <details class="why" open><summary>Why this is the demo to show</summary>
+  <p>It exercises all four capabilities in one pass, and each is visible in the output rather than asserted. <strong>Multi-agent</strong> — the per-agent breakdown shows four distinct workers. <strong>Quality gate</strong> — <code>[6.0, 8.5]</code> with one revision is the reviewer actually rejecting a draft, not decoration. <strong>Memory</strong> — step 2 proves long-term recall across sessions, step 3 proves short-term recall within one. <strong>Observability and evaluation</strong> — steps 4 and 5 below turn the same run into a trace and a score.</p>
+  <p>Run step 1 twice if you're demoing live and the preference doesn't take: extraction is asynchronous, and 90 seconds is a floor, not a guarantee.</p>
+  </details>
+</section>
+
+<section class="card">
+  <h3>Then watch what it left behind</h3>
+  <div class="where">CloudWatch · 2–5 minutes after the run</div>
+  <ol class="doit">
+    <li><strong>The trace.</strong> GenAI Observability → Bedrock AgentCore → your agent → Sessions → the session id printed above. You get the span tree: orchestrator at the top, one span per specialist beneath it, tool calls beneath those, and two reviewer spans where the rewrite happened. Click any span for its prompt, tool input and token count.</li>
+    <li><strong>The dashboard.</strong> <code>multiagent-poc-dashboard</code> — per-agent latency and tokens, reviewer score, revision count. After one run it's a single point; after the eval suite it's a line.</li>
+    <li><strong>The score.</strong> <code>python eval/run_eval.py --only memory-preference-recall</code> re-runs the memory case and has AgentCore judge the real trace — including whether the agents ran in the right order.</li>
+  </ol>
+  <div class="check warnbox"><b>!</b><div>Spans take a few minutes to land. An empty Sessions list right after an invoke is ingestion lag, not a broken deployment.</div></div>
+</section>
+
+<div class="part"><span>Part 2</span><h2>Triggering it in production</h2></div>
+
+<section class="card">
+  <h3>The constraint that shapes everything</h3>
+  <p>A brief takes 30–60 seconds. API Gateway gives up at about 29. So the request path cannot contain the agent call — not as a tuning problem, as an architecture one.</p>
+  <p>The answer is to split the two: the API validates, records a job and returns <code>202</code> with a job id in milliseconds; a worker Lambda with a 15-minute ceiling does the slow call and writes the result somewhere the caller can fetch it. The queue in between buys retries, a dead-letter queue for failures, and a concurrency ceiling that doubles as a spend cap.</p>
+</section>
+
+<figure>
+  <svg viewBox="0 0 900 430" role="img" aria-label="Production architecture: an authenticated client posts to an HTTP API, the submit Lambda records a job and queues it, a worker Lambda invokes the AgentCore runtime and writes the result to DynamoDB, S3 and SNS, telemetry flows to CloudWatch, and repeated failures land in a dead-letter queue.">
+    <g font-size="11.5">
+      <rect x="20" y="96" width="120" height="58" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="80" y="120" text-anchor="middle" font-weight="600" fill="currentColor">Client</text>
+      <text x="80" y="138" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">web · Slack · CLI</text>
+
+      <rect x="180" y="86" width="128" height="78" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="244" y="110" text-anchor="middle" font-weight="600" fill="currentColor">HTTP API</text>
+      <text x="244" y="128" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">JWT authorizer</text>
+      <text x="244" y="145" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">throttled 10 rps</text>
+
+      <rect x="348" y="86" width="120" height="78" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="408" y="110" text-anchor="middle" font-weight="600" fill="currentColor">submit λ</text>
+      <text x="408" y="128" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">validate · record</text>
+      <text x="408" y="145" text-anchor="middle" font-size="10" fill="var(--accent)" font-family="var(--mono)">202 + job_id</text>
+
+      <rect x="508" y="96" width="96" height="58" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="556" y="120" text-anchor="middle" font-weight="600" fill="currentColor">SQS</text>
+      <text x="556" y="138" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">3 tries</text>
+
+      <rect x="644" y="86" width="120" height="78" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="704" y="110" text-anchor="middle" font-weight="600" fill="currentColor">worker λ</text>
+      <text x="704" y="128" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">900 s timeout</text>
+      <text x="704" y="145" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">max 10 at once</text>
+
+      <rect x="300" y="216" width="340" height="84" rx="9" fill="var(--surface-2)" stroke="var(--line)" stroke-dasharray="5 4"/>
+      <text x="312" y="234" font-size="9.5" fill="var(--muted)" font-family="var(--mono)">RESULT STORE</text>
+      <rect x="312" y="242" width="102" height="46" rx="6" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="363" y="262" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">DynamoDB</text>
+      <text x="363" y="278" text-anchor="middle" font-size="9.5" fill="var(--muted)" font-family="var(--mono)">status · TTL</text>
+      <rect x="424" y="242" width="102" height="46" rx="6" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="475" y="262" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">S3</text>
+      <text x="475" y="278" text-anchor="middle" font-size="9.5" fill="var(--muted)" font-family="var(--mono)">brief markdown</text>
+      <rect x="536" y="242" width="92" height="46" rx="6" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="582" y="262" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">SNS</text>
+      <text x="582" y="278" text-anchor="middle" font-size="9.5" fill="var(--muted)" font-family="var(--mono)">"ready"</text>
+
+      <rect x="664" y="216" width="172" height="84" rx="9" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="750" y="244" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">AgentCore Runtime</text>
+      <text x="750" y="263" text-anchor="middle" font-size="10" fill="var(--ink-2)">orchestrator + 3 specialists</text>
+      <text x="750" y="281" text-anchor="middle" font-size="10" fill="var(--ink-2)">memory · Bedrock</text>
+
+      <rect x="300" y="336" width="340" height="64" rx="9" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="470" y="360" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">CloudWatch</text>
+      <text x="470" y="378" text-anchor="middle" font-size="10" fill="var(--muted)">traces · metrics · alarms · online evaluations</text>
+
+      <rect x="664" y="336" width="182" height="64" rx="9" fill="var(--surface)" stroke="var(--danger)"/>
+      <text x="755" y="360" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">Dead-letter queue</text>
+      <text x="755" y="378" text-anchor="middle" font-size="10" fill="var(--danger)" font-family="var(--mono)">alarms on depth</text>
+    </g>
+
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#a1)">
+      <line x1="144" y1="125" x2="176" y2="125"/>
+      <line x1="312" y1="125" x2="344" y2="125"/>
+      <line x1="472" y1="125" x2="504" y2="125"/>
+      <line x1="608" y1="125" x2="640" y2="125"/>
+      <line x1="704" y1="168" x2="704" y2="212"/>
+      <path d="M664 168 V190 H330 V212"/>
+    </g>
+    <path d="M80 158 V250 H296" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#a1)"/>
+    <path d="M750 304 V318 H470 V332" fill="none" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a2)"/>
+    <path d="M764 150 H868 V368 H850" fill="none" stroke="var(--danger)" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#a1)"/>
+
+    <g font-family="var(--mono)" font-size="9" fill="var(--muted)">
+      <text x="150" y="118">POST /briefs</text>
+      <text x="712" y="196">invoke · 30–60s</text>
+      <text x="340" y="185">write result + notify</text>
+      <text x="92" y="244">GET /briefs/{id}</text>
+      <text x="480" y="314" fill="var(--accent)">OTel spans</text>
+      <text x="862" y="210" text-anchor="end" fill="var(--danger)">3 failures</text>
+    </g>
+  </svg>
+  <figcaption>The API never waits on the agent. Everything slow lives to the right of the queue.</figcaption>
+</figure>
+
+<section class="card">
+  <h3>The two calls a client makes</h3>
+<pre class="term"><span class="c"># submit — returns in milliseconds</span>
+<span class="p">$</span> curl -X POST $API/briefs -H "Authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' \
+    -d '{"prompt":"Brief me on AgentCore Memory for a customer call."}'
+<span class="o">{"job_id":"7c2f…","session_id":"brief-7c2f…","status":"QUEUED","poll":"/briefs/7c2f…"}</span>
+
+<span class="c"># poll — QUEUED → RUNNING → SUCCEEDED</span>
+<span class="p">$</span> curl $API/briefs/7c2f… -H "Authorization: Bearer $TOKEN"
+<span class="ok">{"job_id":"7c2f…","status":"SUCCEEDED","review_score":"8.5","revisions":1,
+ "latency_ms":41320,"result_s3":"s3://…/briefs/am-dhilipan/7c2f….md"}</span>
+
+<span class="c"># follow-up turn: pass session_id back and you stay in the same conversation</span>
+<span class="p">$</span> curl -X POST $API/briefs -H "Authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' \
+    -d '{"prompt":"Shorten to 5 bullets.","session_id":"brief-7c2f…"}'</pre>
+  <p>Deploy it with <code>sam deploy --guided</code> from <code>production/</code>, passing the runtime ARN out of <code>deploy/state.json</code> and your Cognito pool. Thirteen resources, one command.</p>
+</section>
+
+<section class="card">
+  <h3>Identity, sessions and actors</h3>
+  <p>Three identifiers do different jobs, and conflating them causes either broken memory or a data leak.</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Identifier</th><th>Comes from</th><th>What it controls</th></tr>
+    <tr><td><code>actor_id</code></td><td><strong>The verified JWT's <code>sub</code> claim</strong> — never the request body</td><td>Whose long-term memory is read and written. Client-supplied means any user can read another's preferences and facts.</td></tr>
+    <tr><td><code>runtimeSessionId</code></td><td>Generated per conversation; echoed back by the client for follow-ups</td><td>Which microVM serves the request, which short-term memory it sees, and which spans group into one trace. Minimum 33 characters.</td></tr>
+    <tr><td><code>job_id</code></td><td>Generated per request</td><td>The polling handle. Ownership is checked on read, and a mismatch returns 404 rather than 403 so ids can't be probed.</td></tr>
+  </table>
+  </div>
+  <details class="why" open><summary>Why the actor id is the one to get right</summary>
+  <p>It is the only one of the three with a security boundary attached. Long-term memory is keyed on it, so it is effectively a tenant identifier — and it arrives as application data in the payload, which means the runtime cannot enforce anything about it. The enforcement has to happen in your code, once, at the edge: take it from the token the authorizer already verified and never read it from the body. A single line, and the difference between per-user memory and a shared bucket anyone can address.</p>
+  </details>
+</section>
+
+<section class="card">
+  <h3>Four ways to trigger the same runtime</h3>
+<figure>
+  <svg viewBox="0 0 880 250" role="img" aria-label="Four trigger sources converge on the same agent runtime: a user request through the API, an EventBridge schedule, an event such as an S3 upload or CRM webhook, and a direct JWT call from a backend service.">
+    <g font-size="11.5">
+      <rect x="20" y="16" width="230" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="36" y="36" font-weight="600" fill="currentColor">User request</text>
+      <text x="36" y="52" font-size="10" fill="var(--muted)" font-family="var(--mono)">API → queue → worker · interactive</text>
+
+      <rect x="20" y="74" width="230" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="36" y="94" font-weight="600" fill="currentColor">Schedule</text>
+      <text x="36" y="110" font-size="10" fill="var(--muted)" font-family="var(--mono)">EventBridge cron · daily brief</text>
+
+      <rect x="20" y="132" width="230" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="36" y="152" font-weight="600" fill="currentColor">Event</text>
+      <text x="36" y="168" font-size="10" fill="var(--muted)" font-family="var(--mono)">S3 upload · CRM webhook · new ticket</text>
+
+      <rect x="20" y="190" width="230" height="46" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="36" y="210" font-weight="600" fill="currentColor">Service to service</text>
+      <text x="36" y="226" font-size="10" fill="var(--muted)" font-family="var(--mono)">direct call, JWT verified by the runtime</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#a1)">
+      <path d="M254 39 C380 39 420 110 470 118"/>
+      <path d="M254 97 C380 97 420 112 470 120"/>
+      <path d="M254 155 C380 155 420 134 470 126"/>
+      <path d="M254 213 C380 213 420 140 470 130"/>
+    </g>
+    <rect x="474" y="86" width="180" height="76" rx="9" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.4"/>
+    <text x="564" y="112" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">One runtime</text>
+    <text x="564" y="131" text-anchor="middle" font-size="10.5" fill="var(--ink-2)">same artifact, same memory</text>
+    <text x="564" y="149" text-anchor="middle" font-size="10.5" fill="var(--ink-2)">same traces and evaluations</text>
+    <line x1="658" y1="124" x2="700" y2="124" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+    <g font-size="10.5">
+      <rect x="704" y="86" width="156" height="76" rx="9" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="782" y="110" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Outputs</text>
+      <text x="782" y="128" text-anchor="middle" fill="var(--muted)">S3 · DynamoDB</text>
+      <text x="782" y="146" text-anchor="middle" fill="var(--muted)">SNS · Slack</text>
+    </g>
+    <text x="20" y="248" font-family="var(--mono)" font-size="9.5" fill="var(--muted)">Each source sets its own actor_id and session_id; nothing else changes.</text>
+  </svg>
+  <figcaption>The agent doesn't know or care what triggered it — which is why adding a trigger is a Lambda, not a redesign.</figcaption>
+</figure>
+  <p>The scheduled variant ships in the template, disabled. Flip <code>Enabled: true</code> on the <code>Weekday0700</code> event and a brief lands every weekday at 07:00 UTC with no human involved. The event-driven variant is the same worker with a different event source — an S3 <code>ObjectCreated</code> notification or an EventBridge rule on your CRM.</p>
+</section>
+
+<section class="card">
+  <h3>Before you call it production</h3>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Concern</th><th>Do this</th></tr>
+    <tr><td>Blue-green releases</td><td>Create a named runtime endpoint for prod and point the worker's <code>AGENT_ENDPOINT</code> at it. Deploys create a new version; promotion is repointing the endpoint, and rollback is repointing it back.</td></tr>
+    <tr><td>Release gate</td><td>Run <code>eval/run_eval.py</code> in CI against the new version and fail the pipeline if scores drop. A prompt change that reads fine and scores worse is the failure mode this catches.</td></tr>
+    <tr><td>Quality in the wild</td><td>Turn on online evaluation, and alarm on average <code>ReviewScore</code> — the template includes that alarm at a threshold of 7.</td></tr>
+    <tr><td>Cost ceiling</td><td>Worker concurrency (10) caps parallel sessions; API throttling caps request rate; AWS Budgets on the Bedrock spend catches what neither does.</td></tr>
+    <tr><td>Safety</td><td>Attach a Bedrock Guardrail to the model calls for input/output filtering, and decide what may enter memory — it persists, and it will end up in future prompts.</td></tr>
+    <tr><td>Data retention</td><td>Job rows expire by DynamoDB TTL (30 days), briefs by S3 lifecycle (90), memory events by <code>event_expiry_days</code> (30). Set these to your policy, not mine.</td></tr>
+    <tr><td>Multi-environment</td><td>Separate accounts for dev and prod, with the runtime, memory and bucket per account. Same artifact, different environment variables.</td></tr>
+    <tr><td>Secrets and config</td><td>Config in runtime environment variables; anything sensitive in Secrets Manager read at startup. Nothing in the image or the zip.</td></tr>
+    <tr><td>Supply chain</td><td>Pin dependency versions (the requirements file does), scan the image on push, and rebuild deliberately rather than on every deploy.</td></tr>
+  </table>
+  </div>
+</section>
+
+<div class="part"><span>Part 3</span><h2>How a change reaches production</h2></div>
+
+<figure>
+  <svg viewBox="0 0 880 210" role="img" aria-label="Promotion pipeline: a commit triggers packaging, deploys to a dev runtime version, runs the evaluation suite as a gate, and on passing repoints the production endpoint; failing scores stop the pipeline.">
+    <g font-size="11.5">
+      <rect x="16" y="66" width="124" height="60" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="78" y="92" text-anchor="middle" font-weight="600" fill="currentColor">Commit</text>
+      <text x="78" y="110" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">prompt or code</text>
+
+      <rect x="176" y="66" width="124" height="60" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="238" y="92" text-anchor="middle" font-weight="600" fill="currentColor">Package</text>
+      <text x="238" y="110" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">zip → S3 · unit tests</text>
+
+      <rect x="336" y="66" width="124" height="60" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="398" y="92" text-anchor="middle" font-weight="600" fill="currentColor">Dev version</text>
+      <text x="398" y="110" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">new runtime version</text>
+
+      <rect x="496" y="58" width="140" height="76" rx="8" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="566" y="84" text-anchor="middle" font-weight="600" fill="currentColor">Eval gate</text>
+      <text x="566" y="102" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">run_eval.py</text>
+      <text x="566" y="119" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">scores vs. baseline</text>
+
+      <rect x="700" y="36" width="164" height="56" rx="8" fill="var(--accent-wash)" stroke="var(--accent)"/>
+      <text x="782" y="60" text-anchor="middle" font-weight="600" fill="currentColor">Prod endpoint</text>
+      <text x="782" y="78" text-anchor="middle" font-size="10" fill="var(--ink-2)" font-family="var(--mono)">repointed · rollback = repoint</text>
+
+      <rect x="700" y="112" width="164" height="52" rx="8" fill="var(--surface)" stroke="var(--danger)"/>
+      <text x="782" y="134" text-anchor="middle" font-weight="600" fill="currentColor">Blocked</text>
+      <text x="782" y="151" text-anchor="middle" font-size="10" fill="var(--danger)" font-family="var(--mono)">scores regressed</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#a1)">
+      <line x1="144" y1="96" x2="172" y2="96"/><line x1="304" y1="96" x2="332" y2="96"/><line x1="464" y1="96" x2="492" y2="96"/>
+    </g>
+    <path d="M640 82 C670 82 676 66 696 64" fill="none" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#a2)"/>
+    <path d="M640 112 C670 112 676 134 696 136" fill="none" stroke="var(--danger)" stroke-width="1.2" marker-end="url(#a1)"/>
+    <text x="646" y="58" font-family="var(--mono)" font-size="9" fill="var(--accent)">pass</text>
+    <text x="646" y="156" font-family="var(--mono)" font-size="9" fill="var(--danger)">fail</text>
+    <text x="16" y="186" font-family="var(--mono)" font-size="9.5" fill="var(--muted)">The gate is what makes prompt changes reviewable: a diff plus a score, not a diff plus an opinion.</text>
+  </svg>
+  <figcaption>Versions are immutable, the endpoint is a pointer — so promotion and rollback are the same one-second operation.</figcaption>
+</figure>
+
+<footer>
+  Code for Part 2 lives in <code>production/</code> — <code>template.yaml</code>, <code>lambda_submit.py</code>, <code>lambda_worker.py</code>, and a README with the deploy and token commands. Part 1 needs nothing new.
+</footer>
+</div>
+
+</body>
+</html>

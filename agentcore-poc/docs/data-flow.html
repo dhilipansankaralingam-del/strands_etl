@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+<title>Agent Data Flow</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#EDF1F5; --surface:#FFFFFF; --surface-2:#F6F8FA;
+    --ink:#0C1520; --ink-2:#324055; --muted:#65758A;
+    --line:#D2DAE4; --line-soft:#E4EAF1;
+    --accent:#0B6E6E; --accent-ink:#075151; --accent-wash:#DDF0EE;
+    --ok:#0E7A42; --warn:#9A5B00; --danger:#B42318; --wire:#8FA0B4;
+    --shadow:0 1px 2px rgba(12,21,32,.06),0 8px 24px rgba(12,21,32,.06);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+      --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+      --line:#27333F; --line-soft:#1F2932;
+      --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+      --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --wire:#63768C;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0B1117; --surface:#141C24; --surface-2:#19232C;
+    --ink:#E7EDF4; --ink-2:#BCC9D8; --muted:#8FA0B2;
+    --line:#27333F; --line-soft:#1F2932;
+    --accent:#49BFB2; --accent-ink:#9EE3DA; --accent-wash:#12312F;
+    --ok:#4BC17E; --warn:#D79A3A; --danger:#E5736A; --wire:#63768C;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding-inline:16px;padding-block:28px 64px}
+  h1,h2,h3{text-wrap:balance;margin:0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:5px;padding:1px 5px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  h1{font-size:clamp(28px,5vw,40px);font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  .lede{color:var(--ink-2);max-width:68ch;margin-top:12px;font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:var(--ink-2)}
+  .chip b{color:var(--ink);font-weight:600}
+
+  section.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:18px;box-shadow:var(--shadow);scroll-margin-top:20px}
+  section.card h2{font-size:19px;font-weight:600;margin-bottom:3px}
+  .sub{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-bottom:12px}
+  .card p,.card li{color:var(--ink-2)}
+  .card p{margin:10px 0}
+  ul.plain{margin:10px 0;padding-left:19px} ul.plain li{margin:6px 0}
+
+  pre{font-family:var(--mono);font-size:12.4px;line-height:1.6;background:#0C1520;border:1px solid #0C1520;border-radius:9px;padding:13px 14px;overflow-x:auto;margin:12px 0;color:#D6E2EE}
+  pre .p{color:#49BFB2}pre .c{color:#7E8FA3}pre .o{color:#B9C8D8}
+
+  svg text{font-family:var(--sans)}
+  svg [font-family*="--mono"]{font-family:var(--mono)}
+  svg [fill="var(--muted)"]{fill:var(--muted)} svg [stroke="var(--muted)"]{stroke:var(--muted)}
+  svg [fill="var(--ink-2)"]{fill:var(--ink-2)}
+  svg [fill="var(--accent)"]{fill:var(--accent)} svg [stroke="var(--accent)"]{stroke:var(--accent)}
+  svg [fill="var(--accent-wash)"]{fill:var(--accent-wash)}
+  svg [fill="var(--surface)"]{fill:var(--surface)} svg [fill="var(--surface-2)"]{fill:var(--surface-2)}
+  svg [stroke="var(--line)"]{stroke:var(--line)} svg [fill="var(--line)"]{fill:var(--line)}
+  svg [fill="var(--warn)"]{fill:var(--warn)} svg [stroke="var(--warn)"]{stroke:var(--warn)}
+  svg [fill="var(--danger)"]{fill:var(--danger)} svg [stroke="var(--danger)"]{stroke:var(--danger)}
+  svg [fill="var(--ok)"]{fill:var(--ok)} svg [stroke="var(--ok)"]{stroke:var(--ok)}
+  figure{margin:18px 0 6px}
+  figure svg{display:block;width:100%;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  figcaption{font-size:12.5px;color:var(--muted);margin-top:8px;font-family:var(--mono)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:13px 0}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-2)}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  td:first-child{color:var(--ink);font-weight:500}
+  .tablewrap{overflow-x:auto}
+  .note{display:flex;gap:9px;margin-top:13px;padding:12px 14px;border:1px dashed var(--line);border-radius:9px;background:var(--surface-2);font-size:14px;color:var(--ink-2)}
+  .note b{color:var(--ok)}
+  .warnbox{border-left:3px solid var(--warn)} .warnbox b{color:var(--warn)}
+  .dangerbox{border-left:3px solid var(--danger)} .dangerbox b{color:var(--danger)}
+  footer{margin-top:28px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">research_orchestrator · data flow &amp; residency</div>
+  <h1>Agent Data Flow</h1>
+  <p class="lede">Where every piece of data goes, how long it stays, who can read it, and how to delete it. Written for a security review — the uncomfortable parts are stated plainly rather than buried.</p>
+  <div class="chips">
+    <span class="chip">All data <b>in-account</b></span>
+    <span class="chip">Region <b>us-east-1</b></span>
+    <span class="chip"><b>6</b> places data rests</span>
+    <span class="chip">Longest retention <b>90 days</b></span>
+  </div>
+</header>
+
+<section class="card">
+  <h2>The short version</h2>
+  <p>A user's question travels through an authenticated API into a managed AWS runtime, is sent to a model inside AWS, and comes back as a written brief. Nothing leaves the AWS account or the region at any point — there is no third-party API call in the path.</p>
+  <p>The question, the model's answers, the agents' intermediate reasoning, and extracted facts about the user all come to rest in six AWS stores, each with its own retention. <strong>Trace data includes the full prompt and response text by default</strong> — that's the fact most likely to matter to a reviewer, and it's covered in detail below.</p>
+</section>
+
+<figure>
+  <svg viewBox="0 0 1000 430" role="img" aria-label="Data flow: a user prompt passes through the API and queue to the agent runtime, which exchanges prompts and completions with Bedrock, reads and writes memory, and emits traces containing message content to CloudWatch; the finished brief is stored in S3 with status in DynamoDB.">
+    <defs>
+      <marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+      <marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker>
+      <marker id="d3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--warn)"/></marker>
+    </defs>
+
+    <rect x="150" y="14" width="840" height="404" rx="12" fill="none" stroke="var(--accent)" stroke-dasharray="6 5" opacity=".7"/>
+    <text x="166" y="34" font-family="var(--mono)" font-size="10.5" fill="var(--accent)">YOUR AWS ACCOUNT · us-east-1 — nothing crosses this boundary</text>
+
+    <g font-size="11.5">
+      <rect x="14" y="120" width="118" height="56" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="73" y="143" text-anchor="middle" font-weight="600" fill="currentColor">User</text>
+      <text x="73" y="160" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">question</text>
+
+      <rect x="176" y="112" width="124" height="72" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="238" y="135" text-anchor="middle" font-weight="600" fill="currentColor">HTTP API</text>
+      <text x="238" y="152" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">JWT verified</text>
+      <text x="238" y="168" text-anchor="middle" font-size="10" fill="var(--accent)" font-family="var(--mono)">actor_id from token</text>
+
+      <rect x="340" y="112" width="112" height="72" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="396" y="135" text-anchor="middle" font-weight="600" fill="currentColor">Queue + λ</text>
+      <text x="396" y="152" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">prompt in</text>
+      <text x="396" y="168" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">message body</text>
+
+      <rect x="492" y="104" width="190" height="88" rx="9" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="587" y="130" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">AgentCore Runtime</text>
+      <text x="587" y="149" text-anchor="middle" font-size="10.5" fill="var(--ink-2)">4 agents · isolated microVM</text>
+      <text x="587" y="167" text-anchor="middle" font-size="10.5" fill="var(--ink-2)">no disk persistence</text>
+      <text x="587" y="183" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">session ends → gone</text>
+
+      <rect x="760" y="104" width="220" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="870" y="127" text-anchor="middle" font-weight="600" fill="currentColor">Amazon Bedrock</text>
+      <text x="870" y="144" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">prompts + completions · not retained</text>
+    </g>
+
+    <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#d1)">
+      <line x1="136" y1="148" x2="172" y2="148"/>
+      <line x1="304" y1="148" x2="336" y2="148"/>
+      <line x1="456" y1="148" x2="488" y2="148"/>
+    </g>
+    <line x1="686" y1="132" x2="756" y2="132" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#d2)"/>
+    <text x="721" y="124" text-anchor="middle" font-family="var(--mono)" font-size="9" fill="var(--accent)">in-AWS</text>
+
+    <g font-size="11.5">
+      <rect x="492" y="236" width="190" height="64" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="587" y="259" text-anchor="middle" font-weight="600" fill="currentColor">AgentCore Memory</text>
+      <text x="587" y="276" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">turns · preferences · facts</text>
+      <text x="587" y="292" text-anchor="middle" font-size="10" fill="var(--ok)" font-family="var(--mono)">30-day expiry</text>
+
+      <rect x="760" y="236" width="220" height="64" rx="8" fill="var(--surface)" stroke="var(--warn)"/>
+      <text x="870" y="259" text-anchor="middle" font-weight="600" fill="currentColor">CloudWatch</text>
+      <text x="870" y="276" text-anchor="middle" font-size="10" fill="var(--warn)" font-family="var(--mono)">spans INCLUDE message content</text>
+      <text x="870" y="292" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">logs · traces · metrics</text>
+
+      <rect x="226" y="236" width="226" height="64" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="339" y="259" text-anchor="middle" font-weight="600" fill="currentColor">S3 + DynamoDB</text>
+      <text x="339" y="276" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">the brief · job status</text>
+      <text x="339" y="292" text-anchor="middle" font-size="10" fill="var(--ok)" font-family="var(--mono)">90 / 30-day expiry</text>
+
+      <rect x="760" y="336" width="220" height="60" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+      <text x="870" y="359" text-anchor="middle" font-weight="600" fill="currentColor">Evaluations</text>
+      <text x="870" y="376" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">reads spans · judge model scores</text>
+    </g>
+
+    <line x1="587" y1="196" x2="587" y2="232" stroke="currentColor" stroke-width="1.3" marker-end="url(#d1)"/>
+    <text x="596" y="218" font-family="var(--mono)" font-size="9" fill="var(--muted)">read / write</text>
+    <path d="M660 196 C740 196 820 210 850 232" fill="none" stroke="var(--warn)" stroke-width="1.4" marker-end="url(#d3)"/>
+    <text x="800" y="208" font-family="var(--mono)" font-size="9" fill="var(--warn)">traces</text>
+    <path d="M520 196 C460 196 380 210 352 232" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#d1)"/>
+    <text x="400" y="208" text-anchor="middle" font-family="var(--mono)" font-size="9" fill="var(--muted)">the brief</text>
+    <line x1="870" y1="304" x2="870" y2="332" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#d1)"/>
+    <path d="M222 268 C150 268 73 230 73 180" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#d1)"/>
+    <text x="120" y="250" font-family="var(--mono)" font-size="9" fill="var(--muted)">poll → brief</text>
+  </svg>
+  <figcaption>Six stores, one boundary. The amber path is the one worth reading closely — see the next section.</figcaption>
+</figure>
+
+<section class="card">
+  <h2>Where data comes to rest</h2>
+  <div class="sub">Everything persistent, with retention and reach</div>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Store</th><th>What's in it</th><th>Encryption</th><th>Retention</th><th>Who can read it</th></tr>
+    <tr><td>AgentCore Memory</td><td>Every conversation turn, plus extracted preferences, facts and session summaries, keyed on <code>actor_id</code></td><td>AWS-managed, at rest</td><td><strong>30 days</strong> (<code>event_expiry_days</code>)</td><td>Runtime role; anyone with console access to the memory resource</td></tr>
+    <tr><td>CloudWatch Logs — runtime group</td><td>Application logs, plus agent spans. <strong>Includes prompt and response text</strong></td><td>AWS-managed; CMK optional</td><td>Never expires unless set</td><td>Anyone with CloudWatch Logs read in the account</td></tr>
+    <tr><td>CloudWatch Logs — <code>aws/spans</code></td><td>Structured span documents for all traced services</td><td>AWS-managed; CMK optional</td><td>Never expires unless set</td><td>Same</td></tr>
+    <tr><td>S3 results bucket</td><td>The generated brief, as markdown</td><td>SSE-S3, public access blocked</td><td><strong>90 days</strong> (lifecycle rule)</td><td>Worker role; bucket policy holders</td></tr>
+    <tr><td>DynamoDB jobs table</td><td>job id, user id, session id, status, <strong>the prompt text</strong>, timings, review score</td><td>SSE enabled</td><td><strong>30 days</strong> (TTL on <code>expires_at</code>)</td><td>Submit/status/worker roles</td></tr>
+    <tr><td>S3 code bucket</td><td>The deployment zip — code only, no user data</td><td>SSE-S3, public access blocked</td><td>Until replaced</td><td>Deployment role; runtime role reads it</td></tr>
+  </table>
+  </div>
+  <div class="note"><b>✓</b><div><strong>Amazon Bedrock does not retain your prompts or completions</strong> for model training or any other purpose. The model call is an in-account, in-region API request.</div></div>
+  <div class="note warnbox"><b>!</b><div>Two log groups have <strong>no expiry by default</strong>, and they're the ones holding message content. Set retention explicitly — <code>aws logs put-retention-policy --log-group-name &lt;name&gt; --retention-in-days 30</code> — or they accumulate indefinitely.</div></div>
+</section>
+
+<section class="card">
+  <h2>The part a reviewer will focus on: content in traces</h2>
+  <div class="sub">Stated plainly, because the default is permissive</div>
+  <p>Agent observability works by recording what each agent did — and "what it did" includes the text it sent and received. By default the tracing library emits these as span attributes, <strong>unredacted</strong>:</p>
+  <ul class="plain">
+    <li><code>gen_ai.input.messages</code> — user messages, and tool inputs and results fed to the model</li>
+    <li><code>gen_ai.output.messages</code> — model and agent responses</li>
+    <li><code>gen_ai.system_instructions</code> — system prompts</li>
+    <li><code>gen_ai.tool.call.arguments</code> and <code>gen_ai.tool.call.result</code> — tool inputs and outputs</li>
+  </ul>
+  <p>So if a user pastes customer details into a question, that text lands in CloudWatch Logs, readable by anyone with logs access to the account, with no expiry unless you set one.</p>
+  <p><strong>Three levers, with an honest trade-off:</strong></p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Lever</th><th>Effect</th><th>Cost</th></tr>
+    <tr><td>Log retention policy</td><td>Bounds how long content persists</td><td>None — do this regardless</td></tr>
+    <tr><td><code>AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true</code></td><td>Stops AgentCore extracting message content into telemetry</td><td>Trace tree still shows structure and timings, but you lose the ability to read what was said when debugging</td></tr>
+    <tr><td>Span attribute redaction<br><span style="font-family:var(--mono);font-size:11px">OTEL_SEMCONV_STABILITY_OPT_IN</span></td><td>Redacts the sensitive attributes above, exempting any you explicitly list</td><td>Content-based evaluators (Faithfulness, Helpfulness) need the text — redact everything and quality scoring stops working</td></tr>
+  </table>
+  </div>
+  <div class="note dangerbox"><b>✕</b><div>The trade-off is real and worth a deliberate decision: <strong>the same content that makes traces useful for debugging and quality scoring is the content a reviewer will want restricted.</strong> A middle path that works well — keep content on, set a short log retention (7–14 days), and restrict CloudWatch Logs read access to the team that operates the service.</div></div>
+</section>
+
+<section class="card">
+  <h2>What memory keeps, and why it's different</h2>
+  <p>Memory is the one store that <em>derives</em> new data rather than just holding what passed through. After a conversation, the service asynchronously extracts durable records into three namespaces:</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Namespace</th><th>Holds</th><th>Example</th></tr>
+    <tr><td><code>/preferences/{actorId}/</code></td><td>How this person likes to be served</td><td>"plain language, under 150 words, bullets"</td></tr>
+    <tr><td><code>/facts/{actorId}/</code></td><td>Things they told the agent about themselves or their work</td><td>"is an account manager covering EMEA"</td></tr>
+    <tr><td><code>/summaries/{actorId}/{sessionId}/</code></td><td>The gist of a past conversation</td><td>"asked about memory pricing ahead of a customer call"</td></tr>
+  </table>
+  </div>
+  <p>Two consequences worth naming. First, <strong>this data outlives the conversation</strong> and is injected into future prompts — so whatever enters memory will be seen again, by the same user, later. Second, it is keyed on <code>actor_id</code>, which makes that identifier a privacy boundary: a client that could choose its own actor id could read another person's preferences and facts. That is why it is taken from the verified JWT and never from the request body.</p>
+  <div class="note warnbox"><b>!</b><div>Decide what may enter memory <em>before</em> real users arrive, and enforce it in <code>orchestrator.py</code>. Customer names? Deal values? Health or HR details? Memory is the store most likely to accumulate something you didn't intend to keep.</div></div>
+</section>
+
+<section class="card">
+  <h2>Deleting one person's data</h2>
+  <div class="sub">The runbook a privacy request will need</div>
+  <p>Everything is keyed on <code>actor_id</code> or <code>user_id</code>, so erasure is tractable — but it touches four stores and no single command does it.</p>
+<pre><span class="c"># 1 · memory: list what exists for this actor, then delete the records</span>
+<span class="p">$</span> aws bedrock-agentcore list-actors --memory-id &lt;MEMORY_ID&gt;
+<span class="p">$</span> aws bedrock-agentcore list-sessions --memory-id &lt;MEMORY_ID&gt; --actor-id &lt;ACTOR&gt;
+<span class="p">$</span> aws bedrock-agentcore list-memory-records --memory-id &lt;MEMORY_ID&gt; \
+      --namespace "/preferences/&lt;ACTOR&gt;/"
+<span class="p">$</span> aws bedrock-agentcore delete-memory-record --memory-id &lt;MEMORY_ID&gt; --memory-record-id &lt;ID&gt;
+<span class="c">#    repeat for /facts/ and /summaries/ ; delete-event removes raw turns</span>
+
+<span class="c"># 2 · the briefs themselves (prefixed by user)</span>
+<span class="p">$</span> aws s3 rm s3://&lt;RESULTS_BUCKET&gt;/briefs/&lt;ACTOR&gt;/ --recursive
+
+<span class="c"># 3 · job rows (includes the prompt text)</span>
+<span class="p">$</span> aws dynamodb scan --table-name &lt;JOBS_TABLE&gt; \
+      --filter-expression "user_id = :u" \
+      --expression-attribute-values '{":u":{"S":"&lt;ACTOR&gt;"}}' \
+      --query 'Items[].job_id.S' --output text
+<span class="c">#    then delete-item for each</span>
+
+<span class="c"># 4 · logs and traces — the hard one</span>
+<span class="c">#    CloudWatch Logs cannot delete selected events. Options: wait out the</span>
+<span class="c">#    retention window, or delete the whole log stream/group.</span></pre>
+  <div class="note dangerbox"><b>✕</b><div><strong>Step 4 is the gap.</strong> CloudWatch Logs has no per-record deletion, so content captured in traces can only be removed by letting retention expire or dropping whole streams. If you're subject to erasure obligations, this is the strongest argument for either a short retention window or switching content capture off.</div></div>
+</section>
+
+<section class="card">
+  <h2>Data in transit</h2>
+  <ul class="plain">
+    <li><strong>User → API:</strong> HTTPS, JWT bearer token verified by API Gateway before any code runs. No AWS credentials on the client.</li>
+    <li><strong>Inside AWS:</strong> every hop is an AWS API call over TLS — Lambda to SQS, Lambda to AgentCore, AgentCore to Bedrock, everything to CloudWatch.</li>
+    <li><strong>Egress:</strong> the runtime is in <code>PUBLIC</code> network mode, which gives it outbound internet. Today it calls only AWS endpoints. Switch to VPC mode if policy requires egress control or the agent must reach private resources.</li>
+    <li><strong>Cross-region:</strong> the model id <code>us.anthropic.claude-sonnet-4-6</code> is a cross-region inference profile — requests may be served from another <em>US</em> region. If data residency is restricted to us-east-1, use a single-region model id instead.</li>
+  </ul>
+  <div class="note warnbox"><b>!</b><div>That last point catches people out. A cross-region profile buys throughput and fewer throttles, at the cost of a residency guarantee narrower than "the US". Worth raising before a reviewer finds it.</div></div>
+</section>
+
+<section class="card">
+  <h2>Summary for the review form</h2>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>Does data leave AWS?</td><td>No. No third-party API is called. Bedrock is an in-account, in-region AWS service.</td></tr>
+    <tr><td>Does data leave the region?</td><td>Storage, no. Model inference may be served from another US region via the cross-region profile — changeable.</td></tr>
+    <tr><td>Is it used to train models?</td><td>No. Bedrock does not retain prompts or completions.</td></tr>
+    <tr><td>Is it encrypted at rest?</td><td>Yes, all six stores. Customer-managed keys available for Memory and CloudWatch Logs.</td></tr>
+    <tr><td>What's the longest anything persists?</td><td>90 days (briefs in S3). Logs are unbounded until you set retention — do set it.</td></tr>
+    <tr><td>Can one user see another's data?</td><td>No. Memory is keyed on an identifier taken from the verified token; job reads check ownership and return 404 on mismatch.</td></tr>
+    <tr><td>Can a user's data be deleted on request?</td><td>Yes for memory, S3 and DynamoDB. Log and trace content can only be aged out or dropped wholesale.</td></tr>
+    <tr><td>Is PII filtered?</td><td>Not yet. Bedrock Guardrails is the control, and should be attached before real user data flows.</td></tr>
+  </table>
+  </div>
+</section>
+
+<footer>
+  Companion to the deployment guide · reflects <code>research_orchestrator</code> as deployed, not an aspirational design
+</footer>
+</div>
+
+</body>
+</html>

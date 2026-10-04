@@ -1,0 +1,6 @@
+# Versions tested offline on 2026-09-19. Bump deliberately.
+strands-agents==1.56.0
+bedrock-agentcore==1.23.1
+aws-opentelemetry-distro==0.20.0   # ADOT: ships traces/metrics to CloudWatch (AgentCore Observability)
+boto3>=1.43.0
+pydantic>=2.7
