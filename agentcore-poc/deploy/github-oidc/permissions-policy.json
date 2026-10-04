@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "AgentCoreControlPlane", "Effect": "Allow",
+     "Action": ["bedrock-agentcore:*"], "Resource": "*"},
+    {"Sid": "CodeBucket", "Effect": "Allow",
+     "Action": ["s3:CreateBucket", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject", "s3:PutObject"],
+     "Resource": ["arn:aws:s3:::bedrock-agentcore-code-770457183855-us-east-1",
+                  "arn:aws:s3:::bedrock-agentcore-code-770457183855-us-east-1/*"]},
+    {"Sid": "ReadRuntimeRole", "Effect": "Allow",
+     "Action": ["iam:GetRole"], "Resource": "arn:aws:iam::770457183855:role/multiagent-poc-runtime-role"},
+    {"Sid": "PassRuntimeRole", "Effect": "Allow",
+     "Action": ["iam:PassRole"], "Resource": "arn:aws:iam::770457183855:role/multiagent-poc-runtime-role",
+     "Condition": {"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}}}
+  ]
+}

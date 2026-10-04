@@ -1,0 +1,68 @@
+name: agentcore-deploy
+
+# PR opened/updated -> tests + deploy to the DEV runtime (research_orchestrator_dev)
+# merge to main     -> tests + deploy to the PROD runtime and move the `prod` endpoint
+on:
+  pull_request:
+    paths: ["agentcore-poc/**", ".github/workflows/agentcore-deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["agentcore-poc/**", ".github/workflows/agentcore-deploy.yml"]
+
+permissions:
+  id-token: write   # OIDC token for AWS - no stored AWS keys
+  contents: read
+
+# One deploy per environment at a time; never cancel one mid-flight.
+concurrency:
+  group: agentcore-${{ github.event_name == 'push' && 'prod' || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  ROLE_ARN: arn:aws:iam::770457183855:role/strands-etl-github-deploy
+  PROJECT: multiagent-poc
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: agentcore-poc}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q tests/
+
+  deploy:
+    needs: test
+    # Fork PRs get no OIDC token and must never reach the AWS account.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: agentcore-poc}}
+    env:
+      AGENT_NAME: ${{ github.event_name == 'push' && 'research_orchestrator' || 'research_orchestrator_dev' }}
+      ENDPOINT_NAME: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: pip install -r requirements.txt
+      - name: Load role + memory IDs from AWS
+        run: python deploy/ci_bootstrap_state.py
+      - name: Package and upload zip
+        run: python deploy/04b_package_and_upload.py
+      - name: Deploy runtime ($AGENT_NAME)
+        run: python deploy/05_deploy_runtime.py --code
+      - name: Promote prod endpoint (main only)
+        if: github.event_name == 'push'
+        run: python deploy/08_promote_endpoint.py --promote
+      - name: Summary
+        run: |
+          echo "### Deployed \`$AGENT_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"- runtime: \(.agent_runtime_arn)\n- version: \(.agent_runtime_version)"' deploy/state.json >> "$GITHUB_STEP_SUMMARY"

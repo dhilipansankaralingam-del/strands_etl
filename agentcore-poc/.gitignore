@@ -17,3 +17,4 @@ __pycache__/
 # SAM
 production/.aws-sam/
 samconfig.toml
+.venv/
